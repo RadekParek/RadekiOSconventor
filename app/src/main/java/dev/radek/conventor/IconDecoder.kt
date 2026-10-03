@@ -42,6 +42,10 @@ internal object IconDecoder {
                 null
             }
         }
+        val head = file.inputStream().use { input -> ByteArray(8).also { input.read(it) } }
+        val isPng = head.contentEquals(signature)
+        val isJpeg = head.size >= 3 && head[0] == 0xff.toByte() && head[1] == 0xd8.toByte() && head[2] == 0xff.toByte()
+        if (!isPng && !isJpeg) return null
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(file.path, bounds)
         if (bounds.outWidth !in 1..MAX_DIMENSION || bounds.outHeight !in 1..MAX_DIMENSION) return null

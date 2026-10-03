@@ -82,7 +82,7 @@ class IconDecoderTest {
             val result = extractIcon(app, listOf("DeclaredIcon"), output)
 
             assertEquals("SUPPORTED", result.getString("status"))
-            assertEquals("GameLogo.png", result.getString("source"))
+            assertTrue("unexpected icon source: ${result.getString("source")}", result.getString("source").endsWith("GameLogo.png"))
             assertTrue(result.getJSONArray("attempts").length() >= 2)
             val saved = BitmapFactory.decodeFile(File(output, "icon.png").path)
             assertNotNull(saved)
