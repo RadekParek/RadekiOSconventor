@@ -104,7 +104,7 @@ std::string arch(uint64_t c, uint64_t s) {
     if (c == 0x100000c)
         return s == 2 ? "arm64e" : "arm64";
     if (c == 12)
-        return s == 11 ? "armv7s" : s == 9 ? "armv7" : "arm32-unknown";
+        return s == 11 ? "armv7s" : s == 9 ? "armv7" : s == 6 ? "armv6" : "arm32-unknown";
     return "unsupported";
 }
 Json relocations(Reader &r, size_t off, size_t n) {
@@ -568,111 +568,140 @@ Json thin(Reader r) {
                 j["exports"].push(s);
         }
     }
+    j["bindDecodingComplete"] = true;
+    j["bindDiagnostics"] = array();
     for (auto &b : binds) {
-        size_t p = b.off, end = p + b.size;
-        std::string symbol;
-        int64_t ordinal = 0, addend = 0;
-        uint64_t seg = 0, address = 0, type = 1, flags = 0;
-        const uint64_t pointerSize = wide ? 8 : 4;
-        auto advance = [&](uint64_t amount) {
-            if (amount > std::numeric_limits<uint64_t>::max() - address)
-                throw std::runtime_error("dyld bind address overflow");
-            address += amount;
-        };
-        auto emit = [&]() {
-            r.consume(symbol.size() + 64);
-            if (symbol.empty() || seg >= j["segments"].items.size())
-                throw std::runtime_error("bind without symbol or valid segment");
-            auto vmSize = std::stoull(j["segments"].items[seg].fields["vmSize"].value);
-            uint64_t width = type == 1 ? pointerSize : 4;
-            if (address > vmSize || width > vmSize - address)
-                throw std::runtime_error("dyld bind outside segment");
-            Json im = object();
-            im["name"] = symbol;
-            im["ordinal"] = signedNumber(ordinal);
-            im["addend"] = signedNumber(addend);
-            im["segment"] = seg;
-            im["offset"] = address;
-            im["type"] = type;
-            im["flags"] = flags;
-            im["stream"] = b.kind;
-            j["imports"].push(im);
-        };
-        while (p < end) {
-            auto byte = r.u(p++, 1), op = byte & 0xf0, imm = byte & 15;
-            switch (op) {
-            case 0:
-                if (b.kind != "lazyBind")
-                    p = end;
-                else {
-                    symbol.clear();
-                    ordinal = addend = 0;
-                    seg = address = flags = 0;
-                    type = 1;
+        try {
+            size_t p = b.off, end = p + b.size;
+            std::string symbol;
+            int64_t ordinal = 0, addend = 0;
+            uint64_t seg = 0, address = 0, type = 1, flags = 0;
+            bool segmentSet = false;
+            const uint64_t pointerSize = wide ? 8 : 4;
+            auto segmentSize = [&]() -> uint64_t {
+                if (!segmentSet || seg >= j["segments"].items.size())
+                    throw std::runtime_error("bind uses an invalid segment index");
+                return std::stoull(j["segments"].items[seg].fields["vmSize"].value);
+            };
+            auto advance = [&](uint64_t amount) {
+                auto vmSize = segmentSize();
+                // Bind addresses are segment-relative offsets. Check the segment bound
+                // before adding so malformed ULEBs cannot wrap the 64-bit cursor.
+                if (address > vmSize || amount > vmSize - address)
+                    throw std::runtime_error("dyld bind address outside segment");
+                address += amount;
+            };
+            auto emit = [&]() {
+                r.consume(symbol.size() + 64);
+                if (symbol.empty())
+                    throw std::runtime_error("bind without symbol");
+                auto vmSize = segmentSize();
+                uint64_t width = type == 1 ? pointerSize : 4;
+                if (address > vmSize || width > vmSize - address)
+                    throw std::runtime_error("dyld bind outside segment");
+                Json im = object();
+                im["name"] = symbol;
+                im["ordinal"] = signedNumber(ordinal);
+                im["addend"] = signedNumber(addend);
+                im["segment"] = seg;
+                im["offset"] = address;
+                im["type"] = type;
+                im["flags"] = flags;
+                im["stream"] = b.kind;
+                j["imports"].push(im);
+            };
+            while (p < end) {
+                auto byte = r.u(p++, 1), op = byte & 0xf0, imm = byte & 15;
+                switch (op) {
+                case 0:
+                    if (b.kind != "lazyBind")
+                        p = end;
+                    else {
+                        symbol.clear();
+                        ordinal = addend = 0;
+                        seg = address = flags = 0;
+                        segmentSet = false;
+                        type = 1;
+                    }
+                    break;
+                case 0x10:
+                    ordinal = int64_t(imm);
+                    break;
+                case 0x20: {
+                    auto value = r.leb(p, end);
+                    if (value > uint64_t(std::numeric_limits<int64_t>::max()))
+                        throw std::runtime_error("bind ordinal overflow");
+                    ordinal = int64_t(value);
+                    break;
                 }
-                break;
-            case 0x10:
-                ordinal = int64_t(imm);
-                break;
-            case 0x20: {
-                auto value = r.leb(p, end);
-                if (value > uint64_t(std::numeric_limits<int64_t>::max()))
-                    throw std::runtime_error("bind ordinal overflow");
-                ordinal = int64_t(value);
-                break;
-            }
-            case 0x30:
-                ordinal = imm ? int8_t(imm | 0xf0) : 0;
-                break;
-            case 0x40:
-                symbol = r.str(p, end);
-                p += symbol.size() + 1;
-                flags = imm;
-                break;
-            case 0x50:
-                if (imm < 1 || imm > 3)
-                    throw std::runtime_error("invalid bind type");
-                type = imm;
-                break;
-            case 0x60:
-                addend = r.sleb(p, end);
-                break;
-            case 0x70:
-                seg = imm;
-                address = r.leb(p, end);
-                break;
-            case 0x80:
-                advance(r.leb(p, end));
-                break;
-            case 0x90:
-                emit();
-                advance(pointerSize);
-                break;
-            case 0xa0:
-                emit();
-                advance(r.leb(p, end));
-                advance(pointerSize);
-                break;
-            case 0xb0:
-                emit();
-                advance((imm + 1) * pointerSize);
-                break;
-            case 0xc0: {
-                auto count = r.leb(p, end), skip = r.leb(p, end);
-                if (count > 100000)
-                    throw std::runtime_error("bind repetition limit");
-                for (uint64_t n = 0; n < count; n++) {
+                case 0x30:
+                    ordinal = imm ? int8_t(imm | 0xf0) : 0;
+                    break;
+                case 0x40:
+                    symbol = r.str(p, end);
+                    p += symbol.size() + 1;
+                    flags = imm;
+                    break;
+                case 0x50:
+                    if (imm < 1 || imm > 3)
+                        throw std::runtime_error("invalid bind type");
+                    type = imm;
+                    break;
+                case 0x60:
+                    addend = r.sleb(p, end);
+                    break;
+                case 0x70: {
+                    seg = imm;
+                    address = r.leb(p, end);
+                    segmentSet = true;
+                    if (address > segmentSize())
+                        throw std::runtime_error("dyld bind address outside segment");
+                    break;
+                }
+                case 0x80:
+                    advance(r.leb(p, end));
+                    break;
+                case 0x90:
                     emit();
-                    advance(skip);
                     advance(pointerSize);
+                    break;
+                case 0xa0:
+                    emit();
+                    advance(r.leb(p, end));
+                    advance(pointerSize);
+                    break;
+                case 0xb0:
+                    emit();
+                    advance((imm + 1) * pointerSize);
+                    break;
+                case 0xc0: {
+                    auto count = r.leb(p, end), skip = r.leb(p, end);
+                    if (count > 100000)
+                        throw std::runtime_error("bind repetition limit");
+                    for (uint64_t n = 0; n < count; n++) {
+                        emit();
+                        advance(skip);
+                        advance(pointerSize);
+                    }
+                    break;
                 }
-                break;
+                case 0xd0:
+                    throw std::runtime_error("threaded dyld bind opcode unsupported");
+                default:
+                    throw std::runtime_error("invalid bind opcode");
+                }
             }
-            case 0xd0:
-                throw std::runtime_error("threaded dyld bind opcode unsupported");
-            default:
-                throw std::runtime_error("invalid bind opcode");
-            }
+        } catch (const std::exception &e) {
+            // Keep load commands, segments and other streams available for analysis,
+            // but make an incomplete binding table explicit. Conversion backends must
+            // fail closed whenever this flag is false.
+            j["bindDecodingComplete"] = false;
+            Json diagnostic = object();
+            diagnostic["stream"] = b.kind;
+            diagnostic["offset"] = uint64_t(b.off);
+            diagnostic["size"] = uint64_t(b.size);
+            diagnostic["message"] = e.what();
+            j["bindDiagnostics"].push(diagnostic);
         }
     }
     if (exportSize) {

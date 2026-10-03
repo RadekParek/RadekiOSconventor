@@ -76,11 +76,22 @@ class AndroidIntegrationTests(unittest.TestCase):
 
     def test_arm64_real_native_signed_apk(self):
         self.convert("arm64", macho())
+        # No compatibility shim is needed when the proven standalone entry never
+        # calls the linked framework; the generated ELF must remain import-free.
+        self.convert(
+            "arm64-linked-unused-framework",
+            macho(
+                imports=["_UIApplicationMain"],
+                dependencies=["/System/Library/Frameworks/UIKit.framework/UIKit"],
+            ),
+        )
 
     def test_arm32_thumb_thumb2_real_native_apks(self):
         cases = [
             ("armv7", macho(cpu=12, subtype=9)),
             ("armv7s", macho(cpu=12, subtype=11)),
+            ("armv6", macho(cpu=12, subtype=6)),
+            ("armv6-thumb", macho(struct.pack("<HH", 0x202A, 0x4770), cpu=12, subtype=6, thumb=True)),
             ("thumb", macho(struct.pack("<HH", 0x202A, 0x4770), cpu=12, subtype=9, thumb=True)),
             ("thumb2", macho(struct.pack("<HHH", 0xF240, 0x002A, 0x4770), cpu=12, subtype=9, thumb=True)),
         ]

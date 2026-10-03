@@ -88,7 +88,7 @@ def _emit(i: Instruction) -> bytes:
 
 
 def lift(code: bytes, architecture: str, thumb: bool = False) -> Program:
-    if architecture not in ("arm64", "armv7", "armv7s"):
+    if architecture not in ("arm64", "armv7", "armv7s", "armv6"):
         raise Unsupported("no safe backend for " + architecture)
     instructions, initialized, output = [], set(), bytearray()
     p = 0
@@ -155,6 +155,8 @@ def lift(code: bytes, architecture: str, thumb: bool = False) -> Program:
                 op = {0x2000: Op.CONST, 0x3000: Op.ADD, 0x3800: Op.SUB}[w & 0xF800]
                 i = Instruction(op, start, dst, dst if op != Op.CONST else None, imm, writes_flags=True)
             elif w & 0xFBF0 in (0xF240, 0xF2C0):
+                if architecture == "armv6":
+                    raise Unsupported("Thumb-2 MOVW/MOVT is unavailable on ARMv6")
                 if p + 2 > len(code):
                     raise Unsupported("truncated Thumb-2 MOVW/MOVT")
                 second = struct.unpack_from("<H", code, p)[0]

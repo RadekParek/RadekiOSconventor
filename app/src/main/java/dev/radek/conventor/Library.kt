@@ -1,7 +1,6 @@
 package dev.radek.conventor
 
 import android.content.Context
-import android.graphics.BitmapFactory
 import android.net.Uri
 import org.json.JSONArray
 import org.json.JSONObject
@@ -102,12 +101,12 @@ class Library(private val context: Context) {
                     val slice = slices.getJSONObject(index)
                     encrypted = encrypted || slice.getBoolean("encrypted")
                     val arch = slice.getString("architecture")
-                    if (file == binary && arch in listOf("arm64", "armv7", "armv7s")) hasCandidate = true
+                    if (file == binary && arch in listOf("arm64", "armv7", "armv7s", "armv6")) hasCandidate = true
                     val deps = slice.getJSONArray("dependencies")
                     for (d in 0 until deps.length()) graph.put(JSONObject().put("from", file.relativeTo(app).path)
-                        .put("installName", deps.getJSONObject(d).getString("path")).put("classification", "unsupported")
-                        .put("reason", "No verified Darwin framework/ABI provider"))
-                    incompatible = incompatible || deps.length() > 0 || slice.getJSONArray("imports").length() > 0 || slice.getJSONArray("metadata").length() > 0 || slice.has("chainedFixups")
+                        .put("installName", deps.getJSONObject(d).getString("path")).put("classification", "unverified")
+                        .put("reason", "Linked dependency; this on-device report cannot prove API reachability and ships no Darwin ABI provider"))
+                    incompatible = incompatible || deps.length() > 0 || slice.getJSONArray("imports").length() > 0 || slice.getJSONArray("metadata").length() > 0 || slice.has("chainedFixups") || !slice.optBoolean("bindDecodingComplete", true)
                 }
             }
             inspect(binary, macho)
@@ -124,8 +123,8 @@ class Library(private val context: Context) {
             report.put("dependencies", JSONObject().put("nodes", nodes).put("edges", graph))
             val reason = when {
                 encrypted -> "Protected/encrypted Mach-O. Conversion prohibited; no DRM or FairPlay bypass."
-                !hasCandidate -> "No supported ARM64/ARMv7 slice. ARM64e PAC reconstruction is blocked."
-                incompatible -> "Frameworks, imports, metadata or embedded code require unsupported compatibility/linker implementations."
+                !hasCandidate -> "No supported ARM64/ARMv7/ARMv6 slice. ARM64e PAC reconstruction is blocked."
+                incompatible -> "Frameworks, imports, incomplete dyld bindings, metadata or embedded code require unsupported compatibility/linker implementations."
                 else -> "Analysis completed. A host SDK/NDK is required to prove the restricted leaf subset, reconstruct native code and package an APK. On-device compilation is not implemented."
             }
             report.put("blockers", JSONArray().put(reason)).put("hostCommand", "python3 -m radek convert input.ipa --authorized --output workspace/result")
@@ -154,49 +153,69 @@ private const val ICON_TARGET = 512
  * any other image. Nothing is invented: when nothing decodes the status is
  * UNAVAILABLE and the library shows that state.
  */
-private fun extractIcon(app: File, names: List<String>, dir: File): JSONObject {
+internal fun extractIcon(app: File, names: List<String>, dir: File): JSONObject {
     val attempts = JSONArray()
     fun attempt(source: String, ok: Boolean, detail: String, width: Int = 0, height: Int = 0) {
         attempts.put(JSONObject().put("source", source).put("ok", ok).put("detail", detail)
             .put("width", width).put("height", height))
     }
-    val declared = mutableListOf<File>()
+    val candidates = mutableListOf<File>()
+    val seen = mutableSetOf<String>()
+    fun addCandidate(file: File) {
+        if (!file.isFile) return
+        val key = file.relativeTo(app).path.lowercase(java.util.Locale.ROOT)
+        if (seen.add(key)) candidates.add(file)
+    }
     for (name in names) {
         SafeZip.validateName(name) // fail closed on traversal or absolute names
-        for (suffix in ICON_SUFFIXES) {
-            val file = File(app, name + suffix)
-            if (file.isFile && file !in declared) declared.add(file)
-        }
+        for (suffix in ICON_SUFFIXES) addCandidate(File(app, name + suffix))
     }
-    if (declared.isEmpty()) {
-        val images = app.walkTopDown().filter { it.isFile && it.extension.lowercase() in setOf("png", "jpg", "jpeg") }.toList()
-        val named = images.filter { f ->
-            val lower = f.name.lowercase()
-            "icon" in lower || "artwork" in lower || "logo" in lower
-        }.sortedByDescending { it.length() }
-        declared += named
-        if (declared.isEmpty()) declared += images.filter { it.length() in 1..(4L * 1024 * 1024) }.sortedByDescending { it.length() }
-    }
+    // A declared icon is only a preference: games often ship a broken/unsupported
+    // plist rendition alongside a perfectly usable loose PNG/JPEG. Always try the
+    // ranked bundle fallback after declared candidates, not only when names are absent.
+    val fallbackImages = app.walkTopDown()
+        .filter { it.isFile && it.extension.lowercase() in setOf("png", "jpg", "jpeg") }
+        .sortedWith(compareBy<File>({
+            val lower = it.name.lowercase()
+            when {
+                "appicon" in lower || lower.startsWith("itunesartwork") -> 0
+                "icon" in lower -> 1
+                "artwork" in lower || "logo" in lower -> 2
+                else -> 3
+            }
+        }, { -it.length() }))
+    for (file in fallbackImages) addCandidate(file)
+
     var best: Pair<File, android.graphics.Bitmap>? = null
     var bestPixels = 0
     var bestScale = 0
-    for (candidate in declared.take(12)) {
+    var bestDecoder = "android.graphics.BitmapFactory"
+    for (candidate in candidates.take(48)) {
         val relative = candidate.relativeTo(app).path
         if (candidate.length() > ICON_MAX_BYTES) { attempt(relative, false, "image exceeds size limit"); continue }
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(candidate.path, bounds)
-        if (bounds.outWidth !in 1..8192 || bounds.outHeight !in 1..8192) { attempt(relative, false, "unsupported image dimensions"); continue }
-        val sample = maxOf(1, maxOf(bounds.outWidth, bounds.outHeight) / ICON_TARGET)
-        val bitmap = BitmapFactory.decodeFile(candidate.path, BitmapFactory.Options().apply { inSampleSize = sample })
-        if (bitmap == null) { attempt(relative, false, "BitmapFactory could not decode this image"); continue }
+        var decodeError: String? = null
+        val decoded: Pair<Boolean, android.graphics.Bitmap?> = try {
+            IconDecoder.isCgbi(candidate) to IconDecoder.decode(candidate, ICON_TARGET)
+        } catch (e: Exception) {
+            decodeError = e.message
+            false to null
+        }
+        val applePng = decoded.first
+        val bitmap = decoded.second
+        if (bitmap == null) {
+            attempt(relative, false, decodeError?.let { "image decoder rejected candidate: $it" } ?: "unsupported or corrupt image; tried PNG/JPEG and Apple CgBI decoders")
+            continue
+        }
         val pixels = bitmap.width * bitmap.height
         val scale = when { "@3x" in candidate.name -> 3; "@2x" in candidate.name -> 2; else -> 1 }
-        attempt(relative, true, "decoded", bitmap.width, bitmap.height)
+        val decoder = if (applePng) "radek-cgbi+android.graphics.Bitmap" else "android.graphics.BitmapFactory"
+        attempt(relative, true, if (applePng) "decoded and normalized Apple CgBI channel order/alpha" else "decoded", bitmap.width, bitmap.height)
         if (pixels > bestPixels || (pixels == bestPixels && scale > bestScale)) {
             best?.second?.recycle()
             best = candidate to bitmap
             bestPixels = pixels
             bestScale = scale
+            bestDecoder = decoder
         } else bitmap.recycle()
     }
     val chosen = best
@@ -218,7 +237,7 @@ private fun extractIcon(app: File, names: List<String>, dir: File): JSONObject {
         .put("path", "icon.png")
         .put("kind", "file")
         .put("format", file.extension.lowercase())
-        .put("decoder", "android.graphics.BitmapFactory")
+        .put("decoder", bestDecoder)
         .put("width", width).put("height", height)
         .put("scale", scale)
         .put("reason", detail)

@@ -273,4 +273,4 @@ def _resolve_stubs(image: MachOImage, slice_info: dict) -> None:
 
 
 def _stub_stride(architecture: str) -> int:
-    return 16 if architecture in ("armv7", "armv7s", "arm32-unknown") else 12
+    return 16 if architecture in ("armv7", "armv7s", "armv6", "arm32-unknown") else 12

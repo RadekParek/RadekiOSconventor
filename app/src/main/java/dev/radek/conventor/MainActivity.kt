@@ -110,9 +110,10 @@ class MainActivity : Activity() {
             val item = card(); val app = report.optJSONObject("application") ?: JSONObject()
             val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }; item.addView(row)
             val iconPath = File(dir, "icon.png")
+            val iconBitmap = if (iconPath.isFile) android.graphics.BitmapFactory.decodeFile(iconPath.path) else null
             val icon = ImageView(this).apply {
-                if (iconPath.isFile) setImageURI(Uri.fromFile(iconPath)) else setImageResource(dev.radek.conventor.R.drawable.ic_launcher)
-                contentDescription = if (iconPath.isFile) "Application icon"
+                if (iconBitmap != null) setImageBitmap(iconBitmap) else setImageResource(dev.radek.conventor.R.drawable.ic_launcher)
+                contentDescription = if (iconBitmap != null) "Application icon"
                 else report.optJSONObject("icon")?.optString("reason")?.takeIf { it.isNotBlank() } ?: "Icon unavailable"
             }
             row.addView(icon, LinearLayout.LayoutParams(dp(56), dp(56)).apply { rightMargin = dp(14) })
@@ -153,7 +154,12 @@ class MainActivity : Activity() {
         if (report.has("error")) text(report.getString("error"), 15f, statusColor("FAILED"))
         text("Icon: ${report.optJSONObject("icon")?.optString("reason") ?: "not extracted"}", 13f, muted)
         val edges = report.optJSONObject("dependencies")?.optJSONArray("edges")
-        if (edges != null) for (i in 0 until edges.length()) { val dep = edges.getJSONObject(i); text("BLOCKED · ${dep.getString("installName")}", 13f, muted) }
+        if (edges != null) for (i in 0 until edges.length()) {
+            val dep = edges.getJSONObject(i)
+            val classification = dep.optString("classification", "unverified").uppercase()
+            text("$classification · ${dep.getString("installName")}", 13f, muted)
+            text(dep.optString("reason"), 11f, muted)
+        }
         button("View full machine-readable report") { showText("Conversion report", report.toString(2)) }
         button("View real conversion logs") { showText("Logs", File(dir, "conversion.jsonl").takeIf { it.isFile }?.readText() ?: "No logs") }
         text("Native build result", 22f, Color.WHITE, true)

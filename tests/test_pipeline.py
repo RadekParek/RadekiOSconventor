@@ -27,7 +27,7 @@ class PipelineTests(unittest.TestCase):
         self.assertFalse((self.root / "job/RadekiOSConventor-debug.apk").exists())
         self.assertEqual(json.loads((self.root / "job/report.json").read_text())["state"], "PARTIAL")
 
-    def test_framework_import_blocked(self):
+    def test_unused_framework_dependency_needs_no_stub(self):
         result = self.run_fixture(
             macho(
                 imports=["_UIApplicationMain"],
@@ -35,8 +35,21 @@ class PipelineTests(unittest.TestCase):
             ),
             analyze_only=True,
         )
+        self.assertEqual(result["state"], "PARTIAL")
+        self.assertEqual(result["dependencies"]["edges"][0]["classification"], "not-required-by-proven-entry")
+        self.assertIn("no framework stub/provider was linked", result["dependencies"]["edges"][0]["reason"])
+        self.assertEqual(result["conversion"]["backend"], "preserved-arm64")
+
+    def test_reachable_framework_call_remains_blocked(self):
+        result = self.run_fixture(
+            macho(
+                code=struct.pack("<II", 0x94000000, 0xD65F03C0),
+                imports=["_UIApplicationMain"],
+                dependencies=["/System/Library/Frameworks/UIKit.framework/UIKit"],
+            ),
+            analyze_only=True,
+        )
         self.assertEqual(result["state"], "BLOCKED")
-        self.assertEqual(result["dependencies"]["edges"][0]["classification"], "unsupported")
 
     def test_encryption_is_never_bypassed(self):
         result = self.run_fixture(macho(encrypted=True), analyze_only=True)
@@ -87,7 +100,8 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(states["UIKit/CoreGraphics"], "SUPPORTED")
         self.assertEqual(states["Metal"], "SUPPORTED")
         self.assertIn("no reachable API use", " ".join(c["detail"] for c in result["capabilities"]))
-        self.assertTrue(any("Reachable APIs" in blocker for blocker in result["blockers"]))
+        self.assertNotIn("blockers", result)
+        self.assertEqual(result["dependencies"]["edges"][0]["classification"], "not-required-by-proven-entry")
 
     def test_icon_is_recovered_from_assets_car(self):
         from .test_icons import catalog_bytes
@@ -127,6 +141,15 @@ class PipelineTests(unittest.TestCase):
             result["dependencies"]["edges"][0]["resolvedBundlePath"], "Frameworks/Embedded.framework/Embedded"
         )
 
+    def test_damaged_bind_stream_is_analyzed_but_remains_blocked(self):
+        bind = b"\x40_symbol\x00\x70" + b"\xff" * 9 + b"\x01\x80\x01\x00"
+        command = struct.pack("<12I", 0x80000022, 48, 0, 0, 0x2000, len(bind), 0, 0, 0, 0, 0, 0)
+        result = self.run_fixture(macho(extras=[command], blobs={0x2000: bind}), analyze_only=True)
+        self.assertEqual(result["state"], "BLOCKED")
+        slice_data = result["machO"]["slices"][0]
+        self.assertFalse(slice_data["bindDecodingComplete"])
+        self.assertTrue(any("bind table is incomplete" in item for item in result["blockers"]))
+
     def test_unknown_loader_command_blocked(self):
         result = self.run_fixture(macho(extras=[struct.pack("<II", 0x777, 8)]), analyze_only=True)
         self.assertEqual(result["state"], "BLOCKED")
@@ -134,6 +157,21 @@ class PipelineTests(unittest.TestCase):
     def test_fat_selects_safe_arm64(self):
         result = self.run_fixture(fat([macho(cpu=12, subtype=9), macho()]), analyze_only=True)
         self.assertEqual(result["selectedArchitecture"], "arm64")
+
+    def test_armv6_and_thumb_plans_are_offline_arm64(self):
+        arm_mode = self.run_fixture(macho(cpu=12, subtype=6), analyze_only=True)
+        self.assertEqual(arm_mode["state"], "PARTIAL")
+        self.assertEqual(arm_mode["selectedArchitecture"], "armv6")
+        self.assertEqual(arm_mode["conversion"]["backend"], "offline-arm32-to-arm64")
+
+        thumb_source = ipa(
+            self.root / "thumb.ipa",
+            macho(struct.pack("<HH", 0x202A, 0x4770), cpu=12, subtype=6, thumb=True),
+        )
+        thumb_mode = Pipeline(self.root / "job-thumb").run(thumb_source, True, analyze_only=True)
+        self.assertEqual(thumb_mode["state"], "PARTIAL")
+        self.assertEqual(thumb_mode["selectedArchitecture"], "armv6")
+        self.assertEqual(thumb_mode["conversion"]["outputBytes"], 8)
 
     def test_thumb_plan_is_offline_arm64(self):
         result = self.run_fixture(

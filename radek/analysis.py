@@ -111,7 +111,8 @@ def prove_leaf(
             "embedded frameworks/plugins require a native linker backend that is not implemented"
         )
     candidates = sorted(
-        report["slices"], key=lambda s: {"arm64": 0, "armv7s": 1, "armv7": 2}.get(s["architecture"], 99)
+        report["slices"],
+        key=lambda s: {"arm64": 0, "armv7s": 1, "armv7": 2, "armv6": 3}.get(s["architecture"], 99),
     )
     failures = []
     data = executable.read_bytes()
@@ -119,29 +120,28 @@ def prove_leaf(
         try:
             if sl["architecture"] == "arm64e" or sl["pacRequired"]:
                 raise Unsupported("ARM64e pointer authentication stripping/re-signing is not proven safe")
-            if sl["architecture"] not in ("arm64", "armv7", "armv7s") or sl["bigEndian"]:
+            if sl["architecture"] not in ("arm64", "armv7", "armv7s", "armv6") or sl["bigEndian"]:
                 raise Unsupported("unsupported CPU/endian format")
             if sl["fileType"] != 2:
                 raise Unsupported("entry must be an MH_EXECUTE program")
-            if sl["dependencies"] or sl["imports"]:
-                raise Unsupported("Darwin imports/framework dependencies require unimplemented ABI providers")
+            if not sl.get("bindDecodingComplete", True):
+                diagnostics = sl.get("bindDiagnostics", [])
+                details = "; ".join(item.get("message", "unknown bind decoding error") for item in diagnostics)
+                raise Unsupported("dyld bind table is incomplete and cannot be linked safely" + (": " + details if details else ""))
+            # The standalone backend emits only the proven entry routine, not the
+            # rest of this Mach-O image. Linked dylibs/import names therefore need
+            # no shim when that routine has no calls, memory accesses, or address
+            # references; the instruction proof below rejects every such use.
             if "chainedFixups" in sl:
                 raise Unsupported("chained fixups require address reconstruction")
             if sl["metadata"]:
                 raise Unsupported(
                     "Objective-C/Swift/initializers/unwind metadata requires additional runtime support"
                 )
-            for link in sl["linkedit"]:
-                if link.get("kind") in ("rebase", "bind", "weakBind", "lazyBind") and link["size"]:
-                    raise Unsupported("dyld rebasing/binding is not implemented")
-            dynamic = sl.get("dynamicSymbols", {})
-            if (
-                dynamic.get("externalRelocationCount", 0)
-                or dynamic.get("localRelocationCount", 0)
-                or dynamic.get("undefinedCount", 0)
-                or dynamic.get("indirectCount", 0)
-            ):
-                raise Unsupported("dynamic relocation/indirect symbol table requires linker adaptation")
+            # Data-only dyld binds/rebases and indirect symbol tables are retained
+            # in the report but are not copied into this entry-only artifact. A
+            # referenced pointer/call/address would have to pass the instruction
+            # and entry-section checks below, where it is deliberately rejected.
             allowed_commands = {
                 1,
                 0x19,
@@ -159,6 +159,14 @@ def prove_leaf(
                 0x29,
                 0x21,
                 0x2C,
+                0xC,
+                0xD,
+                0x18,
+                0x20,
+                0x80000018,
+                0x8000001C,
+                0x8000001F,
+                0x80000023,
                 0x22,
                 0x80000022,
                 0x80000033,
@@ -171,8 +179,6 @@ def prove_leaf(
             section = None
             for seg in sl["segments"]:
                 for sec in seg["sections"]:
-                    if sec["relocations"]:
-                        raise Unsupported("section relocations are not yet linkable")
                     if (
                         sec["offset"] <= entry < sec["offset"] + sec["size"]
                         and sec["name"] == "__text"
@@ -187,6 +193,15 @@ def prove_leaf(
             thumb = any(sym["value"] == address and sym["description"] & 8 for sym in sl["symbols"])
             code = data[sl["offset"] + entry : sl["offset"] + section["offset"] + section["size"]]
             program = lift(code, sl["architecture"], thumb)
+            code_start = entry - section["offset"]
+            code_end = code_start + program.source_size
+            for relocation in section["relocations"]:
+                if relocation.get("scattered"):
+                    raise Unsupported("scattered relocation in the entry code section is not linkable")
+                relocation_start = int(relocation["address"])
+                relocation_end = relocation_start + (1 << int(relocation["length"]))
+                if relocation_start < code_end and code_start < relocation_end:
+                    raise Unsupported("entry instructions contain relocations that require linker adaptation")
             return sl, program
         except Unsupported as exc:
             failures.append(sl["architecture"] + ": " + str(exc))
@@ -352,9 +367,9 @@ def capabilities(reconstruction: dict | None = None) -> list[dict]:
             "detail": "MOVZ/MOVK, 32-bit immediate ADD/SUB, RET; preserved native instructions",
         },
         {
-            "component": "ARMv7/ARMv7s/Thumb/Thumb-2",
+            "component": "ARMv6/ARMv7/ARMv7s/Thumb/Thumb-2",
             "status": "PARTIAL",
-            "detail": "offline straight-line MOV/ADD/SUB/BX and Thumb-2 MOVW/MOVT lowering only; no general branches/loads/calls",
+            "detail": "offline straight-line ARMv6 A32/Thumb-1 and ARMv7/v7s immediate MOV/ADD/SUB/return lowering; Thumb-2 MOVW/MOVT only on ARMv7/v7s; no general branches/loads/calls",
         },
         {
             "component": "Objective-C",

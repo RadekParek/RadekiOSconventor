@@ -11,8 +11,15 @@ class IRTests(unittest.TestCase):
         self.assertEqual([i.op for i in p.blocks[0].instructions], [Op.CONST, Op.ADD, Op.RETURN])
 
     def test_arm32_offline_lowering(self):
-        p = lift(struct.pack("<III", 0xE3A00028, 0xE2800002, 0xE12FFF1E), "armv7")
-        self.assertEqual(p.machine_code, struct.pack("<III", 0x52800500, 0x11000800, 0xD65F03C0))
+        expected = struct.pack("<III", 0x52800500, 0x11000800, 0xD65F03C0)
+        code = struct.pack("<III", 0xE3A00028, 0xE2800002, 0xE12FFF1E)
+        self.assertEqual(lift(code, "armv7").machine_code, expected)
+
+    def test_armv6_offline_lowering(self):
+        code = struct.pack("<II", 0xE3A0002A, 0xE12FFF1E)
+        self.assertEqual(lift(code, "armv6").machine_code, struct.pack("<II", 0x52800540, 0xD65F03C0))
+        thumb = lift(struct.pack("<HH", 0x202A, 0x4770), "armv6", True)
+        self.assertEqual(thumb.machine_code, struct.pack("<II", 0x52800540, 0xD65F03C0))
 
     def test_thumb_offline_lowering(self):
         p = lift(struct.pack("<HHHH", 0x2029, 0x3002, 0x3801, 0x4770), "armv7", True)
@@ -60,6 +67,8 @@ class IRTests(unittest.TestCase):
     def test_invalid_thumb2(self):
         with self.assertRaises(Unsupported):
             lift(struct.pack("<HH", 0xF240, 0x8000), "armv7", True)
+        with self.assertRaisesRegex(Unsupported, "unavailable on ARMv6"):
+            lift(struct.pack("<HHH", 0xF240, 0x002A, 0x4770), "armv6", True)
 
     def test_arithmetic_modulo_width(self):
         code = struct.pack("<IIII", 0x529FFFE0, 0x72BFFFE0, 0x11000400, 0xD65F03C0)

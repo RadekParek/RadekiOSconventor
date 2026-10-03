@@ -20,6 +20,6 @@ Analysis-only ends in `PARTIAL`. Missing conversion providers/unsafe source code
 
 ## Adding real support
 
-Do not add bundle-ID exceptions. Add parser/decoder/IR/linker/provider logic with positive, negative and real APK integration tests. A dependency can only be classified `converted`, `provided by compatibility layer`, or `Android equivalent` once a real tested implementation is wired in. Currently all source dylib dependencies are unsupported; Android-equivalent names are not enough to establish ABI compatibility.
+Do not add bundle-ID exceptions. Add parser/decoder/IR/linker/provider logic with positive, negative and real APK integration tests. A dependency can only be classified `converted`, `provided by compatibility layer`, or `Android equivalent` once a real tested implementation is wired in. For the closed integer leaf only, a linked-but-unused dylib can be omitted after proving the emitted instructions have no calls, memory or address references; that does not implement the dylib ABI. Any reachable framework API still requires a real provider and remains blocked.
 
 Future graphics providers should separate API command/state capture from an Android GLES backend; future Metal work should use a separate shader/type translation and Vulkan/SPIR-V backend. Neither backend exists in this version, so reports block their symbols instead of binding no-ops. Framework providers should similarly be introduced behind a versioned ABI symbol registry with tests of observable behavior, not by accepting symbol names alone.

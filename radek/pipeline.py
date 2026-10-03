@@ -158,6 +158,16 @@ class Pipeline:
                     self.transition("BLOCKED", str(exc))
                     return self.report
                 self.report["selectedArchitecture"] = selected["architecture"]
+                # The accepted leaf has no call, memory, or address operations. Any
+                # linked dependency in this single-image case is therefore unused by
+                # the emitted code; do not synthesize symbols or ship no-op stubs.
+                unused_edges = self.report.get("dependencies", {}).get("edges", [])
+                for edge in unused_edges:
+                    edge["classification"] = "not-required-by-proven-entry"
+                    edge["reason"] = (
+                        "The emitted closed integer entry has no calls, memory accesses, "
+                        "or address references; no framework stub/provider was linked."
+                    )
                 self.report["conversion"] = program.report()
                 self.report["contract"] = "closed-integer-entry-v1"
                 if analyze_only:

@@ -2,7 +2,7 @@
 
 An **offline native-reconstruction workbench**, not an iOS emulator. Kotlin Android importer + C++ Mach-O analyzer + Python host conversion/SDK packaging pipeline.
 
-> **Important: this is NOT a general IPA/game converter.** Current native conversion is restricted to self-contained, straight-line integer-returning programs with no imports, framework calls, memory access, relocations or runtime metadata. UIKit, Foundation ABI, Swift, general Objective-C, graphics/audio/input and ordinary commercial apps are **BLOCKED**. An importer APK is not proof those apps can be converted.
+> **Important: this is NOT a general IPA/game converter.** Current native conversion is restricted to self-contained, straight-line integer-returning entry code with no reachable imports/framework calls, memory access, address references or unsupported runtime semantics. Linked-but-unused dylib/import records can be omitted only after that entry is proven; no no-op framework stubs are generated. UIKit, Foundation ABI, Swift, general Objective-C, graphics/audio/input and ordinary commercial apps are **BLOCKED** when required. An importer APK is not proof those apps can be converted.
 
 ## Offline reconstruction before conversion
 
@@ -10,7 +10,7 @@ Every import is analyzed before any conversion decision is made:
 
 - Mach-O images (executable, embedded dylibs/frameworks): headers, load commands,
   segments/sections, symbols, relocations, exports/imports, dependencies and fixups.
-- Disassembly and function discovery with basic-block CFGs (ARM64/ARM64e, ARMv7/Thumb/Thumb-2),
+- Disassembly and function discovery with basic-block CFGs (ARM64/ARM64e, ARMv6/ARMv7/Thumb/Thumb-2),
   register/constant/reference tracking and pseudocode listings.
 - Objective-C classes, categories, protocols, ivars, properties, selectors, message-send
   targets; Swift type/field metadata and demangling.
@@ -52,7 +52,7 @@ python3 -m radek convert .local/fixture.ipa --authorized --output workspace/fixt
 # workspace/fixture/RadekiOSConventor-debug.apk
 ```
 
-`--arch armv7`, `armv7s`, `thumb`, and `thumb2` exercise **offline ARM32 → ARM64 lowering**. The fixtures are generated synthetic Mach-O programs, not installable signed iOS apps. The resulting native routine returns 42.
+`--arch armv6`, `armv7`, `armv7s`, `thumb`, and `thumb2` exercise **offline ARM32 → ARM64 lowering** for the proven closed integer leaf subset. This does not make general ARMv6 games (which commonly depend on UIKit, graphics, audio, input and runtime services) compatible. The fixtures are generated synthetic Mach-O programs, not installable signed iOS apps. The resulting native routine returns 42.
 
 Icons are recovered through a generic fallback chain (Info.plist names, `@2x`/`@3x`/`~ipad`
 variants, compiled `Assets.car` renditions, then other bundle images) with every attempt
