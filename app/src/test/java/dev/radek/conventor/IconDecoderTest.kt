@@ -36,7 +36,7 @@ class IconDecoderTest {
         // decodes to straight-alpha RGBA (R=128, G=64, B=32, A=128).
         val deflater = Deflater(9, true)
         val compressed = try {
-            deflater.setInput(byteArrayOf(0, 16, 32, 64, 128))
+            deflater.setInput(byteArrayOf(0.toByte(), 16.toByte(), 32.toByte(), 64.toByte(), 128.toByte()))
             deflater.finish()
             val bytes = ByteArray(64)
             val count = deflater.deflate(bytes)
