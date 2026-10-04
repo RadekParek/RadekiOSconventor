@@ -62,7 +62,7 @@ class ResultProviderPlaceholderTest {
             File(directory, "report.json").writeText(report.toString())
             val uri = Uri.Builder().scheme("content").authority("dev.radek.conventor.results")
                 .appendPath(directory.name).appendPath(hostName).build()
-            assertThrows(IllegalStateException::class.java) { provider.openFile(uri, "r") }
+            assertThrows(IllegalArgumentException::class.java) { provider.openFile(uri, "r") }
         } finally {
             directory.deleteRecursively()
         }
