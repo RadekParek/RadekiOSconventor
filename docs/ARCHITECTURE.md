@@ -89,10 +89,10 @@ Proven IPAs are converted automatically during import — the signed APK whose t
 through JNI is built and attached with no user action, leaving the entry in `READY`. The red **Force
 convert to .apk** action never overrides these states: for proven IPAs it simply rebuilds the
 converted APK; everything else gets a separately named, signed preview shell carrying the app name,
-recovered icon and static-analysis statistics where available. The preview shell's launcher screen
-carries no conversion notice; the honest record lives in the artifact's machine-readable metadata
-(`placeholder-info.json` retains the full `analysisSummary`, and the report keeps `completeGameConversion`,
-`gameCodeIncluded` and `placeholderOnly` false/true as appropriate), so nothing ever claims a game was
+recovered icon, and machine-readable static-analysis metadata only. The preview shell's launcher
+screen carries no conversion notice or analysis details; the honest record lives in the artifact's
+metadata (`placeholder-info.json` retains the full `analysisSummary`, and the report keeps
+`completeGameConversion`, `gameCodeIncluded` and `placeholderOnly` false/true as appropriate), so nothing ever claims a game was
 converted. The preview shell has its own filename, metadata, progress and provider validation. A host
 result remains shareable/installable only after the `complete-game-v1` contract passes attachment
 checks; the CLI produces such a result only for the proven bounded subset (see `radek/gamepack.py`).
@@ -106,17 +106,18 @@ outside the bounded subset.
 Do not add bundle-ID exceptions or turn symbol matches into claimed implementations. Add parser,
 decoder, IR, linker, API/runtime provider and lifecycle code with positive and negative tests, then
 prove each reachable code path and API implementation is generated and linked. The four tested time
-shims are real function bodies, but runtime export availability is not game integration. A dependency
-can only be classified `converted`, `provided by compatibility layer`, or `Android equivalent` for
-the functions actually wired into output. The closed-integer backend translates one function only; it
+shims are real function bodies, but runtime export availability is not game integration. The bounded
+on-device APK packs `libioscompat.so` as a 16 KiB-aligned native dependency and declares it through
+`DT_NEEDED`; because the accepted executable has no imports, no individual API callsite is rewritten
+or counted as a linked replacement. A dependency can only be classified `converted`, `provided by
+compatibility layer`, or `Android equivalent` for the functions actually wired into output. The closed-integer backend translates one function only; it
 does not implement the app, resources, lifecycle, or arbitrary APIs.
 
 Stub handlers are a legitimate forward step only when they stay classified as stubs: the compat
 registry gives every unmapped import a stable, observable resolution target (`stubbed`) so a future
-linker has something to bind, and so accidental invocation is counted instead of undefined. Counts
-of stubbed handlers must never be merged into verified/implemented coverage, and removing the
-placeholder/experimental disclosures from output APKs is prohibited — those strings are the
-contract that keeps emitted artifacts honest.
+linker has something to bind, and so accidental invocation is counted instead of undefined. Counts of stubbed handlers must never be merged into verified/implemented coverage. Removing
+placeholder/experimental status from artifact metadata is prohibited—the metadata keeps emitted
+artifacts honest without showing static-analysis details on the launcher.
 
 Future graphics providers should separate API command/state capture from an Android GLES backend;
 Metal requires shader/type translation plus an appropriate Android rendering backend. Neither

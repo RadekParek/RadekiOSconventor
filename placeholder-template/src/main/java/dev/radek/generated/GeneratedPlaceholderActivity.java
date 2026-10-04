@@ -69,7 +69,6 @@ public final class GeneratedPlaceholderActivity extends Activity {
         JSONObject info = readInfo();
         String gameName = info.optString("gameName", "Imported iOS app");
         String bundleId = info.optString("bundleId", "");
-        String analysisStats = info.optString("analysisStats", "");
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -91,11 +90,6 @@ public final class GeneratedPlaceholderActivity extends Activity {
             root.addView(label(bundleId, 13, Color.rgb(160, 178, 199), false),
                     new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
-        if (!analysisStats.isEmpty()) {
-            root.addView(label(analysisStats, 12, Color.rgb(160, 178, 199), false),
-                    new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        }
-
         setContentView(root);
         try {
             setTaskDescription(new ActivityManager.TaskDescription(gameName, iconBitmap, Color.rgb(11, 16, 29)));

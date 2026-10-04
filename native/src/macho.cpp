@@ -6,13 +6,27 @@
 #include <memory>
 #include <set>
 #include <stdexcept>
+#include <unordered_set>
 namespace radek {
 namespace {
+constexpr size_t kBaseAnalysisBudget = 40000000;
+constexpr size_t kMaximumAnalysisBudget = 800000000;
+constexpr size_t kMaximumCompactImports = 100000;
+
+size_t analysisBudgetFor(size_t inputBytes) {
+    // Large symbol/fixup tables naturally need more work than a tiny fixture.
+    // Scale the guard with the actual input size, while retaining a hard ceiling
+    // so a malformed image cannot force unbounded CPU or JSON allocation.
+    const size_t maximumExtra = kMaximumAnalysisBudget - kBaseAnalysisBudget;
+    const size_t extra = inputBytes > maximumExtra / 4 ? maximumExtra : inputBytes * 4;
+    return kBaseAnalysisBudget + extra;
+}
+
 struct Reader {
     const std::vector<uint8_t> &b;
     size_t base, size;
     bool be = false;
-    std::shared_ptr<size_t> budget = std::make_shared<size_t>(40000000);
+    std::shared_ptr<size_t> budget = std::make_shared<size_t>(kBaseAnalysisBudget);
     void consume(size_t n) const {
         if (n > *budget)
             throw std::runtime_error("Mach-O analysis complexity limit");
@@ -136,10 +150,12 @@ std::string arch(uint64_t c, uint64_t s) {
     }
     return "unsupported";
 }
-Json relocations(Reader &r, size_t off, size_t n) {
-    if (n > 100000)
-        throw std::runtime_error("too many relocations");
-    r.check(off, n * 8);
+Json relocations(Reader &r, size_t off, size_t n, bool includeDetails) {
+    r.check(off, uint64_t(n) * 8);
+    if (!includeDetails)
+        return array();
+    if (n > 1000000)
+        throw std::runtime_error("too many relocations for detailed analysis");
     Json a = array();
     for (size_t i = 0; i < n; i++) {
         uint64_t x = r.u(off + i * 8, 4), y = r.u(off + i * 8 + 4, 4);
@@ -164,7 +180,7 @@ Json relocations(Reader &r, size_t off, size_t n) {
     }
     return a;
 }
-Json thin(Reader r) {
+Json thin(Reader r, bool includeSymbolDetails) {
     auto magic = r.u(0, 4);
     bool wide = magic == 0xfeedfacf || magic == 0xcffaedfe;
     if (magic != 0xfeedface && magic != 0xfeedfacf && magic != 0xcefaedfe && magic != 0xcffaedfe)
@@ -193,6 +209,7 @@ Json thin(Reader r) {
     j["segments"] = array();
     j["dependencies"] = array();
     j["symbols"] = array();
+    j["symbolCount"] = uint64_t(0);
     j["imports"] = array();
     j["exports"] = array();
     j["loadCommands"] = array();
@@ -200,6 +217,26 @@ Json thin(Reader r) {
     j["linkedit"] = array();
     j["fixupAnomalies"] = array();
     j["fixupStreams"] = array();
+    if (!includeSymbolDetails)
+        j["importsTruncated"] = false;
+    std::unordered_set<std::string> compactImportNames;
+    auto appendImport = [&](Json import) {
+        if (includeSymbolDetails) {
+            j["imports"].push(std::move(import));
+            return;
+        }
+        const auto found = import.fields.find("name");
+        if (found == import.fields.end() || compactImportNames.count(found->second.value))
+            return;
+        if (compactImportNames.size() >= kMaximumCompactImports) {
+            j["importsTruncated"] = true;
+            return;
+        }
+        compactImportNames.insert(found->second.value);
+        Json compact = object();
+        compact["name"] = found->second;
+        j["imports"].push(std::move(compact));
+    };
     size_t symoff = 0, nsyms = 0, stroff = 0, strsize = 0;
     bool symSeen = false;
     size_t exportOff = 0, exportSize = 0;
@@ -272,7 +309,10 @@ Json thin(Reader r) {
                 sec["flags"] = flags;
                 sec["reserved1"] = r.u(q + (s64 ? 68 : 60), 4);
                 sec["reserved2"] = r.u(q + (s64 ? 72 : 64), 4);
-                sec["relocations"] = relocations(r, r.u(q + (s64 ? 56 : 48), 4), r.u(q + (s64 ? 60 : 52), 4));
+                const auto relocationOffset = r.u(q + (s64 ? 56 : 48), 4);
+                const auto relocationCount = r.u(q + (s64 ? 60 : 52), 4);
+                sec["relocationCount"] = relocationCount;
+                sec["relocations"] = relocations(r, relocationOffset, relocationCount, includeSymbolDetails);
                 s["sections"].push(sec);
                 if (name.find("objc") != std::string::npos || name.find("swift") != std::string::npos ||
                     name == "__unwind_info" || name == "__eh_frame" || type == 9 || type == 10 ||
@@ -295,10 +335,14 @@ Json thin(Reader r) {
             nsyms = r.u(p + 12, 4);
             stroff = r.u(p + 16, 4);
             strsize = r.u(p + 20, 4);
-            if (nsyms > 100000)
-                throw std::runtime_error("symbol limit");
-            r.check(symoff, nsyms * (wide ? 16 : 12));
+            const size_t symbolEntrySize = wide ? 16 : 12;
+            // nsyms is bounded by the actual slice's symbol-table byte range and
+            // the shared analysis-work budget below, not an arbitrary 100,000
+            // symbol policy cap. Keep the multiplication in uint64_t before the
+            // range check (nsyms is read from a 32-bit Mach-O field).
+            r.check(symoff, uint64_t(nsyms) * symbolEntrySize);
             r.check(stroff, strsize);
+            j["symbolCount"] = uint64_t(nsyms);
             Json table = object();
             table["offset"] = uint64_t(symoff);
             table["count"] = uint64_t(nsyms);
@@ -329,21 +373,29 @@ Json thin(Reader r) {
                                    "localRelocationCount"};
             for (size_t x = 0; x < 18; x++)
                 d[names[x]] = r.u(p + 8 + x * 4, 4);
-            r.check(r.u(p + 56, 4), r.u(p + 60, 4) * 4);
-            d["externalRelocations"] = relocations(r, r.u(p + 64, 4), r.u(p + 68, 4));
-            d["localRelocations"] = relocations(r, r.u(p + 72, 4), r.u(p + 76, 4));
+            const auto indirectOffset = r.u(p + 56, 4), indirectCount = r.u(p + 60, 4);
+            r.check(indirectOffset, indirectCount * 4);
+            const auto externalRelocationOffset = r.u(p + 64, 4), externalRelocationCount = r.u(p + 68, 4);
+            const auto localRelocationOffset = r.u(p + 72, 4), localRelocationCount = r.u(p + 76, 4);
+            if (includeSymbolDetails) {
+                d["externalRelocations"] = relocations(r, externalRelocationOffset, externalRelocationCount, true);
+                d["localRelocations"] = relocations(r, localRelocationOffset, localRelocationCount, true);
+            } else {
+                r.check(externalRelocationOffset, externalRelocationCount * 8);
+                r.check(localRelocationOffset, localRelocationCount * 8);
+            }
             // The indirect symbol table maps __la_symbol_ptr/__nl_symbol_ptr/__got slots to
             // symtab entries. Exporting it lets the host recovery layer resolve stub targets.
-            auto indirectOffset = r.u(p + 56, 4), indirectCount = r.u(p + 60, 4);
-            if (indirectCount > 200000)
-                throw std::runtime_error("indirect symbol limit");
-            r.check(indirectOffset, indirectCount * 4);
-            r.consume(indirectCount);
-            Json indirect = array();
-            for (size_t x = 0; x < indirectCount; x++)
-                indirect.push(r.u(indirectOffset + x * 4, 4));
-            d["indirectSymbols"] = indirect;
-            j["dynamicSymbols"] = d;
+            // Device analysis only needs import names and avoids retaining this potentially
+            // large implementation detail in memory.
+            if (includeSymbolDetails) {
+                r.consume(indirectCount);
+                Json indirect = array();
+                for (size_t x = 0; x < indirectCount; x++)
+                    indirect.push(r.u(indirectOffset + x * 4, 4));
+                d["indirectSymbols"] = indirect;
+                j["dynamicSymbols"] = d;
+            }
         } else if (cmd == 0xc || cmd == 0x18 || cmd == 0x80000018 || cmd == 0x8000001f || cmd == 0x80000023 ||
                    cmd == 0x20 || cmd == 0xd) {
             need(24);
@@ -466,7 +518,7 @@ Json thin(Reader r) {
                 f["symbolsFormat"] = r.u(off + 24, 4);
                 f["importsCount"] = count;
                 f["imports"] = array();
-                if (io > n || so > n || r.u(off + 4, 4) >= n || count > 100000)
+                if (io > n || so > n || r.u(off + 4, 4) >= n)
                     throw std::runtime_error("invalid chained fixup offsets");
                 size_t stride = format == 1 ? 4 : format == 2 ? 8 : format == 3 ? 16 : 0;
                 if (!stride || count > (n - io) / stride)
@@ -481,19 +533,23 @@ Json thin(Reader r) {
                         im["name"] = r.str(off + so + no, off + n);
                         im["ordinal"] = word & (format == 3 ? 65535 : 255);
                         im["weak"] = bool(word & (format == 3 ? 65536 : 256));
-                        f["imports"].push(im);
-                        j["imports"].push(im);
+                        if (includeSymbolDetails)
+                            f["imports"].push(im);
+                        appendImport(im);
                     }
                 }
                 f["pointerTraversal"] = "not-implemented";
                 f["symbolsDecoding"] = r.u(off + 24, 4) == 0 ? "uncompressed" : "unsupported-compression";
-                f["segments"] = array();
                 auto starts = r.u(off + 4, 4);
                 if (starts < 28 || starts > n || n - starts < 4)
                     throw std::runtime_error("invalid chained starts header");
                 auto segmentCount = r.u(off + starts, 4);
                 if (segmentCount > (n - starts - 4) / 4 || segmentCount > 65536)
                     throw std::runtime_error("invalid chained starts count");
+                if (includeSymbolDetails)
+                    f["segments"] = array();
+                else
+                    f["segmentCount"] = segmentCount;
                 for (uint64_t index = 0; index < segmentCount; index++) {
                     auto relative = r.u(off + starts + 4 + index * 4, 4);
                     if (!relative)
@@ -504,20 +560,22 @@ Json thin(Reader r) {
                     auto length = r.u(at, 4), pages = r.u(at + 20, 2);
                     if (length < 22 || length > n - starts - relative || pages > (length - 22) / 2)
                         throw std::runtime_error("invalid chained starts pages");
-                    Json segment = object();
-                    segment["index"] = index;
-                    segment["pageSize"] = r.u(at + 4, 2);
-                    segment["pointerFormat"] = r.u(at + 6, 2);
-                    segment["segmentOffset"] = r.u(at + 8, 8);
-                    segment["maxValidPointer"] = r.u(at + 16, 4);
-                    segment["pageStarts"] = array();
-                    for (uint64_t page = 0; page < pages; page++)
-                        segment["pageStarts"].push(r.u(at + 22 + page * 2, 2));
-                    f["segments"].push(segment);
+                    if (includeSymbolDetails) {
+                        Json segment = object();
+                        segment["index"] = index;
+                        segment["pageSize"] = r.u(at + 4, 2);
+                        segment["pointerFormat"] = r.u(at + 6, 2);
+                        segment["segmentOffset"] = r.u(at + 8, 8);
+                        segment["maxValidPointer"] = r.u(at + 16, 4);
+                        segment["pageStarts"] = array();
+                        for (uint64_t page = 0; page < pages; page++)
+                            segment["pageStarts"].push(r.u(at + 22 + page * 2, 2));
+                        f["segments"].push(segment);
+                    }
                 }
                 j["chainedFixups"] = f;
             }
-            if (cmd == 0x26 && n) {
+            if (includeSymbolDetails && cmd == 0x26 && n) {
                 // LC_FUNCTION_STARTS: ULEB128 deltas relative to the __TEXT segment address.
                 size_t at = off, stop = off + n;
                 uint64_t address = textVmAddress;
@@ -528,8 +586,8 @@ Json thin(Reader r) {
                     if (delta > std::numeric_limits<uint64_t>::max() - address)
                         throw std::runtime_error("function start overflow");
                     address += delta;
-                    if (++count > 300000)
-                        throw std::runtime_error("function start limit");
+                    if (++count > 2000000)
+                        throw std::runtime_error("function-start table exceeds the 2,000,000-entry safety limit");
                     starts.push(address);
                 }
                 Json fs = object();
@@ -585,18 +643,28 @@ Json thin(Reader r) {
         auto index = r.u(p, 4), type = r.u(p + 4, 1);
         if (index >= strsize)
             throw std::runtime_error("invalid symbol string offset");
-        Json s = object();
-        s["name"] = r.str(stroff + index, stroff + strsize);
-        s["type"] = type;
-        s["section"] = r.u(p + 5, 1);
-        s["description"] = r.u(p + 6, 2);
-        s["value"] = r.u(p + 8, wide ? 8 : 4);
-        j["symbols"].push(s);
-        if (!(type & 0xe0) && (type & 1)) {
-            if ((type & 0xe) == 0)
-                j["imports"].push(s);
-            else if ((type & 0xe) == 0xe)
-                j["exports"].push(s);
+        const bool externalNonStab = !(type & 0xe0) && (type & 1);
+        const bool undefined = (type & 0xe) == 0;
+        if (includeSymbolDetails || (externalNonStab && undefined)) {
+            Json s = object();
+            s["name"] = r.str(stroff + index, stroff + strsize);
+            if (includeSymbolDetails) {
+                s["type"] = type;
+                s["section"] = r.u(p + 5, 1);
+                s["description"] = r.u(p + 6, 2);
+                s["value"] = r.u(p + 8, wide ? 8 : 4);
+                j["symbols"].push(s);
+                if (externalNonStab && undefined)
+                    appendImport(s);
+                else if (externalNonStab && (type & 0xe) == 0xe)
+                    j["exports"].push(s);
+            } else {
+                // The on-device mapper needs imported names, not every local and
+                // exported nlist record. Keep its inventory compact and deduplicated.
+                Json import = object();
+                import["name"] = s["name"];
+                appendImport(std::move(import));
+            }
         }
     }
     // A malformed, oversized or only partially understood dyld opcode stream is a
@@ -645,7 +713,7 @@ Json thin(Reader r) {
                 im["type"] = type;
                 im["flags"] = flags;
                 im["stream"] = b.kind;
-                j["imports"].push(im);
+                appendImport(std::move(im));
                 decoded++;
             };
             while (p < end) {
@@ -714,8 +782,9 @@ Json thin(Reader r) {
                     break;
                 case 0xc0: {
                     auto count = r.leb(p, end), skip = r.leb(p, end);
-                    if (count > 100000)
-                        throw std::runtime_error("bind repetition limit");
+                    // Each emitted bind is checked against the segment and shared
+                    // analysis-work budget; the stream length is not capped by an
+                    // arbitrary number of binds.
                     for (uint64_t n = 0; n < count; n++) {
                         emit();
                         advance(skip);
@@ -778,7 +847,7 @@ Json thin(Reader r) {
         size_t visited = 0;
         std::function<void(size_t, std::string)> walk = [&](size_t node, std::string prefix) {
             r.consume(prefix.size() + 8);
-            if (++visited > 100000 || prefix.size() > 4096 || active.size() > 256 || node >= exportSize ||
+            if (++visited > 1000000 || prefix.size() > 4096 || active.size() > 256 || node >= exportSize ||
                 !active.insert(node).second)
                 throw std::runtime_error("cyclic/oversized export trie");
             size_t p = exportOff + node, end = exportOff + exportSize;
@@ -813,13 +882,14 @@ Json thin(Reader r) {
             }
             active.erase(node);
         };
-        walk(0, "");
+        if (includeSymbolDetails)
+            walk(0, "");
     }
     return j;
 }
 } // namespace
-Json analyze(const std::vector<uint8_t> &data) {
-    Reader r{data, 0, data.size(), true};
+Json analyze(const std::vector<uint8_t> &data, bool includeSymbolDetails) {
+    Reader r{data, 0, data.size(), true, std::make_shared<size_t>(analysisBudgetFor(data.size()))};
     auto m = r.u(0, 4);
     Json result = object();
     result["schemaVersion"] = uint64_t(1);
@@ -844,14 +914,14 @@ Json analyze(const std::vector<uint8_t> &data) {
                 if (off < b && a < off + size)
                     throw std::runtime_error("overlapping FAT slices");
             ranges.emplace_back(off, off + size);
-            auto s = thin(Reader{data, size_t(off), size_t(size), false, r.budget});
+            auto s = thin(Reader{data, size_t(off), size_t(size), false, r.budget}, includeSymbolDetails);
             if (s.fields["cpuType"].value != std::to_string(r.u(p, 4)) ||
                 s.fields["cpuSubtype"].value != std::to_string(r.u(p + 4, 4)))
                 throw std::runtime_error("FAT architecture mismatch");
             result["slices"].push(s);
         }
     } else
-        result["slices"].push(thin(Reader{data, 0, data.size(), false, r.budget}));
+        result["slices"].push(thin(Reader{data, 0, data.size(), false, r.budget}, includeSymbolDetails));
     return result;
 }
 } // namespace radek

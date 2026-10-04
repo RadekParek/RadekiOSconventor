@@ -127,8 +127,8 @@ internal class PlaceholderApkBuilder(private val context: Context) {
             val unmappedApiSymbols = apiMapping.optInt("unmappedSymbolCount", 0).coerceAtLeast(0)
             val apiLevelNote = if (runtimeVerifiedAndroidApiLevel > 0) " on Android API $runtimeVerifiedAndroidApiLevel" else ""
             val analysisSummary = "Static analysis only: $classifiedImportSymbols/$distinctImportSymbols symbols triaged ($classificationCoveragePercent%); $directApiCandidates direct-name candidates ($runtimeVerifiedNdkCandidates runtime exports resolved$apiLevelNote), $semanticApiCandidates semantic targets, $unmappedApiSymbols unmapped. No game code or API implementation was translated."
-            // Shown on the generated launcher; the full summary above stays in the
-            // artifact's machine-readable metadata.
+            // Static-analysis details stay machine-readable in the artifact but
+            // are deliberately not displayed by the generated launcher.
             val analysisStats = "Static analysis only: $classifiedImportSymbols/$distinctImportSymbols symbols triaged ($classificationCoveragePercent%); $directApiCandidates direct-name candidates ($runtimeVerifiedNdkCandidates runtime exports resolved$apiLevelNote), $semanticApiCandidates semantic targets, $unmappedApiSymbols unmapped."
             val analysisInfo = JSONObject()
                 .put("distinctImportSymbols", distinctImportSymbols)
@@ -195,9 +195,12 @@ internal class PlaceholderApkBuilder(private val context: Context) {
                 .setV1SigningEnabled(true)
                 .setV2SigningEnabled(true)
                 .setV3SigningEnabled(true)
+                .setAlignmentPreserved(true)
+                .setLibraryPageAlignmentBytes(AlignedApkZip.NATIVE_LIBRARY_ALIGNMENT)
                 .build()
                 .sign()
             require(signedFile.isFile && signedFile.length() > 0) { "APK signing produced no output" }
+            AlignedApkZip.verifyAlignedEntries(signedFile, alignedEntries)
 
             setProgress(88, "VERIFYING", "Checking the generated APK signature and package structure")
             val verification = ApkVerifier.Builder(signedFile).build().verify()

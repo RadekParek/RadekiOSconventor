@@ -90,8 +90,11 @@ Darwin/Android ABI compatibility or link the imported code. Separately, `libiosc
 four tested C ABI shims: `_CFAbsoluteTimeGetCurrent`, `_CACurrentMediaTime`, `_mach_absolute_time`,
 and `_mach_timebase_info`. The host emits their C++ implementation source only when a reconstructed
 call graph establishes a path from the selected entry to one of those imports; the generated shim
-source is not linked into the entry library or a game APK. On-device `dlsym` checks can verify that
-the compiled shim exports are present, but do not rewrite IPA callsites.
+source is not linked into the host-translated entry. On-device `dlsym` checks can verify that
+the compiled shim exports are present, but do not rewrite IPA callsites. The bounded on-device APK
+also packages `libioscompat.so` and declares it through `DT_NEEDED`; because that converter accepts
+only a zero-import executable, this runtime dependency does not claim any individual API callsite
+was rewritten or linked.
 
 `libioscompat.so` also carries a dynamic symbol-resolution registry: the four verified shims plus a
 pool of individually counted stub trampolines. Symbols that would otherwise stay unmapped can be

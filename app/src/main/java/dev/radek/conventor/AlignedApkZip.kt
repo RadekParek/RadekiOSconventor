@@ -122,6 +122,24 @@ internal object AlignedApkZip {
     }
 
     /**
+     * Re-checks required stored-entry alignments after signing. V1 signing adds
+     * META-INF files, so this intentionally validates the required payloads
+     * without requiring the signed archive to have the unsigned entry set.
+     */
+    fun verifyAlignedEntries(file: File, alignedStoredNames: Map<String, Int>) {
+        require(file.isFile && file.length() > 0) { "APK is missing or empty" }
+        ZipFile(file).use { zip ->
+            alignedStoredNames.forEach { (name, alignment) ->
+                require(alignment > 1) { "invalid APK entry alignment for $name" }
+                val entry = zip.getEntry(name) ?: error("APK is missing $name")
+                require(entry.method == ZipEntry.STORED) { "$name must be stored uncompressed in the APK" }
+                require(entry.size > 0 && entry.compressedSize == entry.size) { "$name has an invalid stored size" }
+            }
+        }
+        verifyLocalAlignment(file, alignedStoredNames)
+    }
+
+    /**
      * Builds the ZIP extra field that pushes a stored payload onto [alignment].
      *
      * The extra field length is a 16-bit field, so a single record can only ever

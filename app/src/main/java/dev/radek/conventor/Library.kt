@@ -12,6 +12,7 @@ import java.util.UUID
 object NativeBridge {
     init { System.loadLibrary("radek") }
     external fun analyze(bytes: ByteArray): String
+    external fun analyzeCompact(bytes: ByteArray): String
     external fun translateTrivial(bytes: ByteArray): String
     external fun findAndroidLibrary(symbol: String): String?
     external fun findImplementedApiReplacement(sourceSymbol: String): String?
@@ -131,6 +132,7 @@ class Library(private val context: Context) {
                 .put("fileType", slice.optString("fileType"))
                 .put("dependencyCount", (slice.optJSONArray("dependencies") ?: JSONArray()).length())
                 .put("importCount", (slice.optJSONArray("imports") ?: JSONArray()).length())
+                .put("importsTruncated", slice.optBoolean("importsTruncated", false))
                 .put("symbolCount", slice.optInt("symbolCount", 0))
                 .put("bindDecodingComplete", slice.optBoolean("bindDecodingComplete", true))
                 .put("hasChainedFixups", slice.has("chainedFixups")))
@@ -278,7 +280,7 @@ class Library(private val context: Context) {
             require(binary.isFile && binary.length() <= MAX_EXECUTABLE_BYTES) { "Missing executable or exceeds the on-device ${MAX_EXECUTABLE_BYTES / (1024 * 1024)} MiB analysis limit; use the host analyzer for larger files" }
             log(ConversionState.ANALYZING, "Parsing Mach-O load commands, symbols, fixups and dependencies", 33)
             val binaryBytes = binary.readBytes()
-            val macho = JSONObject(NativeBridge.analyze(binaryBytes))
+            val macho = JSONObject(NativeBridge.analyzeCompact(binaryBytes))
             // Bounded on-device conversion proof: is the whole executable exactly
             // one closed-integer routine with nothing left over? Fail closed.
             val deviceTranslation = try {
@@ -349,7 +351,7 @@ class Library(private val context: Context) {
                                 .put("reason", "embedded image exceeds the on-device ${MAX_EXECUTABLE_BYTES / (1024 * 1024)} MiB analysis limit"))
                             null
                         } else {
-                            JSONObject(NativeBridge.analyze(file.readBytes()))
+                            JSONObject(NativeBridge.analyzeCompact(file.readBytes()))
                         }
                     } catch (error: Throwable) {
                         analysisErrors.put(JSONObject().put("path", relative)

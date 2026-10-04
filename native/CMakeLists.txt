@@ -9,14 +9,20 @@ target_compile_options(radek_analysis PRIVATE -Wall -Wextra -Werror)
 
 # This is a small, concrete Android compatibility library, not a general Apple
 # framework/runtime. It is linked into the analyzer so its exports can be
-# verified on-device, and is independently reusable by a future game linker.
+# verified on-device; the bounded APK writer also packages this library and
+# declares it as DT_NEEDED. This does not rewrite unsupported Mach-O callsites.
 add_library(ioscompat SHARED src/apple_time_compat.cpp src/radek_ios_shims.cpp src/ioscompat_registry.cpp)
 target_include_directories(ioscompat PUBLIC include)
 target_compile_options(ioscompat PRIVATE -Wall -Wextra -Werror)
 find_package(Threads REQUIRED)
 
 if(ANDROID)
+    # NDK r27 remains in use by this project. Explicitly request 16 KiB PT_LOAD
+    # alignment so the packaged shim runtime works on Android 15+ 16 KiB-page
+    # devices as well as the APK's 16 KiB ZIP payload alignment.
+    target_link_options(ioscompat PRIVATE "-Wl,-z,max-page-size=16384")
     add_library(radek SHARED src/jni.cpp)
+    target_link_options(radek PRIVATE "-Wl,-z,max-page-size=16384")
     target_link_libraries(radek PRIVATE radek_analysis ioscompat dl)
 else()
     add_executable(radek-macho src/main.cpp)

@@ -15,16 +15,27 @@ internal object ConvertedElfWriter {
     // devices (the APK also places the library at a 16-page-aligned offset).
     private const val PAGE_SIZE = 0x4000
     private const val SYMBOL_REGEX = "^[A-Za-z_][A-Za-z0-9_]*$"
+    private const val NEEDED_LIBRARY_REGEX = "^lib[A-Za-z0-9_.+-]+\\.so$"
     private const val MAX_CODE_BYTES = 16 * 1024 * 1024
+    private const val MAX_NEEDED_LIBRARIES = 64
 
     private fun align(value: Int, alignment: Int): Int = (value + alignment - 1) and (alignment - 1).inv()
 
     /** Wrap the proven ARM64 machine code in a loadable library exporting [symbol]. */
-    fun buildSharedObject(machineCode: ByteArray, symbol: String): ByteArray {
+    fun buildSharedObject(
+        machineCode: ByteArray,
+        symbol: String,
+        neededLibraries: List<String> = emptyList(),
+    ): ByteArray {
         require(machineCode.isNotEmpty() && machineCode.size <= MAX_CODE_BYTES) {
             "translated ELF function is empty or exceeds the 16 MiB limit"
         }
         require(Regex(SYMBOL_REGEX).matches(symbol)) { "invalid translated ELF symbol name" }
+        require(neededLibraries.size <= MAX_NEEDED_LIBRARIES &&
+            neededLibraries.distinct().size == neededLibraries.size &&
+            neededLibraries.all { Regex(NEEDED_LIBRARY_REGEX).matches(it) }) {
+            "invalid or duplicate ELF DT_NEEDED library name"
+        }
 
         // arm64 constants (mirrors elf_writer.py with is_64 = true).
         val elfClass = 2
@@ -44,11 +55,21 @@ internal object ConvertedElfWriter {
         val dataOffset = align(textEnd, PAGE_SIZE)
         val dataAddress = dataOffset
 
+        val stringsOutput = java.io.ByteArrayOutputStream()
+        stringsOutput.write(0)
+        stringsOutput.write(symbol.toByteArray(Charsets.US_ASCII))
+        stringsOutput.write(0)
+        val neededOffsets = neededLibraries.map { library ->
+            val offset = stringsOutput.size()
+            stringsOutput.write(library.toByteArray(Charsets.US_ASCII))
+            stringsOutput.write(0)
+            offset
+        }
+        val strings = stringsOutput.toByteArray()
         val dynamicOffset = dataOffset
-        val dynamicSize = 6 * dynSize
+        val dynamicSize = (6 + neededOffsets.size) * dynSize
         val hashOffset = align(dynamicOffset + dynamicSize, 4)
         val hashSize = 5 * 4
-        val strings = byteArrayOf(0) + symbol.toByteArray(Charsets.US_ASCII) + byteArrayOf(0)
         val stringsOffset = hashOffset + hashSize
         val symbolsOffset = align(stringsOffset + strings.size, symbolAlignment)
 
@@ -56,14 +77,15 @@ internal object ConvertedElfWriter {
         val hashAddress = dataAddress + hashOffset - dataOffset
         val stringsAddress = dataAddress + stringsOffset - dataOffset
         val symbolsAddress = dataAddress + symbolsOffset - dataOffset
-        val dynamicEntries = listOf(
-            4L to hashAddress.toLong(),          // DT_HASH
-            5L to stringsAddress.toLong(),       // DT_STRTAB
-            6L to symbolsAddress.toLong(),       // DT_SYMTAB
-            10L to strings.size.toLong(),        // DT_STRSZ
-            11L to symSize.toLong(),             // DT_SYMENT
-            0L to 0L,                            // DT_NULL
-        )
+        val dynamicEntries = buildList {
+            neededOffsets.forEach { add(1L to it.toLong()) } // DT_NEEDED
+            add(4L to hashAddress.toLong())                 // DT_HASH
+            add(5L to stringsAddress.toLong())              // DT_STRTAB
+            add(6L to symbolsAddress.toLong())              // DT_SYMTAB
+            add(10L to strings.size.toLong())               // DT_STRSZ
+            add(11L to symSize.toLong())                     // DT_SYMENT
+            add(0L to 0L)                                   // DT_NULL
+        }
         val dynamicBlob = ByteBuffer.allocate(dynamicEntries.size * dynSize).order(ByteOrder.LITTLE_ENDIAN)
         for ((tag, value) in dynamicEntries) {
             dynamicBlob.putLong(tag).putLong(value)
@@ -94,7 +116,6 @@ internal object ConvertedElfWriter {
             cursor += sectionName.length + 1
         }
 
-        val stringsEnd = stringsOffset + strings.size
         val symbolsEnd = symbolsOffset + symbolsBlob.size
         val dataEnd = maxOf(
             dynamicOffset + dynamicBlob.limit(),

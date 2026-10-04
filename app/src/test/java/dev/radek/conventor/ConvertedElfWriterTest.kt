@@ -43,6 +43,14 @@ class ConvertedElfWriterTest {
         val shnum = header.short.toInt()
         assertEquals(7, shnum)
         assertEquals(6, header.short.toInt())      // e_shstrndx
+        for (index in 0 until phnum) {
+            val programHeader = le(elf, phoff + index * 56)
+            if (programHeader.getInt(0) == 1) { // PT_LOAD
+                assertEquals(0L, programHeader.getLong(8) % AlignedApkZip.NATIVE_LIBRARY_ALIGNMENT.toLong())
+                assertEquals(0L, programHeader.getLong(16) % AlignedApkZip.NATIVE_LIBRARY_ALIGNMENT.toLong())
+                assertEquals(AlignedApkZip.NATIVE_LIBRARY_ALIGNMENT.toLong(), programHeader.getLong(48))
+            }
+        }
 
         // The machine code is present verbatim; find .text through the section headers.
         var textSize = -1
@@ -86,6 +94,18 @@ class ConvertedElfWriterTest {
         var failed = runCatching { ConvertedElfWriter.buildSharedObject(ByteArray(0), symbol) }.isFailure
         assertTrue(failed)
         failed = runCatching { ConvertedElfWriter.buildSharedObject(code, "../evil") }.isFailure
+        assertTrue(failed)
+        failed = runCatching {
+            ConvertedElfWriter.buildSharedObject(code, symbol, neededLibraries = listOf("../libioscompat.so"))
+        }.isFailure
+        assertTrue(failed)
+        failed = runCatching {
+            ConvertedElfWriter.buildSharedObject(
+                code,
+                symbol,
+                neededLibraries = listOf("libioscompat.so", "libioscompat.so"),
+            )
+        }.isFailure
         assertTrue(failed)
     }
 

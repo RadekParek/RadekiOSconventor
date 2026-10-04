@@ -2,8 +2,8 @@
 //
 // The Android importer converts an IPA by itself only when the executable is
 // statically proven to be exactly one closed-integer ARM64 routine with no
-// imports, dependencies, fixups or runtime metadata. Everything else stays
-// UNSUPPORTED. Nothing here executes guest instructions: the decoder only
+// imports, dependencies, text relocations, fixups or runtime metadata.
+// Everything else stays UNSUPPORTED. Nothing here executes guest instructions: the decoder only
 // verifies membership in the proven subset and copies the source bytes.
 
 #include "trivial.hpp"
@@ -73,6 +73,7 @@ const std::set<uint64_t> &allowedLoadCommands() {
 struct TextSection {
     uint64_t offset = 0;
     uint64_t size = 0;
+    uint64_t relocationCount = 0;
     bool found = false;
 };
 
@@ -96,6 +97,7 @@ TextSection findEntryTextSection(const Json &slice, uint64_t entry) {
             if (offset <= entry && entry < offset + size) {
                 result.offset = offset;
                 result.size = size;
+                result.relocationCount = number(*fieldOr(section, "relocationCount"));
                 result.found = true;
                 return result;
             }
@@ -221,7 +223,7 @@ Json translateTrivial(const std::vector<uint8_t> &data) {
 
     Json analysis;
     try {
-        analysis = analyze(data);
+        analysis = analyze(data, false);
     } catch (const std::exception &e) {
         result["reason"] = std::string("Mach-O analysis failed: ") + e.what();
         return result;
@@ -323,6 +325,11 @@ Json translateTrivial(const std::vector<uint8_t> &data) {
         }
         if (entry != section.offset) {
             why = "the proven routine must start at the __text section (other functions are not converted)";
+            reject();
+            continue;
+        }
+        if (section.relocationCount != 0) {
+            why = "relocations in the proven __text section are not supported";
             reject();
             continue;
         }

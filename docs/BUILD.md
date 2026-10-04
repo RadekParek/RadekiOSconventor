@@ -80,10 +80,12 @@ against representative IR cases in the unit tests. No Android device load test i
 If resolved reconstructed internal calls establish a path from the selected entry to one of four
 supported time imports, the host also emits the selected Bionic-backed implementation source under
 `api-replacements/`. The source is compiled and
-behavior-tested on the host, but is not linked to the translated entry or any APK. The report records
+behavior-tested on the host, but is not linked to the translated host entry. The on-device bounded
+APK builder packages its prebuilt ARM64 `libioscompat.so` and declares `DT_NEEDED`; it still rewrites
+no individual imports because the accepted executable has none. The report records
 one function's source instruction bytes divided by the selected slice's executable `__text` bytes as
 partial machine-code progress; `conversionProgress` remains `NOT_BUILT` unless the stricter bounded
-complete-conversion gate (whole `__text` equals the proven routine, zero imports/metadata) applies
+complete-conversion gate (whole `__text` equals the proven routine, zero `__text` relocations, imports and metadata) applies
 and a signed APK is built. If `convert` is invoked on an input that passes only this restricted
 proof, it returns `BLOCKED`, retains any isolated native artifact, and produces no game APK. The
 experiment does not translate all game code, APIs, resources, or lifecycle.

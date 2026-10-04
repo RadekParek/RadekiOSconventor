@@ -49,6 +49,37 @@ class AndroidApiMapperTest {
         assertTrue(mapping.getString("measure").contains("triage, not implementation coverage"))
     }
 
+    @Test fun mapperRetainsMoreThanTenThousandDistinctImports() {
+        val imports = JSONArray()
+        for (index in 0 until 10_001) {
+            imports.put(JSONObject().put("name", "_large_game_import_$index"))
+        }
+        val nodes = JSONArray().put(JSONObject().put("analysis", JSONObject()
+            .put("slices", JSONArray().put(JSONObject().put("imports", imports)))))
+
+        val mapping = AndroidApiMapper.analyze(nodes)
+
+        assertEquals(10_001, mapping.getInt("distinctImportSymbols"))
+        assertEquals(10_001, mapping.getInt("classifiedImportSymbols"))
+        assertEquals("COMPLETE", mapping.getString("classificationStatus"))
+        assertFalse(mapping.getBoolean("truncated"))
+    }
+
+    @Test fun compactMachOImportTruncationIsNotReportedAsCompleteClassification() {
+        val slice = JSONObject()
+            .put("imports", JSONArray().put(JSONObject().put("name", "_observed_import")))
+            .put("importsTruncated", true)
+        val nodes = JSONArray().put(JSONObject().put("analysis", JSONObject()
+            .put("slices", JSONArray().put(slice))))
+
+        val mapping = AndroidApiMapper.analyze(nodes)
+
+        assertEquals(1, mapping.getInt("distinctImportSymbols"))
+        assertEquals("TRUNCATED", mapping.getString("classificationStatus"))
+        assertTrue(mapping.getBoolean("truncated"))
+        assertEquals(0, mapping.getInt("classificationCoveragePercent"))
+    }
+
     @Test fun runtimeResolverAddsOnlyAConfirmedPublicNdkExportAndKeepsImplementationAtZero() {
         val imports = JSONArray()
             .put(JSONObject().put("name", "_android_log_write"))

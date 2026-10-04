@@ -9,7 +9,8 @@ import org.json.JSONObject
  * code, bridge Objective-C objects, link a Bionic library, or generate Java.
  */
 internal object AndroidApiMapper {
-    private const val MAX_SYMBOLS = 10_000
+    // Keep high-volume games analyzable while bounding mapper/report growth.
+    private const val MAX_SYMBOLS = 100_000
 
     private val ndkRuntimeLibraries = setOf(
         "libc.so", "libm.so", "libdl.so", "liblog.so", "libandroid.so", "libz.so", "libEGL.so",
@@ -241,7 +242,9 @@ internal object AndroidApiMapper {
             val analysis = nodes.optJSONObject(nodeIndex)?.optJSONObject("analysis") ?: continue
             val slices = analysis.optJSONArray("slices") ?: continue
             for (sliceIndex in 0 until slices.length()) {
-                val imports = slices.optJSONObject(sliceIndex)?.optJSONArray("imports") ?: continue
+                val slice = slices.optJSONObject(sliceIndex) ?: continue
+                if (slice.optBoolean("importsTruncated", false)) truncated = true
+                val imports = slice.optJSONArray("imports") ?: continue
                 for (importIndex in 0 until imports.length()) {
                     val item = imports.opt(importIndex)
                     val name = when (item) {

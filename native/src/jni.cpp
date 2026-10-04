@@ -123,9 +123,9 @@ extern "C" JNIEXPORT jstring JNICALL Java_dev_radek_conventor_NativeBridge_analy
                                                                                    jbyteArray input) {
     try {
         auto n = env->GetArrayLength(input);
-        // The only remaining bound is a device-memory guard: the executable has
-        // to be held in memory to be analyzed. It is not a policy limit on how
-        // large an IPA may be (the archive-level 512 MiB cap was removed).
+        // Retain the device-memory guard on the executable bytes held in JNI;
+        // symbol tables are bounded by their slice ranges/work budget instead.
+        // The IPA archive itself has no fixed total-size policy cap.
         if (n > kMaxExecutableBytes)
             throw std::runtime_error("executable exceeds the on-device 256 MiB analysis limit");
         std::vector<uint8_t> b(n);
@@ -139,13 +139,33 @@ extern "C" JNIEXPORT jstring JNICALL Java_dev_radek_conventor_NativeBridge_analy
     }
 }
 
+extern "C" JNIEXPORT jstring JNICALL Java_dev_radek_conventor_NativeBridge_analyzeCompact(JNIEnv *env, jobject,
+                                                                                   jbyteArray input) {
+    try {
+        auto n = env->GetArrayLength(input);
+        // Retain the device-memory guard on the executable bytes held in JNI;
+        // symbol tables are bounded by their slice ranges/work budget instead.
+        // The IPA archive itself has no fixed total-size policy cap.
+        if (n > kMaxExecutableBytes)
+            throw std::runtime_error("executable exceeds the on-device 256 MiB analysis limit");
+        std::vector<uint8_t> b(n);
+        env->GetByteArrayRegion(input, 0, n, reinterpret_cast<jbyte *>(b.data()));
+        if (env->ExceptionCheck())
+            return nullptr;
+        return env->NewStringUTF(radek::analyze(b, false).dump().c_str());
+    } catch (const std::exception &e) {
+        env->ThrowNew(env->FindClass("java/io/IOException"), e.what());
+        return nullptr;
+    }
+}
+
 extern "C" JNIEXPORT jstring JNICALL Java_dev_radek_conventor_NativeBridge_translateTrivial(
     JNIEnv *env, jobject, jbyteArray input) {
     try {
         auto n = env->GetArrayLength(input);
-        // The only remaining bound is a device-memory guard: the executable has
-        // to be held in memory to be analyzed. It is not a policy limit on how
-        // large an IPA may be (the archive-level 512 MiB cap was removed).
+        // Retain the device-memory guard on the executable bytes held in JNI;
+        // symbol tables are bounded by their slice ranges/work budget instead.
+        // The IPA archive itself has no fixed total-size policy cap.
         if (n > kMaxExecutableBytes)
             throw std::runtime_error("executable exceeds the on-device 256 MiB analysis limit");
         std::vector<uint8_t> b(n);

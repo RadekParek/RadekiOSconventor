@@ -320,7 +320,12 @@ class MainActivity : Activity() {
                 val runtimeSummary = if (runtimeStatus == "CURRENT_DEVICE_DLSYM") "API $runtimeApi exports verified: $verifiedPercent% ($verified/$total)" else "device export check not run"
                 val compatStatus = mapping.optString("runtimeApiReplacementResolverStatus", "NOT_RUN")
                 val compatCount = mapping.optInt("runtimeVerifiedApiReplacementCount", 0)
-                val compatSummary = if (compatStatus == "CURRENT_DEVICE_COMPAT_DLSYM") "$compatCount implemented time-API shim(s) verified (not linked)" else "time-shim export check not run"
+                val runtimeLinked = report.optJSONObject("apiTranslation")?.optBoolean("runtimeLibraryLinked", false) == true
+                val compatSummary = when {
+                    runtimeLinked -> "libioscompat.so runtime linked; individual IPA callsites were not rewritten"
+                    compatStatus == "CURRENT_DEVICE_COMPAT_DLSYM" -> "$compatCount implemented time-API shim(s) verified; APK linking has not run"
+                    else -> "time-shim export check not run"
+                }
                 val generated = report.optJSONObject("hostConversion")?.optInt("generatedApiReplacements", 0) ?: 0
                 val stubs = mapping.optInt("compatStubHandlerCount", 0)
                 val stubSummary = if (stubs > 0) "$stubs compat stub handler(s) registered (unimplemented) · " else ""
@@ -484,7 +489,12 @@ class MainActivity : Activity() {
             val runtimeSummary = if (runtimeStatus == "CURRENT_DEVICE_DLSYM") " · Android API $runtimeApi exports verified: $verifiedPercent% ($verified/$total)" else ""
             val compatStatus = mapping.optString("runtimeApiReplacementResolverStatus", "NOT_RUN")
             val implemented = mapping.optInt("runtimeVerifiedApiReplacementCount", 0)
-            val compatSummary = if (compatStatus == "CURRENT_DEVICE_COMPAT_DLSYM") " · $implemented implemented time-API shim(s) verified, not linked" else ""
+            val runtimeLinked = report.optJSONObject("apiTranslation")?.optBoolean("runtimeLibraryLinked", false) == true
+            val compatSummary = when {
+                runtimeLinked -> " · libioscompat.so runtime linked; no individual IPA callsites rewritten"
+                compatStatus == "CURRENT_DEVICE_COMPAT_DLSYM" -> " · $implemented implemented time-API shim(s) verified; APK linking has not run"
+                else -> ""
+            }
             val stubs = mapping.optInt("compatStubHandlerCount", 0)
             val verifiedHandlers = mapping.optInt("compatVerifiedHandlerCount", 0)
             val stubSummary = buildString {
@@ -500,7 +510,8 @@ class MainActivity : Activity() {
             else "Import categorization is incomplete or there were no imported symbols."
             val mappingDisclosure = when {
                 generated > 0 -> "The on-device mapper generated no per-game code; an attached complete-game host conversion reports $generated generated API replacement(s). Runtime behavior is not device-tested. $triageNote"
-                implemented > 0 -> "$triageNote $implemented imported time API(s) resolve to concrete libioscompat.so implementations on this device, but no IPA callsite was rewritten and none was linked into a game. Other candidates are not implementations."
+                runtimeLinked -> "$triageNote The packaged libioscompat.so runtime is linked through DT_NEEDED. The proven executable has no imports, so no individual IPA API callsite was rewritten or counted as a linked replacement. Other candidates are not implementations."
+                implemented > 0 -> "$triageNote $implemented imported time API(s) resolve to concrete libioscompat.so implementations on this device, but no IPA callsite was rewritten or linked into a game APK. Other candidates are not implementations."
                 else -> "$triageNote A narrow time-API implementation is built into the analyzer runtime, but no matching export was verified for this IPA; no per-game replacement was linked. Other candidates do not predict gameplay compatibility or stability."
             }
             text(mapping.optString("measure") + " $mappingDisclosure", 13f, muted, parent = mappingCard)

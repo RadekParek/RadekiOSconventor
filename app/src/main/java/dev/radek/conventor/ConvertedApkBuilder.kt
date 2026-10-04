@@ -16,8 +16,8 @@ import java.security.MessageDigest
  *
  * The IPA must already be proven by [NativeBridge.translateTrivial]: its whole
  * executable is one closed-integer ARM64 routine with no imports, dependencies,
- * fixups or metadata. Everything outside that subset throws and stays unbuilt;
- * no conversion is ever claimed without the static proof.
+ * __text relocations, fixups, or metadata. Everything outside that subset
+ * throws and stays unbuilt; no conversion is ever claimed without the static proof.
  */
 internal class ConvertedApkBuilder(private val context: Context) {
     companion object {
@@ -28,6 +28,7 @@ internal class ConvertedApkBuilder(private val context: Context) {
         private const val MAX_RESOURCE_FILES = 4096
         private const val ENTRY_CLASS = "dev.radek.generated.MainActivity"
         private const val JNI_SYMBOL = "Java_dev_radek_generated_MainActivity_runNative"
+        private const val ABI = CompatibilityRuntime.ABI
         private const val BACKEND = "radek-device-bounded-v1"
         private const val CONTRACT = "complete-game-v1"
         private val DEX_NAME_REGEX = Regex("""classes[0-9]+\.dex""")
@@ -146,8 +147,20 @@ internal class ConvertedApkBuilder(private val context: Context) {
                 resourceEntries += relative to target
             }
 
-            setProgress(48, "CONVERTING", "Generating the Android native entry library")
-            val elf = ConvertedElfWriter.buildSharedObject(machineCode, JNI_SYMBOL)
+            setProgress(48, "CONVERTING", "Linking the Android compatibility runtime and generating the native entry library")
+            val compatibilityLibraries = CompatibilityRuntime.extractInstalled(context, File(staged, "runtime"))
+            require(compatibilityLibraries.any { it.soname == CompatibilityRuntime.SONAME }) {
+                "the verified iOS compatibility runtime could not be staged"
+            }
+            // The bounded converter rejects Mach-O imports and relocations. It
+            // still links the bundled shim runtime explicitly into the generated
+            // ELF dependency graph; no individual API callsite is claimed as
+            // rewritten by this closed-function path.
+            val elf = ConvertedElfWriter.buildSharedObject(
+                machineCode,
+                JNI_SYMBOL,
+                neededLibraries = listOf(CompatibilityRuntime.SONAME),
+            )
             val elfSha = sha256(elf)
 
             setProgress(56, "PACKAGING", "Reading the bundled converted-app template")
@@ -227,7 +240,14 @@ internal class ConvertedApkBuilder(private val context: Context) {
                     .put("outputBytes", machineCode.size)
                     .put("machineCodeSha256", sha256(machineCode))
                     .put("entrySymbol", JNI_SYMBOL)
-                    .put("nativeLibrarySha256", elfSha))
+                    .put("nativeLibrarySha256", elfSha)
+                    .put("compatibilityRuntime", JSONObject()
+                        .put("status", "LINKED_BY_DT_NEEDED")
+                        .put("libraries", JSONArray().apply {
+                            compatibilityLibraries.forEach { library ->
+                                put(JSONObject().put("soname", library.soname).put("sha256", library.sha256))
+                            }
+                        })))
                 .put("gameConversion", JSONObject()
                     .put("status", "COMPLETE")
                     .put("completeGameConversion", true)
@@ -235,6 +255,9 @@ internal class ConvertedApkBuilder(private val context: Context) {
                     .put("translatedReachableFunctions", 1)
                     .put("untranslatedReachableFunctions", 0)
                     .put("reachableApiCount", 0)
+                    .put("linkedApiReplacements", 0)
+                    .put("linkedRuntimeLibraries", JSONArray().put(CompatibilityRuntime.SONAME))
+                    .put("compatibilityRuntimeLinked", true)
                     .put("generatedApiReplacements", 0)
                     .put("nativeApiPassthroughs", 0)
                     .put("untranslatedReachableApiCount", 0)
@@ -253,8 +276,16 @@ internal class ConvertedApkBuilder(private val context: Context) {
             templateDexes.forEach { (name, bytes) -> entries += AlignedApkZip.Entry(name, bytes) }
             entries += AlignedApkZip.Entry("resources.arsc", resources)
             entries += AlignedApkZip.Entry(iconEntryPath, launcherIcon)
-            entries += AlignedApkZip.Entry("lib/arm64-v8a/libconverted.so", elf,
+            entries += AlignedApkZip.Entry("lib/$ABI/libconverted.so", elf,
                 alignment = AlignedApkZip.NATIVE_LIBRARY_ALIGNMENT)
+            compatibilityLibraries.forEach { library ->
+                entries += AlignedApkZip.Entry.stream(
+                    library.apkPath,
+                    library.file,
+                    compressed = false,
+                    alignment = AlignedApkZip.NATIVE_LIBRARY_ALIGNMENT,
+                )
+            }
             entries += AlignedApkZip.Entry("assets/conversion.json", metadata.toString().toByteArray(Charsets.UTF_8), compressed = true)
             if (recoveredIcon != null) {
                 entries += AlignedApkZip.Entry("assets/ipa-icon.png", recoveredIcon, compressed = true)
@@ -267,7 +298,8 @@ internal class ConvertedApkBuilder(private val context: Context) {
                 put("AndroidManifest.xml", AlignedApkZip.ALIGNMENT)
                 put("resources.arsc", AlignedApkZip.ALIGNMENT)
                 put(iconEntryPath, AlignedApkZip.ALIGNMENT)
-                put("lib/arm64-v8a/libconverted.so", AlignedApkZip.NATIVE_LIBRARY_ALIGNMENT)
+                put("lib/$ABI/libconverted.so", AlignedApkZip.NATIVE_LIBRARY_ALIGNMENT)
+                compatibilityLibraries.forEach { put(it.apkPath, AlignedApkZip.NATIVE_LIBRARY_ALIGNMENT) }
                 templateDexNames.forEach { put(it, AlignedApkZip.ALIGNMENT) }
             }
             AlignedApkZip.write(unsignedFile, entries)
@@ -287,9 +319,17 @@ internal class ConvertedApkBuilder(private val context: Context) {
                 .setV1SigningEnabled(true)
                 .setV2SigningEnabled(true)
                 .setV3SigningEnabled(true)
+                // apksig 8.7+ otherwise rewrites ZIP alignment padding while
+                // signing. Preserve the validated 16 KiB offsets in the signed APK.
+                .setAlignmentPreserved(true)
+                .setLibraryPageAlignmentBytes(AlignedApkZip.NATIVE_LIBRARY_ALIGNMENT)
                 .build()
                 .sign()
             require(signedFile.isFile && signedFile.length() > 0) { "APK signing produced no output" }
+            AlignedApkZip.verifyAlignedEntries(
+                signedFile,
+                alignedNames.filterKeys { it.startsWith("lib/") },
+            )
 
             setProgress(90, "VERIFYING", "Checking the converted APK signature and package structure")
             val verification = ApkVerifier.Builder(signedFile).build().verify()
@@ -344,6 +384,9 @@ internal class ConvertedApkBuilder(private val context: Context) {
                 .put("machineCodeSha256", sha256(machineCode))
                 .put("translatedReachableFunctions", 1)
                 .put("untranslatedReachableFunctions", 0)
+                .put("linkedApiReplacements", 0)
+                .put("linkedRuntimeLibraries", JSONArray().put(CompatibilityRuntime.SONAME))
+                .put("compatibilityRuntimeLinked", true)
                 .put("generatedApiReplacements", 0)
                 .put("reachableSourceFunctions", 1)
                 .put("sourceIconSha256", launcherIconSha)
@@ -359,6 +402,19 @@ internal class ConvertedApkBuilder(private val context: Context) {
                     .put("warnings", JSONArray().apply { audit.warnings.forEach { put(it) } }))
                 .put("completedAt", java.time.Instant.now().toString())
             report.put("deviceConversion", conversion)
+            val verifiedApiReplacements = report.optJSONObject("apiMapping")
+                ?.optInt("runtimeVerifiedApiReplacementCount", 0)?.coerceAtLeast(0) ?: 0
+            report.put("apiTranslation", (report.optJSONObject("apiTranslation") ?: JSONObject())
+                .put("status", "RUNTIME_LIBRARY_LINKED_NO_CALLSITE_REWRITES")
+                .put("runtimeLibraryLinked", true)
+                .put("linkedRuntimeLibraries", JSONArray().put(CompatibilityRuntime.SONAME))
+                .put("linkedApiReplacements", 0)
+                .put("linkedIntoGame", false)
+                .put("message", if (verifiedApiReplacements > 0) {
+                    "$verifiedApiReplacements concrete shim export(s) were verified and ${CompatibilityRuntime.SONAME} is linked into the APK through DT_NEEDED. The bounded executable has no imports, so no individual IPA API callsite was rewritten or counted as a linked API replacement."
+                } else {
+                    "${CompatibilityRuntime.SONAME} is bundled and linked into the APK through DT_NEEDED. No imported API matched the runtime verification, and the bounded executable has no imports, so no individual IPA callsite was rewritten or counted as a linked API replacement; runtime execution was not tested."
+                }))
             // Expose the artifact through the same attachment contract used for
             // host conversions so install/share/provider paths work unchanged.
             report.put("hostConversion", JSONObject()
@@ -371,6 +427,9 @@ internal class ConvertedApkBuilder(private val context: Context) {
                 .put("nativeCodeGenerated", true)
                 .put("nativeCodeBytes", machineCode.size)
                 .put("translatedReachableFunctions", 1)
+                .put("linkedApiReplacements", 0)
+                .put("linkedRuntimeLibraries", JSONArray().put(CompatibilityRuntime.SONAME))
+                .put("compatibilityRuntimeLinked", true)
                 .put("generatedApiReplacements", 0)
                 .put("untranslatedReachableFunctions", 0)
                 .put("sourceIconSha256", launcherIconSha)
