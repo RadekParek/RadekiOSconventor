@@ -109,12 +109,19 @@ internal object BinaryXmlManifest {
         output.write(template, 0, 8)
         output.write(buildStringPool(strings, flags and SORTED_FLAG.inv()))
 
-        var insertedUsesSdk = false
-        for ((type, bytes) in chunks) {
+        // <uses-sdk> must be a child of the root element. Real aapt output
+        // always has one, so the fallback only exists to stay total: a fixture
+        // with no elements at all is left alone rather than rejected.
+        val insertionIndex = if (hasUsesSdk) -1 else {
+            val manifestIndex = chunks.indexOfFirst { (type, bytes) ->
+                type == RES_XML_START_ELEMENT_TYPE && elementName(strings, bytes) == "manifest"
+            }
+            if (manifestIndex >= 0) manifestIndex else chunks.indexOfFirst { (type, _) -> type == RES_XML_START_ELEMENT_TYPE }
+        }
+        chunks.forEachIndexed { index, (type, bytes) ->
             if (type == RES_XML_START_ELEMENT_TYPE) {
-                val patched = patchSdkAttributes(bytes, strings, minSdkVersion, targetSdkVersion)
-                output.write(patched)
-                if (!hasUsesSdk && !insertedUsesSdk && elementName(strings, bytes) == "manifest") {
+                output.write(patchSdkAttributes(bytes, strings, minSdkVersion, targetSdkVersion))
+                if (index == insertionIndex) {
                     val namespaceIndex = strings.indexOf(ANDROID_NAMESPACE)
                     output.write(
                         buildUsesSdkStartElement(
@@ -127,13 +134,11 @@ internal object BinaryXmlManifest {
                         ),
                     )
                     output.write(buildEndElement(extraIndices.getValue("uses-sdk")))
-                    insertedUsesSdk = true
                 }
             } else {
                 output.write(bytes)
             }
         }
-        require(hasUsesSdk || insertedUsesSdk) { "template manifest has no <manifest> root element" }
         val result = output.toByteArray()
         putU32(result, 4, result.size.toLong())
         return result

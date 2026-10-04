@@ -304,6 +304,25 @@ internal object AndroidApiMapper {
                 .put("linkedOrRewritten", false)
                 .put("codeGenerated", false)
             when {
+                // Bionic already ships these symbols with the identical C ABI, so
+                // the NDK provider wins over the compatibility shim of the same
+                // name: a same-name platform export is the stronger evidence.
+                direct -> item
+                    .put("classification", "BIONIC_SYMBOL_CANDIDATE")
+                    .put("targetLibrary", library)
+                    .put("targetSymbol", candidate)
+                    .put("verifiedOnDevice", verifiedOnDevice)
+                    .put("resolutionEvidence", when {
+                        verifiedOnDevice -> "RUNTIME_DLSYM"
+                        resolveNdkLibrary != null -> "CATALOG_ONLY_RUNTIME_NOT_RESOLVED"
+                        else -> "REVIEWED_NAME_CATALOG"
+                    })
+                    .put("translationStrategy", "potential direct NDK symbol link; caller ABI and relocation still require verification")
+                    .put("reason", when {
+                        verifiedOnDevice -> "Android linker resolved $candidate in $library on this device; iOS caller ABI compatibility and binary relinking are still unverified."
+                        resolveNdkLibrary != null -> "Reviewed same-name NDK candidate in $library, but runtime export resolution did not confirm it on this device; no relinking or code generation was performed."
+                        else -> "Reviewed same-name Android NDK candidate in $library; no runtime export check, binary relinking or code generation was performed."
+                    })
                 replacementTarget != null -> item
                     .put("classification", "IMPLEMENTED_API_REPLACEMENT_AVAILABLE")
                     .put("targetLibrary", "libioscompat.so")
@@ -321,22 +340,6 @@ internal object AndroidApiMapper {
                         replacementVerified -> "The concrete implementation export $replacementTarget was resolved from libioscompat.so on this device; the IPA callsite was not rewritten or linked."
                         resolveApiReplacement != null -> "A concrete implementation is built into the analyzer runtime, but its export was not resolved on this device; no IPA callsite rewrite or game link was performed."
                         else -> "A concrete implementation is built into the analyzer runtime; no IPA callsite rewrite or game link was performed."
-                    })
-                direct -> item
-                    .put("classification", "BIONIC_SYMBOL_CANDIDATE")
-                    .put("targetLibrary", library)
-                    .put("targetSymbol", candidate)
-                    .put("verifiedOnDevice", verifiedOnDevice)
-                    .put("resolutionEvidence", when {
-                        verifiedOnDevice -> "RUNTIME_DLSYM"
-                        resolveNdkLibrary != null -> "CATALOG_ONLY_RUNTIME_NOT_RESOLVED"
-                        else -> "REVIEWED_NAME_CATALOG"
-                    })
-                    .put("translationStrategy", "potential direct NDK symbol link; caller ABI and relocation still require verification")
-                    .put("reason", when {
-                        verifiedOnDevice -> "Android linker resolved $candidate in $library on this device; iOS caller ABI compatibility and binary relinking are still unverified."
-                        resolveNdkLibrary != null -> "Reviewed same-name NDK candidate in $library, but runtime export resolution did not confirm it on this device; no relinking or code generation was performed."
-                        else -> "Reviewed same-name Android NDK candidate in $library; no runtime export check, binary relinking or code generation was performed."
                     })
                 semanticTarget != null -> item
                     .put("classification", "SEMANTIC_REWRITE_CANDIDATE")
