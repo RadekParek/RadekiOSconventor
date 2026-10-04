@@ -1,5 +1,6 @@
 #include "ioscompat_registry.hpp"
 #include "apple_time_compat.h"
+#include "radek_ios_shims.h"
 
 #include <cstdint>
 #include <cstring>
@@ -7,6 +8,11 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+// Counting expansion of the shared table, so this test never hard-codes a
+// number that silently drifts when a shim is added.
+#define RADEK_COUNT_ONE(darwin, android) +1
+constexpr std::size_t kRadekIosShimTableSize = 0 RADEK_IOS_SHIM_TABLE(RADEK_COUNT_ONE);
 
 #define CHECK(expression)                                                                                   \
     do {                                                                                                     \
@@ -97,8 +103,10 @@ int main() {
     }
     CHECK(sawBulk);
     CHECK(radek_compat_entry_at(radek_compat_entry_count(), nullptr, nullptr, nullptr, nullptr) == -1);
-    CHECK(radek_compat::verifiedCount() == 4);
-    CHECK(radek_compat::stubCount() == radek_compat_entry_count() - 4);
+    // The four time shims plus every entry of the shared iOS shim table.
+    constexpr std::size_t kExpectedVerifiedCount = 4 + kRadekIosShimTableSize;
+    CHECK(radek_compat::verifiedCount() == kExpectedVerifiedCount);
+    CHECK(radek_compat::stubCount() == radek_compat_entry_count() - kExpectedVerifiedCount);
 
     // Concurrent registration and lookup must not corrupt the registry.
     std::vector<std::thread> workers;

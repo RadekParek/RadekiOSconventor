@@ -119,6 +119,25 @@ class Library(private val context: Context) {
         }
     }
 
+    /** Keeps only the facts the UI and install paths read back from a report. */
+    private fun compactSlices(slices: JSONArray?): JSONArray {
+        val output = JSONArray()
+        if (slices == null) return output
+        for (index in 0 until slices.length()) {
+            val slice = slices.optJSONObject(index) ?: continue
+            output.put(JSONObject()
+                .put("architecture", slice.optString("architecture"))
+                .put("encrypted", slice.optBoolean("encrypted"))
+                .put("fileType", slice.optString("fileType"))
+                .put("dependencyCount", (slice.optJSONArray("dependencies") ?: JSONArray()).length())
+                .put("importCount", (slice.optJSONArray("imports") ?: JSONArray()).length())
+                .put("symbolCount", slice.optInt("symbolCount", 0))
+                .put("bindDecodingComplete", slice.optBoolean("bindDecodingComplete", true))
+                .put("hasChainedFixups", slice.has("chainedFixups")))
+        }
+        return output
+    }
+
     private fun sourceDetails(uri: Uri): Pair<String, Long?> {
         val queried = try {
             context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
@@ -199,7 +218,9 @@ class Library(private val context: Context) {
                     val buffer = ByteArray(65536); var total = 0L
                     while (true) {
                         val n = input.read(buffer); if (n < 0) break
-                        total += n; require(total <= SafeZip.MAX_ARCHIVE) { "IPA exceeds 512 MiB" }
+                        total += n
+                        // No fixed size cap: stop only when the device runs out of room.
+                        if (total < 65536 || total % 1048576L == 0L) SafeZip.requireStorage(dir, total)
                         digest.update(buffer, 0, n); output.write(buffer, 0, n)
                         val copyPercent = expectedSourceBytes?.takeIf { it > 0 }?.let { (total * 5L / it).toInt() } ?: 2
                         updateProgress(copyPercent.coerceAtMost(5), "IMPORTING", "Copying authorized IPA · ${formatBytes(total)}")
@@ -254,7 +275,7 @@ class Library(private val context: Context) {
             updateProgress(40, "ICON_RECOVERY", if (iconReport.optString("status") == "SUPPORTED") "Recovered the original game icon for the analysis library" else "No compatible icon could be decoded")
             updateProgress(44, "ANALYZING", "Launcher icon recovered; preparing bounded native analysis")
             val binary = File(app, executable)
-            require(binary.isFile && binary.length() <= 64 * 1024 * 1024) { "Missing executable or exceeds the on-device 64 MiB analysis limit; use the host analyzer for larger files" }
+            require(binary.isFile && binary.length() <= MAX_EXECUTABLE_BYTES) { "Missing executable or exceeds the on-device ${MAX_EXECUTABLE_BYTES / (1024 * 1024)} MiB analysis limit; use the host analyzer for larger files" }
             log(ConversionState.ANALYZING, "Parsing Mach-O load commands, symbols, fixups and dependencies", 33)
             val binaryBytes = binary.readBytes()
             val macho = JSONObject(NativeBridge.analyze(binaryBytes))
@@ -284,21 +305,35 @@ class Library(private val context: Context) {
             report.put("machO", macho)
             updateProgress(53, "Mach-O analysis", "Primary executable analysis completed")
             val graph = JSONArray(); val nodes = JSONArray()
+            val analysisErrors = JSONArray()
             var encrypted = false; var incompatible = false
             var hasCandidate = false
             fun inspect(file: File, analysis: JSONObject) {
                 nodes.put(JSONObject().put("path", file.relativeTo(app).path).put("analysis", analysis))
-                val slices = analysis.getJSONArray("slices")
+                val slices = analysis.optJSONArray("slices")
+                if (slices == null) {
+                    // A Mach-O image we could not decode is reported, not fatal:
+                    // one unreadable framework must not lose the whole analysis.
+                    analysisErrors.put(JSONObject().put("path", file.relativeTo(app).path)
+                        .put("reason", analysis.optString("error").ifBlank { "the Mach-O image could not be decoded" }))
+                    incompatible = true
+                    return
+                }
                 for (index in 0 until slices.length()) {
                     val slice = slices.getJSONObject(index)
-                    encrypted = encrypted || slice.getBoolean("encrypted")
-                    val arch = slice.getString("architecture")
+                    encrypted = encrypted || slice.optBoolean("encrypted")
+                    val arch = slice.optString("architecture")
                     if (file == binary && arch in listOf("arm64", "armv7", "armv7s", "armv6")) hasCandidate = true
-                    val deps = slice.getJSONArray("dependencies")
-                    for (d in 0 until deps.length()) graph.put(JSONObject().put("from", file.relativeTo(app).path)
-                        .put("installName", deps.getJSONObject(d).getString("path")).put("classification", "unverified")
-                        .put("reason", "Linked dependency; this on-device report cannot prove API reachability and ships no Darwin ABI provider"))
-                    incompatible = incompatible || deps.length() > 0 || slice.getJSONArray("imports").length() > 0 || slice.getJSONArray("metadata").length() > 0 || slice.has("chainedFixups") || !slice.optBoolean("bindDecodingComplete", true)
+                    val deps = slice.optJSONArray("dependencies") ?: JSONArray()
+                    for (d in 0 until deps.length()) {
+                        val installName = deps.getJSONObject(d).optString("path")
+                        graph.put(Providers.classify(installName).put("from", file.relativeTo(app).path))
+                    }
+                    val imports = slice.optJSONArray("imports") ?: JSONArray()
+                    val metadata = slice.optJSONArray("metadata") ?: JSONArray()
+                    if (imports.length() > 0 || metadata.length() > 0 || slice.has("chainedFixups") || !slice.optBoolean("bindDecodingComplete", true)) {
+                        incompatible = true
+                    }
                 }
             }
             inspect(binary, macho)
@@ -307,13 +342,30 @@ class Library(private val context: Context) {
                 val head = ByteArray(4)
                 val size = file.inputStream().use { it.read(head) }
                 if (size == 4 && head.joinToString("") { "%02x".format(it.toInt() and 255) } in magics) {
-                    require(file.length() <= 64 * 1024 * 1024) { "Embedded executable exceeds 64 MiB on-device limit" }
-                    inspect(file, JSONObject(NativeBridge.analyze(file.readBytes())))
+                    val relative = file.relativeTo(app).path
+                    val embedded = try {
+                        if (file.length() > MAX_EXECUTABLE_BYTES) {
+                            analysisErrors.put(JSONObject().put("path", relative)
+                                .put("reason", "embedded image exceeds the on-device ${MAX_EXECUTABLE_BYTES / (1024 * 1024)} MiB analysis limit"))
+                            null
+                        } else {
+                            JSONObject(NativeBridge.analyze(file.readBytes()))
+                        }
+                    } catch (error: Throwable) {
+                        analysisErrors.put(JSONObject().put("path", relative)
+                            .put("reason", error.message ?: error.javaClass.simpleName))
+                        null
+                    }
+                    if (embedded != null) inspect(file, embedded) else incompatible = true
+                    // An embedded framework or dylib still means the bundle is
+                    // outside the bounded on-device subset; that is a conversion
+                    // blocker, never an analysis failure.
                     incompatible = true
                 }
             }
             updateProgress(45, "ANALYZING", "Dependency inventory complete; cataloging API candidates only", forceSave = true)
-            report.put("dependencies", JSONObject().put("nodes", nodes).put("edges", graph))
+            report.put("dependencies", JSONObject().put("nodes", nodes).put("edges", graph)
+                .put("analysisErrors", analysisErrors).put("analyzedImageCount", nodes.length()).put("failedImageCount", analysisErrors.length()))
             val apiMapping = AndroidApiMapper.analyze(
                 nodes,
                 resolveNdkLibrary = { symbol -> NativeBridge.findAndroidLibrary(symbol) },
@@ -328,6 +380,26 @@ class Library(private val context: Context) {
                 },
             )
             report.put("apiMapping", apiMapping)
+            // Persist a compact dependency inventory. A game bundle can carry
+            // hundreds of embedded images, and holding every full Mach-O
+            // analysis inside report.json is what stalled the detail screen and
+            // eventually exhausted the process on Force convert.
+            val trimmedNodes = JSONArray()
+            for (index in 0 until nodes.length()) {
+                val node = nodes.getJSONObject(index)
+                node.optJSONObject("analysis")?.let { analysis ->
+                    val slices = analysis.optJSONArray("slices")
+                    node.put("analysis", JSONObject()
+                        .put("error", analysis.optString("error").ifBlank { JSONObject.NULL })
+                        .put("sliceCount", slices?.length() ?: 0)
+                        .put("slices", compactSlices(slices)))
+                }
+                trimmedNodes.put(node)
+            }
+            report.put("dependencies", JSONObject().put("nodes", trimmedNodes).put("edges", graph)
+                .put("analysisErrors", analysisErrors).put("analyzedImageCount", nodes.length()).put("failedImageCount", analysisErrors.length()))
+            report.put("machO", JSONObject().put("slices", compactSlices(macho.optJSONArray("slices")))
+                .put("sliceCount", macho.optJSONArray("slices")?.length() ?: 0))
             val verifiedApiReplacements = apiMapping.optInt("runtimeVerifiedApiReplacementCount", 0)
             report.put("apiTranslation", JSONObject()
                 .put("status", if (verifiedApiReplacements > 0) "RUNTIME_IMPLEMENTATION_AVAILABLE_NOT_LINKED" else "NO_API_REPLACEMENT_LINKED")
@@ -361,7 +433,8 @@ class Library(private val context: Context) {
             val reason = when {
                 encrypted -> "Protected/encrypted Mach-O. Conversion prohibited; no DRM or FairPlay bypass."
                 !hasCandidate -> "No supported ARM64/ARMv7/ARMv6 slice. ARM64e PAC reconstruction is blocked."
-                incompatible -> "Frameworks, imports, incomplete dyld bindings, metadata or embedded code require unsupported compatibility/linker implementations."
+                analysisErrors.length() > 0 -> "This bundle links embedded frameworks or libraries; ${analysisErrors.length()} image(s) could not be decoded on-device, and frameworks, imports or metadata need unsupported compatibility/linker implementations. The analysis itself completed."
+                incompatible -> "Frameworks, imports, incomplete dyld bindings, metadata or embedded code require unsupported compatibility/linker implementations. The analysis itself completed."
                 deviceProven -> "The executable is fully covered by the proven closed-integer subset. Force convert builds a real signed APK whose translated entry routine runs through JNI; general games remain unsupported."
                 else -> "Analysis completed, but complete iOS-to-Android game-code translation, API replacement, and packaging are not implemented for this input. Force can build a separate branded preview shell."
             }
@@ -432,6 +505,8 @@ private val ICON_SUFFIXES = listOf(
 )
 private const val ICON_MAX_BYTES = 16L * 1024 * 1024
 private const val ICON_TARGET = 512
+/** Device-memory guard for one Mach-O executable; not an archive policy limit. */
+private const val MAX_EXECUTABLE_BYTES = 256L * 1024 * 1024
 
 /**
  * Resolve the best icon in a bundle and record every attempt.

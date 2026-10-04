@@ -59,6 +59,23 @@ class ArchiveTests(unittest.TestCase):
             extract_ipa(source, self.root / "case")
         self.assertFalse((self.root / "case").exists())
 
+    def test_no_fixed_archive_size_limit(self):
+        """An IPA is bounded by free storage, not by a number picked in advance."""
+        source = ipa(self.root / "test.ipa")
+        size = source.stat().st_size
+        self.assertGreater(size, 0)
+        # The old hard cap was 512 MiB; a larger archive must not be rejected
+        # just for being large. Only the free-space guard may refuse it.
+        self.assertFalse(hasattr(Limits(), "archive_bytes"))
+        extract_ipa(source, self.root / "dest")
+        self.assertTrue((self.root / "dest").is_dir())
+
+    def test_requires_free_space_for_large_archives(self):
+        source = ipa(self.root / "test.ipa")
+        with self.assertRaises(InputError) as caught:
+            require_free_space(source, 1 << 62)
+        self.assertIn("not enough free storage", str(caught.exception))
+
     def test_size_limit(self):
         source = ipa(self.root / "test.ipa")
         with self.assertRaises(InputError):

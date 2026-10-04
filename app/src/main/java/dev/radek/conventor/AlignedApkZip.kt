@@ -1,8 +1,10 @@
 package dev.radek.conventor
 
 import java.io.BufferedOutputStream
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FilterOutputStream
+import java.io.InputStream
 import java.io.OutputStream
 import java.io.RandomAccessFile
 import java.nio.charset.StandardCharsets
@@ -12,17 +14,49 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 /** ZIP writer/checks used by the runtime-built APK; stored resources are 4-byte
- *  aligned and native libraries are page-aligned (16 pages) so the linker can
- *  mmap them straight out of the APK on 4 KB and 16 KB page devices. */
+ *  aligned and native libraries are page-aligned so the linker can mmap them
+ *  straight out of the APK on 4 KB and 16 KB page devices. */
 internal object AlignedApkZip {
     private const val LOCAL_FILE_HEADER = 0x04034b50L
     private const val DATA_DESCRIPTOR = 0x08074b50L
     private const val LOCAL_HEADER_BYTES = 30L
     const val ALIGNMENT = 4
-    const val NATIVE_LIBRARY_ALIGNMENT = 16 * 4096
+    /**
+     * 16 KiB matches what the host toolchain produces (`zipalign -P 16 4`).
+     * It satisfies both 4 KB-page and 16 KB-page devices while keeping the
+     * alignment padding comfortably inside the ZIP extra-field limit.
+     */
+    const val NATIVE_LIBRARY_ALIGNMENT = 16 * 1024
     private const val APK_ALIGNMENT_EXTRA_ID = 0xd935
 
-    data class Entry(val name: String, val bytes: ByteArray, val compressed: Boolean = false, val alignment: Int = ALIGNMENT)
+    /** A ZIP extra field is one or more TLV records with a 16-bit header. */
+    private const val EXTRA_RECORD_HEADER = 4
+    private const val MAX_EXTRA_FIELD = 65535
+    private const val MAX_RECORD_PAYLOAD = MAX_EXTRA_FIELD - EXTRA_RECORD_HEADER
+
+    /**
+     * One APK entry. Either [bytes] is written directly, or [source] is set and
+     * the payload is streamed from that file instead of being held in memory —
+     * a game bundle is far too large to buffer whole.
+     */
+    data class Entry(
+        val name: String,
+        val bytes: ByteArray,
+        val compressed: Boolean = false,
+        val alignment: Int = ALIGNMENT,
+        val source: File? = null,
+    ) {
+        fun payloadSize(): Long = source?.length() ?: bytes.size.toLong()
+
+        fun openStream(): InputStream =
+            source?.inputStream()?.buffered() ?: ByteArrayInputStream(bytes)
+
+        companion object {
+            /** Stream a large payload straight from disk instead of buffering it. */
+            fun stream(name: String, file: File, compressed: Boolean = false, alignment: Int = ALIGNMENT): Entry =
+                Entry(name, ByteArray(0), compressed, alignment, file)
+        }
+    }
 
     fun write(file: File, entries: List<Entry>) {
         require(entries.isNotEmpty()) { "APK archive has no entries" }
@@ -48,15 +82,20 @@ internal object AlignedApkZip {
                         method = ZipEntry.DEFLATED
                     } else {
                         method = ZipEntry.STORED
-                        size = item.bytes.size.toLong()
-                        compressedSize = item.bytes.size.toLong()
-                        crc = crc32(item.bytes)
+                        val size = item.payloadSize()
+                        require(size > 0) { "stored APK entry is empty: ${item.name}" }
+                        setSize(size)
+                        compressedSize = size
+                        crc = crc32(item)
+                        // Padding must be decided before the local header is
+                        // written, because it is stored in that header's extra
+                        // field and shifts the payload that follows it.
                         val extra = alignmentExtra(counted.bytesWritten + LOCAL_HEADER_BYTES + nameBytes.size, item.alignment)
                         if (extra.isNotEmpty()) setExtra(extra)
                     }
                 }
                 zip.putNextEntry(entry)
-                zip.write(item.bytes)
+                item.openStream().use { input -> input.copyTo(zip) }
                 zip.closeEntry()
             }
         }
@@ -82,6 +121,43 @@ internal object AlignedApkZip {
         verifyLocalAlignment(file, alignedStoredNames)
     }
 
+    /**
+     * Builds the ZIP extra field that pushes a stored payload onto [alignment].
+     *
+     * The extra field length is a 16-bit field, so a single record can only ever
+     * express 65535 bytes. Rather than emitting a truncated length (which
+     * corrupts the local file header and makes Android refuse to install the
+     * APK), the padding is split across as many TLV records as it needs.
+     */
+    internal fun alignmentExtra(dataOffsetWithoutExtra: Long, alignment: Int): ByteArray {
+        require(alignment > 1) { "invalid APK entry alignment" }
+        val misaligned = (dataOffsetWithoutExtra % alignment).toInt()
+        if (misaligned == 0) return ByteArray(0)
+        var total = alignment - misaligned
+        // Fewer than a record header's worth of padding cannot be expressed, so
+        // skip to the next boundary.
+        if (total < EXTRA_RECORD_HEADER) total += alignment
+        var records = 1
+        while (total > MAX_EXTRA_FIELD * records) {
+            records++
+            require(records <= 8) { "APK entry alignment padding exceeds the ZIP extra field limit" }
+        }
+        var payload = total - EXTRA_RECORD_HEADER * records
+        require(payload >= 0) { "APK entry alignment padding exceeds the ZIP extra field limit" }
+        val extra = ByteArray(total)
+        var offset = 0
+        for (index in 0 until records) {
+            val chunk = minOf(payload, MAX_RECORD_PAYLOAD)
+            extra[offset] = (APK_ALIGNMENT_EXTRA_ID and 0xff).toByte()
+            extra[offset + 1] = (APK_ALIGNMENT_EXTRA_ID ushr 8).toByte()
+            extra[offset + 2] = (chunk and 0xff).toByte()
+            extra[offset + 3] = ((chunk ushr 8) and 0xff).toByte()
+            offset += EXTRA_RECORD_HEADER + chunk
+            payload -= chunk
+        }
+        return extra
+    }
+
     private fun verifyLocalAlignment(file: File, requiredNames: Map<String, Int>) {
         if (requiredNames.isEmpty()) return
         val found = HashSet<String>()
@@ -98,6 +174,7 @@ internal object AlignedApkZip {
                     input.seek(offset + 26)
                     val nameLength = readLe16(input)
                     val extraLength = readLe16(input)
+                    require(extraLength in 0..MAX_EXTRA_FIELD) { "APK local file extra field is too large" }
                     val headerEnd = offset + LOCAL_HEADER_BYTES + nameLength + extraLength
                     require(headerEnd <= input.length()) { "truncated APK local file name or extra data" }
                     input.seek(offset + LOCAL_HEADER_BYTES)
@@ -126,26 +203,18 @@ internal object AlignedApkZip {
         require(found == requiredNames.keys) { "APK is missing aligned stored entries: ${(requiredNames.keys - found).sorted()}" }
     }
 
-    private fun alignmentExtra(dataOffsetWithoutExtra: Long, alignment: Int): ByteArray {
-        val misaligned = (dataOffsetWithoutExtra % alignment).toInt()
-        if (misaligned == 0) return ByteArray(0)
-        // The extra field itself costs a 4-byte TLV header; reserve room for it so
-        // the payload that follows the extra field lands on the required boundary.
-        var extraTotal = alignment - misaligned
-        if (extraTotal < 4) extraTotal += alignment
-        val paddingBytes = extraTotal - 4
-        require(paddingBytes <= 65535) { "stored entry alignment padding exceeds the ZIP extra field limit" }
-        // ZIP extra fields are TLV records. Unknown IDs are ignored by Android; this
-        // record adds only enough bytes to align the following stored payload.
-        return ByteArray(extraTotal).also { extra ->
-            extra[0] = (APK_ALIGNMENT_EXTRA_ID and 0xff).toByte()
-            extra[1] = (APK_ALIGNMENT_EXTRA_ID ushr 8).toByte()
-            extra[2] = (paddingBytes and 0xff).toByte()
-            extra[3] = ((paddingBytes ushr 8) and 0xff).toByte()
+    private fun crc32(entry: Entry): Long {
+        val crc = CRC32()
+        entry.openStream().use { input ->
+            val buffer = ByteArray(65536)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                crc.update(buffer, 0, count)
+            }
         }
+        return crc.value
     }
-
-    private fun crc32(bytes: ByteArray): Long = CRC32().apply { update(bytes, 0, bytes.size) }.value
 
     private fun isSafeEntryName(name: String): Boolean =
         name.isNotBlank() && !name.startsWith('/') && '\\' !in name &&

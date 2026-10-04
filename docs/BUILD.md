@@ -45,11 +45,15 @@ conversion is attached under the strict contract. Proven IPAs become a signed AP
 entry routine runs through JNI and displays the message recovered from the IPA, with no extra user
 action. Everything else can be turned, via the red **Force convert to .apk** action, into a
 separately named, installable preview shell from the bundled Android template that uses the IPA app
-name and recovered icon where available but contains no translated game code or gameplay — its
-launch screen makes that limitation explicit. The runtime
-packager reads either UTF-8 or UTF-16 Android binary-XML string pools, then checks its exact ZIP
-entry set, uncompressed/aligned manifest, DEX, resource table and icon payloads before signing and
-verifying the APK.
+name, recovered icon and static-analysis statistics where available but contains no translated game
+code or gameplay. Its launcher screen makes no conversion claim in either direction; the honest
+record stays in the artifact's machine-readable metadata and in the app's library entry. The runtime
+packager reads either UTF-8 or UTF-16 Android binary-XML string pools, patches or inserts
+`<uses-sdk>` so the manifest can never default to SDK 1, then checks its exact ZIP entry set,
+uncompressed/aligned manifest, DEX, resource table and icon payloads before signing and verifying
+the APK. It finishes with `InstallAudit`, which re-runs the installer's own structural checks
+(parse, signing, SDK levels, stored and page-aligned native libraries, already-installed signature
+conflicts) so a problem is reported instead of collapsing into Android's "app not installed".
 
 A host APK attachment must match the IPA's SHA-256/package identity and safe IPA-derived basename,
 carry `complete-game-v1` metadata, account for every reachable function and API implementation,

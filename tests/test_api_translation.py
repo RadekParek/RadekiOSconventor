@@ -1,5 +1,6 @@
 import ctypes
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -187,3 +188,85 @@ class ApiTranslationTests(unittest.TestCase):
         self.assertEqual(report["generatedApiReplacements"], 0)
         self.assertFalse(report["codeGenerated"])
         self.assertEqual(report["status"], "NO_ENTRY_REACHABLE_IMPLEMENTED_API")
+
+    @unittest.skipUnless(shutil.which(os.environ.get("CXX", "g++")), "C++ compiler unavailable")
+    def test_broad_shims_compile_and_run_when_entry_reachable(self):
+        """libc and CoreFoundation shims compile, link and actually execute."""
+        reconstruction = self.reconstruction(
+            ["_strlen", "_malloc", "_free", "_CFRetain", "_CFRelease", "_CFStringCreateWithCString",
+             "_CFStringGetLength"]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            report = generate(reconstruction, output)
+            source = output / "api-replacements" / "api-replacements.cpp"
+            for header in report["headerPaths"]:
+                self.assertTrue((output / header).is_file(), header)
+            library_path = output / "libshim-broad.so"
+            subprocess.run(
+                [
+                    os.environ.get("CXX", "g++"),
+                    "-std=c++17",
+                    "-shared",
+                    "-fPIC",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    str(source),
+                    "-o",
+                    str(library_path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            library = ctypes.CDLL(str(library_path))
+            strlen = library.radek_compat_strlen
+            strlen.argtypes = [ctypes.c_char_p]
+            strlen.restype = ctypes.c_size_t
+            self.assertEqual(strlen(b"radek"), 5)
+
+            allocate = library.radek_compat_malloc
+            allocate.argtypes = [ctypes.c_size_t]
+            allocate.restype = ctypes.c_void_p
+            block = allocate(128)
+            self.assertNotEqual(block, None)
+            library.radek_compat_free(ctypes.c_void_p(block))
+
+            create = library.radek_compat_CFStringCreateWithCString
+            create.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+            create.restype = ctypes.c_void_p
+            text = create(None, b"hello", 0x08000100)
+            self.assertNotEqual(text, None)
+            length = library.radek_compat_CFStringGetLength
+            length.argtypes = [ctypes.c_void_p]
+            length.restype = ctypes.c_long
+            self.assertEqual(length(ctypes.c_void_p(text)), 5)
+            library.radek_compat_CFRelease(ctypes.c_void_p(text))
+
+    def test_shim_table_matches_the_native_header_macro(self):
+        """The Python table must equal RADEK_IOS_SHIM_TABLE in the C++ header.
+
+        native/src/ioscompat_registry.cpp and native/src/jni.cpp expand that
+        macro, so any drift would make the host generator, the on-device
+        registry and the JNI resolver disagree about what is implemented.
+        """
+        from radek.api_translation import _FAMILY, _SUPPORTED
+
+        header = (Path(__file__).resolve().parent.parent / "native/include/radek_ios_shims.h").read_text()
+        start = header.index("#define RADEK_IOS_SHIM_TABLE(X)")
+        block = header[start:]
+        block = block[: block.index("\n#endif")].replace("\\\n", "\n")
+        rows = re.findall(r'^\s*X\(\s*"([^"]+)"\s*,\s*(\w+)\s*\)', block, re.M)
+        self.assertTrue(rows, "the shim table macro was not found or is empty")
+        for darwin, android in rows:
+            with self.subTest(darwin=darwin):
+                self.assertEqual(_SUPPORTED[darwin][0], android)
+                self.assertEqual(_SUPPORTED[darwin][1], "RADEK_API_" + android)
+                expected = "cf" if android[len("radek_compat_"):].startswith("CF") else "libc"
+                self.assertEqual(_FAMILY[darwin], expected)
+        # Every non-time entry of the Python table must come from the macro.
+        macro_symbols = {darwin for darwin, _ in rows}
+        python_symbols = {name for name, family in _FAMILY.items() if family != "time"}
+        self.assertEqual(python_symbols, macro_symbols)
+        self.assertEqual(len(_SUPPORTED), len(_FAMILY))

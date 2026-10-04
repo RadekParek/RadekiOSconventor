@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
 import java.io.ByteArrayOutputStream
+import java.io.RandomAccessFile
 import java.nio.file.Files
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
@@ -94,3 +95,85 @@ class AlignedApkZipTest {
         }
     }
 }
+
+    /**
+     * A ZIP extra field length is a 16-bit field. Padding large enough to
+     * overflow it used to be written truncated, which leaves the local file
+     * header disagreeing with the bytes that follow it; Android reads the local
+     * header, so the APK stopped installing. Every padding the aligner can
+     * produce must stay inside the limit and parse as whole TLV records.
+     */
+    @Test fun keepsEveryAlignmentPaddingInsideTheZipExtraFieldLimit() {
+        val alignment = AlignedApkZip.NATIVE_LIBRARY_ALIGNMENT
+        val payload = ByteArray(64) { (it * 7).toByte() }
+        val paddings = listOf(0, 1, 2, 3, 4, 5, 6, 7, 8, 31, 32, 33) +
+            listOf(alignment - 8, alignment - 7, alignment - 6, alignment - 5, alignment - 4,
+                alignment - 3, alignment - 2, alignment - 1) +
+            (0 until alignment step 337)
+        val directory = Files.createTempDirectory("aligned-apk-zip-padding").toFile()
+        try {
+            for (padding in paddings.distinct()) {
+                val entries = listOf(
+                    AlignedApkZip.Entry("pad.bin", ByteArray(padding + 1) { 0x5a.toByte() }),
+                    AlignedApkZip.Entry("lib/arm64-v8a/libconverted.so", payload, alignment = alignment),
+                )
+                val apk = directory.resolve("padding-$padding.apk")
+                AlignedApkZip.write(apk, entries)
+                AlignedApkZip.verify(apk, entries.map { it.name }.toSet(),
+                    mapOf("lib/arm64-v8a/libconverted.so" to alignment))
+                assertExtraFieldRecordsAreWhole(apk, "lib/arm64-v8a/libconverted.so", alignment)
+                ZipFile(apk).use { zip ->
+                    assertArrayEquals(payload, zip.getInputStream(zip.getEntry("lib/arm64-v8a/libconverted.so")).readBytes())
+                }
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    private fun assertExtraFieldRecordsAreWhole(apk: File, name: String, alignment: Int) {
+        RandomAccessFile(apk, "r").use { input ->
+            var offset = 0L
+            while (offset + 30 <= input.length()) {
+                input.seek(offset)
+                val signature = ByteArray(4).also { input.readFully(it) }
+                require(signature.contentEquals(byteArrayOf(0x50, 0x4b, 0x03, 0x04))) {
+                    "no local file header at $offset in $name"
+                }
+                input.seek(offset + 26)
+                val nameLength = readU16(input)
+                val extraLength = readU16(input)
+                input.seek(offset + 30)
+                val entryName = String(ByteArray(nameLength).also { input.readFully(it) }, Charsets.UTF_8)
+                if (entryName == name) {
+                    require((offset + 30L + nameLength + extraLength) % alignment == 0L) {
+                        "$name is not $alignment-byte aligned at padding boundary"
+                    }
+                    var consumed = 0
+                    while (consumed < extraLength) {
+                        require(consumed + 4 <= extraLength) {
+                            "$name extra field has a truncated TLV record: $extraLength bytes declared"
+                        }
+                        readU16(input)
+                        val recordLength = readU16(input)
+                        require(consumed + 4 + recordLength <= extraLength) {
+                            "$name extra field record overruns the declared length: $extraLength"
+                        }
+                        input.skipBytes(recordLength)
+                        consumed += 4 + recordLength
+                    }
+                    require(consumed == extraLength) { "$name extra field records do not fill the declared length" }
+                    return
+                }
+                input.seek(offset + 18)
+                val compressedSize = (readU32(input))
+                offset += 30L + nameLength + extraLength + compressedSize
+            }
+        }
+        error("$name has no local file header")
+    }
+
+    private fun readU16(input: RandomAccessFile): Int = input.readUnsignedByte() or (input.readUnsignedByte() shl 8)
+
+    private fun readU32(input: RandomAccessFile): Long =
+        readU16(input).toLong() or (readU16(input).toLong() shl 16)

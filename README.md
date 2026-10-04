@@ -58,9 +58,11 @@ pointer slots when statically readable.
   automatically finishes the conversion into a signed, installable APK; no separate action is
   needed for proven inputs. Everything outside the proven subset creates nothing on import; there,
   the red **Force convert to .apk** action builds a separately named, signed and installable
-  preview shell branded with the IPA app name and recovered icon where available. The preview
-  shell contains no iOS executable, translated game code or gameplay, and says so when launched.
-  Preview-shell creation does not count as code-translation or complete-game progress.
+  preview shell branded with the IPA app name, recovered icon and static-analysis statistics. The
+  preview shell contains no iOS executable, translated game code or gameplay, and its launcher
+  screen carries no conversion claim either way; the honest record lives in the artifact's
+  machine-readable metadata and in the app's own library entry. Preview-shell creation does not
+  count as code-translation or complete-game progress.
 - A host APK can be attached only if its metadata declares the `complete-game-v1` contract and
   passes source-identity, complete reachable-code/API/resource, ABI, packaging and provenance
   checks. Preview-shell APK metadata and provider paths are separate; a preview shell can never

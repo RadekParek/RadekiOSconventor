@@ -10,7 +10,9 @@
   and the bounded-conversion prover `translateTrivial`); `ConvertedApkBuilder` converts IPAs proven
   to be one closed-integer routine into a signed APK whose translated entry runs through JNI;
   `PlaceholderApkBuilder` customizes, signs and verifies a bundled source-free Android preview shell
-  for everything else; `AndroidApiMapper` separately checks compiled time-shim exports;
+  for everything else; both builders finish with `InstallAudit`, which re-runs the installer's own
+  structural checks so a failure is reported instead of collapsing into Android's "app not installed".
+  `AndroidApiMapper` separately checks compiled time-shim exports;
   `ResultProvider` has strict paths for complete-game host APKs and explicitly non-playable preview APKs.
 - `placeholder-template/`: minimal Android activity and fallback icon for the preview shell, and
   `converted-template/`: the JNI launcher (`dev.radek.generated.MainActivity`) for bounded
@@ -75,15 +77,23 @@ subset; every other IPA resolves straight to `PARTIAL`, `BLOCKED` or `FAILED`.
 - `BLOCKED`: input protection, unsupported executable semantics or missing conversion capabilities
   prevent a game APK. A restricted integer-entry library may still be emitted, but is not a game.
 - `FAILED`: malformed input, analysis/tool failure or interrupted work.
+
+An embedded framework, dylib or secondary Mach-O image that cannot be decoded is reported under
+`dependencies.analysisErrors` instead of aborting the analysis: frameworks and libraries are a
+conversion blocker, never an analysis failure, so the report still completes with its dependency
+inventory and API triage.
 - `READY`: entered only when the bounded complete-conversion gate proves the executable is exactly
   one closed-integer routine and a signed `complete-game-v1` APK was built and statically validated.
 
 Proven IPAs are converted automatically during import — the signed APK whose translated entry runs
 through JNI is built and attached with no user action, leaving the entry in `READY`. The red **Force
 convert to .apk** action never overrides these states: for proven IPAs it simply rebuilds the
-converted APK; everything else gets a separately named, signed preview shell carrying the app name
-and recovered icon where available, whose screen says that no game code was translated and that the
-game will not run. The preview shell has its own filename, metadata, progress and provider validation. A host
+converted APK; everything else gets a separately named, signed preview shell carrying the app name,
+recovered icon and static-analysis statistics where available. The preview shell's launcher screen
+carries no conversion notice; the honest record lives in the artifact's machine-readable metadata
+(`placeholder-info.json` retains the full `analysisSummary`, and the report keeps `completeGameConversion`,
+`gameCodeIncluded` and `placeholderOnly` false/true as appropriate), so nothing ever claims a game was
+converted. The preview shell has its own filename, metadata, progress and provider validation. A host
 result remains shareable/installable only after the `complete-game-v1` contract passes attachment
 checks; the CLI produces such a result only for the proven bounded subset (see `radek/gamepack.py`).
 The CLI `convert` path may additionally emit `experimental-shell.apk` (`experimental-shell-v1`): a

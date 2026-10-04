@@ -163,6 +163,13 @@ class MainActivity : Activity() {
             wasBusy = true
             progressLabel?.text = "${Jobs.percent}% · ${Jobs.message}"
             progressBar?.progress = Jobs.percent
+        } else if (wasBusy) {
+            // A job ended while we were away. Clear any build progress it left
+            // marked RUNNING so the entry is never stuck in a state the user has
+            // to wipe app data to escape.
+            wasBusy = false
+            runCatching { library.recoverInterrupted() }
+            if (selected != null && File(selected, "report.json").isFile) detail(selected!!) else home()
         }
         val pending = pendingInstall
         if (pending != null && packageManager.canRequestPackageInstalls()) {
@@ -248,7 +255,7 @@ class MainActivity : Activity() {
         text("Import an IPA to automatically inspect its code and Android compatibility.", 15f, muted)
         val info = card()
         text("Bounded conversion, honest everywhere else", 17f, textColor, true, info)
-        text("The on-device app analyzes every IPA, and converts the proven subset automatically during import: an executable whose whole code is one closed-integer routine becomes a signed, installable APK whose translated entry runs through JNI — no extra tap needed. Anything outside that subset is not translated; Force then builds a signed, installable preview shell branded with the app name and recovered icon, clearly labelled as not playable. Host APKs are accepted only when they declare a complete game conversion and pass provenance and package checks.", 14f, muted, parent = info)
+        text("The on-device app analyzes every IPA, and converts the proven subset automatically during import: an executable whose whole code is one closed-integer routine becomes a signed, installable APK whose translated entry runs through JNI — no extra tap needed. Anything outside that subset is not translated; Force then builds a signed, installable preview shell branded with the app name and recovered icon; it contains none of the IPA executable or game code. Host APKs are accepted only when they declare a complete game conversion and pass provenance and package checks.", 14f, muted, parent = info)
         val add = button("Choose IPA", true) { authorize() }; add.isEnabled = !Jobs.busy
         button("Settings", parent = body) { settingsScreen() }.isEnabled = !Jobs.busy
         if (Jobs.busy) {
@@ -419,7 +426,7 @@ class MainActivity : Activity() {
     }
     private fun authorize() {
         AlertDialog.Builder(this).setTitle("Authorized files only")
-            .setMessage("Confirm that you own this IPA or have permission to convert it. Protection mechanisms will not be bypassed. The source IPA is retained in app-private storage for analysis until you delete this library entry. Force convert builds a real signed APK when the executable passes the bounded conversion proof; otherwise it creates a non-playable, installable preview shell. Complete-game host APKs still require the strict conversion contract.")
+            .setMessage("Confirm that you own this IPA or have permission to convert it. Protection mechanisms will not be bypassed. The source IPA is retained in app-private storage for analysis until you delete this library entry. Force convert builds a real signed APK when the executable passes the bounded conversion proof; otherwise it creates an installable preview shell that carries none of the IPA executable or game code. Complete-game host APKs still require the strict conversion contract.")
             .setNegativeButton("Cancel", null).setPositiveButton("I have permission") { _, _ ->
                 startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type = "*/*"; addCategory(Intent.CATEGORY_OPENABLE) }, pickerIpa)
             }.show()
@@ -516,7 +523,7 @@ class MainActivity : Activity() {
             val buildCard = card()
             text("Host APK validation/attachment · ${conversion.optInt("percent", 0)}% · ${conversion.optString("status", "NOT_BUILT")}", 16f, statusColor(conversion.optString("status")), true, buildCard)
             text(conversion.optString("message"), 12f, muted, parent = buildCard)
-            text("This is the complete-game APK path; it requires translated reachable code, API replacements, resources and lifecycle. Force convert packages the proven bounded subset into a real signed APK; anything else gets an installable, clearly labelled preview shell only.", 12f, muted, parent = buildCard)
+            text("This is the complete-game APK path; it requires translated reachable code, API replacements, resources and lifecycle. Force convert packages the proven bounded subset into a real signed APK; anything else gets an installable preview shell that contains no translated game code.", 12f, muted, parent = buildCard)
         }
         report.optJSONObject("deviceTranslation")?.takeIf { it.optString("status") == "PROVEN" && it.optInt("coveragePercent", 0) == 100 }?.let { proof ->
             val proofCard = card()
@@ -538,7 +545,7 @@ class MainActivity : Activity() {
         button("View full machine-readable report") { showText("Conversion report", report.toString(2)) }
         button("View real conversion logs") { showText("Logs", File(dir, "conversion.jsonl").takeIf { it.isFile }?.readText() ?: "No logs") }
         text("APK conversion", 22f, textColor, true)
-        text("A general iOS-to-Android game translator and framework/API replacements are not implemented. What is implemented is the bounded subset: when the executable is statically proven to be exactly one closed-integer routine, Force convert packages its translated machine code into a signed, installable APK that runs the entry through JNI and shows the message recovered from the IPA. Anything outside the subset gets only a clearly labelled, non-playable preview shell with the IPA app name and icon.", 14f, muted)
+        text("A general iOS-to-Android game translator and framework/API replacements are not implemented. What is implemented is the bounded subset: when the executable is statically proven to be exactly one closed-integer routine, Force convert packages its translated machine code into a signed, installable APK that runs the entry through JNI and shows the message recovered from the IPA. Anything outside the subset gets only a preview shell with the IPA app name and icon; it contains none of the executable and cannot run the game.", 14f, muted)
         button("Copy host analysis command") {
             val abi = preferences.getString("target_abi", "auto") ?: "auto"
             val suffix = if (abi == "auto") "" else " --target-abi $abi"
@@ -571,7 +578,9 @@ class MainActivity : Activity() {
             button("Install ${hostOutputFile.name}", true) { installArtifact(dir, hostOutputFile.name) }
             button("Share ${hostOutputFile.name}") { shareResultApk(dir, hostOutputFile.name) }
             if (app.has("sha256")) button("Open installed converted program") {
-                val pkg = "dev.radek.converted.p" + app.getString("sha256").take(20)
+                val pkg = report.optJSONObject("deviceConversion")?.optString("package").orEmpty()
+                    .ifBlank { hostConversion?.optString("package").orEmpty() }
+                    .ifBlank { "dev.radek.converted.p" + app.getString("sha256").take(20) }
                 val intent = packageManager.getLaunchIntentForPackage(pkg)
                 if (intent == null) Toast.makeText(this, "Converted program is not installed or not visible to Android", Toast.LENGTH_LONG).show() else startActivity(intent)
             }
@@ -597,7 +606,7 @@ class MainActivity : Activity() {
                 else -> "Fallback icon included; no original icon was recovered"
             }
             text("Installable preview APK · $iconDescription", 13f, accent, true)
-            text("This launches a branded notice screen only. No iOS executable, translated game code, or playable gameplay is included.", 12f, muted)
+            text("This is a branded shell built from the IPA name and icon only. No iOS executable, translated game code, or playable gameplay is included.", 12f, muted)
             button("Install ${placeholderOutputFile.name}", true) { installArtifact(dir, placeholderOutputFile.name) }
             button("Share ${placeholderOutputFile.name}") { shareResultApk(dir, placeholderOutputFile.name) }
         }
@@ -710,7 +719,8 @@ class MainActivity : Activity() {
         }
     }
     private fun installArtifact(dir: File, name: String) {
-        if (!File(dir, name).isFile) {
+        val file = File(dir, name)
+        if (!file.isFile) {
             Toast.makeText(this, "APK result not found", Toast.LENGTH_LONG).show()
             return
         }
@@ -720,11 +730,62 @@ class MainActivity : Activity() {
             return
         }
         pendingInstall = null
+        // Check the artifact ourselves first: Android's installer reports every
+        // failure as "app not installed", which leaves nothing to act on.
+        val expectedPackage = runCatching {
+            val report = JSONObject(File(dir, "report.json").readText())
+            report.optJSONObject("deviceConversion")?.optString("package").orEmpty()
+                .ifBlank { report.optJSONObject("hostConversion")?.optString("package").orEmpty() }
+                .ifBlank { report.optJSONObject("placeholderConversion")?.optString("package").orEmpty() }
+        }.getOrDefault("")
+        if (expectedPackage.isNotBlank()) {
+            val audit = runCatching { InstallAudit.inspect(this, file, expectedPackage) }.getOrNull()
+            if (audit != null && (!audit.installable || audit.warnings.isNotEmpty())) {
+                showInstallAudit(audit) { launchInstall(dir, name) }
+                return
+            }
+        }
+        launchInstall(dir, name)
+    }
+
+    private fun showInstallAudit(audit: InstallAudit.Report, proceed: () -> Unit) {
+        val lines = ArrayList<String>()
+        lines += audit.blockers.map { "• $it" }
+        lines += audit.warnings.map { "• $it" }
+        val message = buildString {
+            if (audit.blockers.isNotEmpty()) {
+                append("This APK cannot be installed:\n\n").append(audit.blockers.joinToString("\n") { "• $it" })
+            } else {
+                append("Check before installing:\n\n").append(audit.warnings.joinToString("\n") { "• $it" })
+            }
+        }
+        AlertDialog.Builder(this)
+            .setTitle(if (audit.installable) "Before you install" else "This APK will not install")
+            .setMessage(message)
+            .setPositiveButton(if (audit.installable) "Install anyway" else "Close", null)
+            .setNegativeButton("Cancel") { _, _ -> }
+            .create()
+            .apply {
+                setOnShowListener {
+                    getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        dismiss()
+                        if (audit.installable) proceed()
+                    }
+                }
+            }
+            .show()
+    }
+
+    private fun launchInstall(dir: File, name: String) {
         val uri = Uri.Builder().scheme("content").authority("dev.radek.conventor.results")
             .appendPath(dir.name).appendPath(name).build()
-        startActivity(Intent(Intent.ACTION_VIEW)
-            .setDataAndType(uri, "application/vnd.android.package-archive")
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+        runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, "application/vnd.android.package-archive")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+        }.onFailure {
+            Toast.makeText(this, "No app on this device can install APKs", Toast.LENGTH_LONG).show()
+        }
     }
     companion object {
         private fun sha256(input: java.io.InputStream): String {
@@ -758,7 +819,7 @@ class MainActivity : Activity() {
                             val n = input.read(buffer)
                             if (n < 0) break
                             total += n
-                            require(total <= SafeZip.MAX_ARCHIVE) { "APK exceeds 512 MiB" }
+                            SafeZip.requireStorage(dir, total)
                             output.write(buffer, 0, n)
                         }
                     }

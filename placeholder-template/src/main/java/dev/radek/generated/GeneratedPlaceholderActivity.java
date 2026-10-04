@@ -69,8 +69,7 @@ public final class GeneratedPlaceholderActivity extends Activity {
         JSONObject info = readInfo();
         String gameName = info.optString("gameName", "Imported iOS app");
         String bundleId = info.optString("bundleId", "");
-        String analysisSummary = info.optString("analysisSummary", "");
-        String iconSource = info.optString("iconSource", "TEMPLATE_FALLBACK");
+        String analysisStats = info.optString("analysisStats", "");
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -92,19 +91,8 @@ public final class GeneratedPlaceholderActivity extends Activity {
             root.addView(label(bundleId, 13, Color.rgb(160, 178, 199), false),
                     new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
-        root.addView(label("Installable preview shell APK", 18, Color.rgb(92, 227, 181), true),
-                new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        String iconNote = "RECOVERED_IPA_ICON".equals(iconSource)
-                ? "Original IPA icon recovered."
-                : ("GENERATED_APP_NAME_ICON".equals(iconSource) ? "Generated name-based icon; original icon unavailable." : "Fallback icon; original icon unavailable.");
-        root.addView(label(iconNote, 12, Color.rgb(160, 178, 199), false),
-                new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        root.addView(label(
-                "This APK contains the app name, icon, and static-analysis summary only. The iOS executable and game assets were not translated or included, so the game will not run.",
-                15, Color.rgb(210, 219, 230), false),
-                new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        if (!analysisSummary.isEmpty()) {
-            root.addView(label(analysisSummary, 12, Color.rgb(160, 178, 199), false),
+        if (!analysisStats.isEmpty()) {
+            root.addView(label(analysisStats, 12, Color.rgb(160, 178, 199), false),
                     new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
 

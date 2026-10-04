@@ -23,8 +23,8 @@ internal class ConvertedApkBuilder(private val context: Context) {
     companion object {
         private const val MAX_TEMPLATE_ENTRY_BYTES = 32L * 1024 * 1024
         private const val MAX_ICON_BYTES = 16L * 1024 * 1024
-        private const val MAX_RESOURCE_FILE_BYTES = 32L * 1024 * 1024
-        private const val MAX_RESOURCE_TOTAL_BYTES = 256L * 1024 * 1024
+        private const val MAX_RESOURCE_FILE_BYTES = 256L * 1024 * 1024
+        private const val MAX_RESOURCE_TOTAL_BYTES = 1024L * 1024 * 1024
         private const val MAX_RESOURCE_FILES = 4096
         private const val ENTRY_CLASS = "dev.radek.generated.MainActivity"
         private const val JNI_SYMBOL = "Java_dev_radek_generated_MainActivity_runNative"
@@ -71,6 +71,11 @@ internal class ConvertedApkBuilder(private val context: Context) {
         val backupFile = File(dir, ".$resultName.converted-backup")
         val finalPending = File(dir, ".$resultName.converted-pending")
         val extracted = File(dir, "convert-workspace")
+        val staged = File(dir, "convert-stage")
+        val identity = PlaceholderSigningIdentity.loadOrCreate(
+            File(context.noBackupFilesDir, "placeholder-apk-signing-identity.bin"),
+        )
+        val certificateHash = sha256(identity.certificate.encoded)
         var finalized = false
         var resultInstalled = false
         try {
@@ -80,6 +85,8 @@ internal class ConvertedApkBuilder(private val context: Context) {
             }
             unsignedFile.delete(); signedFile.delete(); finalPending.delete()
             if (extracted.exists()) extracted.deleteRecursively()
+            if (staged.exists()) staged.deleteRecursively()
+            staged.mkdirs()
 
             setProgress(12, "CONVERTING", "Extracting the authorized IPA for the bounded converter")
             SafeZip.extract(File(dir, "source.ipa"), extracted)
@@ -90,7 +97,7 @@ internal class ConvertedApkBuilder(private val context: Context) {
             val executableName = plist["CFBundleExecutable"] as? String ?: error("CFBundleExecutable missing")
             require(SafeZip.validateName(executableName) == executableName && '/' !in executableName)
             val binary = File(appDir, executableName)
-            require(binary.isFile && binary.length() in 1..(64L * 1024 * 1024)) { "executable missing or exceeds the on-device limit" }
+            require(binary.isFile && binary.length() in 1..(256L * 1024 * 1024)) { "executable missing or exceeds the on-device 256 MiB limit" }
 
             setProgress(24, "CONVERTING", "Proving the executable is one closed-integer routine")
             val proof = JSONObject(NativeBridge.translateTrivial(binary.readBytes()))
@@ -116,20 +123,27 @@ internal class ConvertedApkBuilder(private val context: Context) {
 
             setProgress(36, "CONVERTING", "Collecting and hashing the bundle resources")
             val inventory = JSONArray()
-            val resourceEntries = ArrayList<Pair<String, ByteArray>>()
+            val resourceEntries = ArrayList<Pair<String, File>>()
             var totalResourceBytes = 0L
             var resourceCount = 0
+            // Every payload is copied to disk and streamed into the archive from
+            // there. Buffering a whole game bundle in RAM is what used to kill
+            // the app mid-conversion; nothing here holds a resource in memory.
+            val bundleStage = File(staged, "bundle")
             appDir.walkTopDown().filter { it.isFile }.sortedBy { it.path }.forEach { file ->
                 if (file == binary) return@forEach
                 val relative = file.relativeTo(appDir).path.replace(File.separatorChar, '/')
                 SafeZip.validateName(relative)
                 require(++resourceCount <= MAX_RESOURCE_FILES) { "too many bundle resources for the bounded converter" }
                 require(file.length() <= MAX_RESOURCE_FILE_BYTES) { "bundle resource exceeds the bounded limit: $relative" }
-                val payload = file.readBytes()
-                totalResourceBytes += payload.size
+                val target = File(bundleStage, "$resourceCount.bin")
+                target.parentFile?.mkdirs()
+                file.copyTo(target, overwrite = true)
+                require(target.length() == file.length()) { "bundle resource could not be staged: $relative" }
+                totalResourceBytes += target.length()
                 require(totalResourceBytes <= MAX_RESOURCE_TOTAL_BYTES) { "bundle resources exceed the bounded total limit" }
-                inventory.put(JSONObject().put("path", relative).put("sha256", sha256(payload)))
-                resourceEntries += relative to payload
+                inventory.put(JSONObject().put("path", relative).put("sha256", sha256(target)))
+                resourceEntries += relative to target
             }
 
             setProgress(48, "CONVERTING", "Generating the Android native entry library")
@@ -173,7 +187,12 @@ internal class ConvertedApkBuilder(private val context: Context) {
                 "converted template icon resource path is invalid"
             }
 
-            val packageName = "dev.radek.converted.p" + sourceHash.take(20)
+            // The package id carries the signing certificate's hash, exactly like
+            // the preview shell. Android rejects an update whose certificates
+            // changed; binding the id to the key means a regenerated identity
+            // produces a fresh package instead of the installer's opaque
+            // "app not installed" SIGNATURE_MISMATCH.
+            val packageName = "dev.radek.converted.p${sourceHash.take(20)}${certificateHash.take(8)}"
             require(packageName.length <= 127)
             val manifest = BinaryXmlManifest.customize(templateManifest, packageName, appName)
             val resources = ResourceTablePackagePatcher.customize(templateResources, packageName)
@@ -241,7 +260,7 @@ internal class ConvertedApkBuilder(private val context: Context) {
                 entries += AlignedApkZip.Entry("assets/ipa-icon.png", recoveredIcon, compressed = true)
             }
             for ((relative, payload) in resourceEntries) {
-                entries += AlignedApkZip.Entry("assets/bundle/$relative", payload, compressed = true)
+                entries += AlignedApkZip.Entry.stream("assets/bundle/$relative", payload, compressed = true)
             }
             val expectedNames = entries.map { it.name }.toSet()
             val alignedNames = buildMap<String, Int> {
@@ -256,10 +275,6 @@ internal class ConvertedApkBuilder(private val context: Context) {
             AlignedApkZip.verify(unsignedFile, expectedNames, alignedNames)
 
             setProgress(80, "SIGNING", "Signing the converted APK for Android installation")
-            val identity = PlaceholderSigningIdentity.loadOrCreate(
-                File(context.noBackupFilesDir, "placeholder-apk-signing-identity.bin"),
-            )
-            val certificateHash = sha256(identity.certificate.encoded)
             val signerConfig = ApkSigner.SignerConfig.Builder(
                 "RadekiOS converted",
                 identity.privateKey,
@@ -306,6 +321,10 @@ internal class ConvertedApkBuilder(private val context: Context) {
             require(sha256(verification.signerCertificates.first().encoded) == certificateHash) {
                 "converted APK signer changed during packaging"
             }
+            val audit = InstallAudit.inspect(context, resultFile, packageName)
+            require(audit.blockers.isEmpty()) {
+                "converted APK would not install: ${audit.blockers.joinToString("; ")}"
+            }
 
             val conversion = JSONObject()
                 .put("status", "GENERATED_ON_DEVICE")
@@ -335,6 +354,9 @@ internal class ConvertedApkBuilder(private val context: Context) {
                 .put("signing", JSONObject()
                     .put("schemes", JSONArray().put("v1").put("v2").put("v3"))
                     .put("certificateSha256", certificateHash))
+                .put("installAudit", JSONObject()
+                    .put("installable", audit.installable)
+                    .put("warnings", JSONArray().apply { audit.warnings.forEach { put(it) } }))
                 .put("completedAt", java.time.Instant.now().toString())
             report.put("deviceConversion", conversion)
             // Expose the artifact through the same attachment contract used for
@@ -375,23 +397,33 @@ internal class ConvertedApkBuilder(private val context: Context) {
             backupFile.delete()
             progress(100, "Converted APK ready; the bounded entry routine runs through JNI")
             return conversion
-        } catch (error: Exception) {
+        } catch (error: Throwable) {
+            // An OutOfMemoryError is an Error, not an Exception: catching it
+            // here is what stops a large bundle from killing the app instead of
+            // reporting a failure the user can act on.
             if (!finalized) {
                 if (resultInstalled) resultFile.delete()
                 if (backupFile.isFile && !resultFile.exists()) backupFile.renameTo(resultFile)
             }
+            val failure = if (error is OutOfMemoryError) {
+                "The device ran out of memory while packaging this bundle; free space and retry."
+            } else {
+                error.message ?: error.javaClass.simpleName
+            }
             report.put("convertedBuildProgress", JSONObject()
                 .put("percent", 0)
                 .put("status", "FAILED")
-                .put("message", error.message ?: error.javaClass.simpleName)
+                .put("message", failure)
                 .put("updatedAt", java.time.Instant.now().toString()))
-            try { reportContext.save(dir, report) } catch (_: Exception) { }
+            try { reportContext.save(dir, report) } catch (_: Throwable) { }
+            if (error is OutOfMemoryError) throw IllegalStateException(failure)
             throw error
         } finally {
             unsignedFile.delete()
             signedFile.delete()
             finalPending.delete()
             if (extracted.exists()) extracted.deleteRecursively()
+            if (staged.exists()) staged.deleteRecursively()
         }
     }
 

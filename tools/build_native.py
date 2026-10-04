@@ -9,6 +9,8 @@ out = root / ".local/bin"
 out.mkdir(parents=True, exist_ok=True)
 compiler = os.environ.get("CXX", "g++")
 flags = ["-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror", "-pthread", "-I", str(root / "native/include")]
+api_source = root / "native/src/apple_time_compat.cpp"
+shim_source = root / "native/src/radek_ios_shims.cpp"
 subprocess.run(
     [
         compiler,
@@ -47,6 +49,7 @@ subprocess.run(
         "-shared",
         "-fPIC",
         str(api_source),
+        str(shim_source),
         str(registry_source),
         "-o",
         str(out / "libioscompat.so"),
@@ -72,12 +75,26 @@ subprocess.run(
         str(root / "native/tests/ioscompat_registry.cpp"),
         str(registry_source),
         str(api_source),
+        str(shim_source),
         "-o",
         str(out / "ioscompat-registry-tests"),
     ],
     check=True,
 )
 subprocess.run([str(out / "ioscompat-registry-tests")], check=True)
+subprocess.run(
+    [
+        compiler,
+        *flags,
+        str(root / "native/tests/radek_ios_shims.cpp"),
+        str(shim_source),
+        "-o",
+        str(out / "ios-shims-tests"),
+    ],
+    check=True,
+)
+subprocess.run([str(out / "ios-shims-tests")], check=True)
 print(
-    "Native analyzer, portable runtime, Apple time API, and compatibility registry tests passed"
+    "Native analyzer, portable runtime, Apple time API, broad iOS shims, "
+    "and compatibility registry tests passed"
 )

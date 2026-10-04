@@ -10,7 +10,7 @@ target_compile_options(radek_analysis PRIVATE -Wall -Wextra -Werror)
 # This is a small, concrete Android compatibility library, not a general Apple
 # framework/runtime. It is linked into the analyzer so its exports can be
 # verified on-device, and is independently reusable by a future game linker.
-add_library(ioscompat SHARED src/apple_time_compat.cpp src/ioscompat_registry.cpp)
+add_library(ioscompat SHARED src/apple_time_compat.cpp src/radek_ios_shims.cpp src/ioscompat_registry.cpp)
 target_include_directories(ioscompat PUBLIC include)
 target_compile_options(ioscompat PRIVATE -Wall -Wextra -Werror)
 find_package(Threads REQUIRED)
@@ -36,8 +36,13 @@ else()
     target_include_directories(trivial-tests PRIVATE include)
     target_link_libraries(trivial-tests PRIVATE radek_analysis Threads::Threads)
     add_test(NAME trivial COMMAND trivial-tests)
+    add_executable(ios-shims-tests tests/radek_ios_shims.cpp src/radek_ios_shims.cpp)
+    target_include_directories(ios-shims-tests PRIVATE include)
+    target_compile_options(ios-shims-tests PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(ios-shims-tests PRIVATE Threads::Threads)
+    add_test(NAME ios-shims COMMAND ios-shims-tests)
     add_executable(ioscompat-registry-tests tests/ioscompat_registry.cpp src/ioscompat_registry.cpp
-                                            src/apple_time_compat.cpp)
+                                            src/apple_time_compat.cpp src/radek_ios_shims.cpp)
     target_include_directories(ioscompat-registry-tests PRIVATE include)
     target_compile_options(ioscompat-registry-tests PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(ioscompat-registry-tests PRIVATE Threads::Threads)

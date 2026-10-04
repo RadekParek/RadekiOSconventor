@@ -194,3 +194,55 @@ class CompatLayerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_broad_shims_are_classified_verified_with_their_family(self):
+        from radek.compat_layer import family
+
+        self.assertEqual(classify("_strlen"), "verified")
+        self.assertEqual(classify("_memcpy"), "verified")
+        self.assertEqual(classify("_pthread_mutex_lock"), "verified")
+        self.assertEqual(classify("_CFStringCreateWithCString"), "verified")
+        self.assertEqual(classify("_CFDictionarySetValue"), "verified")
+        self.assertEqual(family("_strlen"), "libc")
+        self.assertEqual(family("_CFRetain"), "cf")
+        self.assertEqual(family("_CFAbsoluteTimeGetCurrent"), "time")
+        self.assertEqual(family("_glDrawArrays"), "")
+        # Unimplemented APIs must never be promoted to verified.
+        self.assertEqual(classify("_UIApplicationMain"), "stubbed")
+        self.assertEqual(classify("_objc_msgSend"), "stubbed")
+        self.assertEqual(classify("_glDrawArrays"), "stubbed")
+
+    @unittest.skipUnless(shutil.which(os.environ.get("CXX", "g++")), "C++ compiler unavailable")
+    def test_generated_source_builds_and_runs_broad_shims(self):
+        imports = ["_strlen", "_CFStringCreateWithCString", "_CFStringGetLength", "_glDrawArrays"]
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            report = generate(reconstruction(imports), output)
+            self.assertEqual(report["verifiedImplementations"], 3)
+            self.assertEqual(report["stubbedHandlers"], 1)
+            for header in report["headerPaths"]:
+                self.assertTrue((output / header).is_file(), header)
+            library = self._compile(output / "ioscompat", Path(directory))
+
+            classify_fn = library.radek_compat_generated_classify
+            classify_fn.argtypes = [ctypes.c_char_p]
+            classify_fn.restype = ctypes.c_char_p
+            self.assertEqual(classify_fn(b"_strlen"), b"verified")
+            self.assertEqual(classify_fn(b"_CFStringGetLength"), b"verified")
+            self.assertEqual(classify_fn(b"_glDrawArrays"), b"stubbed")
+
+            strlen = library.radek_compat_strlen
+            strlen.argtypes = [ctypes.c_char_p]
+            strlen.restype = ctypes.c_size_t
+            self.assertEqual(strlen(b"radek"), 5)
+
+            create = library.radek_compat_CFStringCreateWithCString
+            create.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+            create.restype = ctypes.c_void_p
+            length = library.radek_compat_CFStringGetLength
+            length.argtypes = [ctypes.c_void_p]
+            length.restype = ctypes.c_long
+            text = create(None, b"hello", 0x08000100)
+            self.assertNotEqual(text, None)
+            self.assertEqual(length(ctypes.c_void_p(text)), 5)
+            library.radek_compat_CFRelease(ctypes.c_void_p(text))

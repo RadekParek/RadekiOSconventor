@@ -1,5 +1,6 @@
 #include "ioscompat_registry.hpp"
 #include "macho.hpp"
+#include "radek_ios_shims.h"
 #include "trivial.hpp"
 #include <jni.h>
 #include <dlfcn.h>
@@ -71,11 +72,14 @@ struct ApiReplacement {
     const char *androidSymbol;
 };
 
+#define RADEK_API_REPLACEMENT_ROW(darwin, android) {darwin, #android},
+
 constexpr ApiReplacement kImplementedApiReplacements[] = {
     {"_CFAbsoluteTimeGetCurrent", "CFAbsoluteTimeGetCurrent"},
     {"_CACurrentMediaTime", "CACurrentMediaTime"},
     {"_mach_absolute_time", "mach_absolute_time"},
     {"_mach_timebase_info", "mach_timebase_info"},
+    RADEK_IOS_SHIM_TABLE(RADEK_API_REPLACEMENT_ROW)
 };
 
 const char *findImplementedApiReplacement(const char *darwinSymbol) {
@@ -111,12 +115,19 @@ const char *findImplementedApiReplacement(const char *darwinSymbol) {
 }
 } // namespace
 
+namespace {
+constexpr jsize kMaxExecutableBytes = 256 * 1024 * 1024;
+} // namespace
+
 extern "C" JNIEXPORT jstring JNICALL Java_dev_radek_conventor_NativeBridge_analyze(JNIEnv *env, jobject,
                                                                                    jbyteArray input) {
     try {
         auto n = env->GetArrayLength(input);
-        if (n > 64 * 1024 * 1024)
-            throw std::runtime_error("executable exceeds on-device 64 MiB limit");
+        // The only remaining bound is a device-memory guard: the executable has
+        // to be held in memory to be analyzed. It is not a policy limit on how
+        // large an IPA may be (the archive-level 512 MiB cap was removed).
+        if (n > kMaxExecutableBytes)
+            throw std::runtime_error("executable exceeds the on-device 256 MiB analysis limit");
         std::vector<uint8_t> b(n);
         env->GetByteArrayRegion(input, 0, n, reinterpret_cast<jbyte *>(b.data()));
         if (env->ExceptionCheck())
@@ -132,8 +143,11 @@ extern "C" JNIEXPORT jstring JNICALL Java_dev_radek_conventor_NativeBridge_trans
     JNIEnv *env, jobject, jbyteArray input) {
     try {
         auto n = env->GetArrayLength(input);
-        if (n > 64 * 1024 * 1024)
-            throw std::runtime_error("executable exceeds on-device 64 MiB limit");
+        // The only remaining bound is a device-memory guard: the executable has
+        // to be held in memory to be analyzed. It is not a policy limit on how
+        // large an IPA may be (the archive-level 512 MiB cap was removed).
+        if (n > kMaxExecutableBytes)
+            throw std::runtime_error("executable exceeds the on-device 256 MiB analysis limit");
         std::vector<uint8_t> b(n);
         env->GetByteArrayRegion(input, 0, n, reinterpret_cast<jbyte *>(b.data()));
         if (env->ExceptionCheck())

@@ -555,7 +555,7 @@ def validate_apk(
     log=None,
     expected_abi: str | None = None,
 ) -> dict:
-    if not path.is_file() or not 0 < path.stat().st_size <= 512 * 1024 * 1024:
+    if not path.is_file() or not 0 < path.stat().st_size:
         raise InputError("APK is missing/empty")
     with zipfile.ZipFile(path) as z:
         names = z.namelist()

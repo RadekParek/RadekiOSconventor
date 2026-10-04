@@ -18,11 +18,40 @@ class InputError(ValueError):
 
 @dataclass(frozen=True)
 class Limits:
-    archive_bytes: int = 512 * 1024 * 1024
+    """Bounds for reading untrusted archives.
+
+    There is deliberately no ``archive_bytes`` limit any more: 512 MiB was an
+    arbitrary number that stopped real games from ever being analyzed. An
+    archive is bounded by the free space of the device it is read on (see
+    :func:`require_free_space`) plus the per-member guards below, which exist to
+    stop ZIP bombs rather than to police how large a game may be.
+    """
+
     expanded_bytes: int = 1024 * 1024 * 1024
     file_bytes: int = 256 * 1024 * 1024
     entries: int = 20000
     ratio: int = 250
+
+
+def require_free_space(path: Path, needed_bytes: int) -> None:
+    """Raise :class:`InputError` unless ``path`` has room for ``needed_bytes``.
+
+    The only archive-level bound that remains is the device's own storage, so a
+    game is rejected for being too big for this machine rather than for
+    exceeding a number picked in advance.
+    """
+    probe = path if path.is_dir() else path.parent
+    while not probe.is_dir() and probe.parent != probe:
+        probe = probe.parent
+    try:
+        free = shutil.disk_usage(probe).free
+    except OSError:  # pragma: no cover - platform without statvfs
+        return
+    if free < needed_bytes + 64 * 1024 * 1024:
+        raise InputError(
+            f"not enough free storage: {needed_bytes // (1024 * 1024)} MiB needed, "
+            f"{free // (1024 * 1024)} MiB free"
+        )
 
 
 def safe_name(name: str) -> PurePosixPath:
@@ -38,8 +67,7 @@ def safe_name(name: str) -> PurePosixPath:
 
 def extract_ipa(source: Path, destination: Path, limits: Limits = Limits()) -> None:
     """Destination must not exist. Remove all partial output on any failure."""
-    if source.stat().st_size > limits.archive_bytes:
-        raise InputError("IPA exceeds archive size limit")
+    require_free_space(destination, source.stat().st_size)
     destination.mkdir(mode=0o700, parents=False, exist_ok=False)
     try:
         with zipfile.ZipFile(source) as archive:

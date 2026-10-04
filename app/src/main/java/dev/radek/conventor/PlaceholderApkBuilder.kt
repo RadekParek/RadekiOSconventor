@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.BitmapFactory
 import com.android.apksig.ApkSigner
 import com.android.apksig.ApkVerifier
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -126,6 +127,9 @@ internal class PlaceholderApkBuilder(private val context: Context) {
             val unmappedApiSymbols = apiMapping.optInt("unmappedSymbolCount", 0).coerceAtLeast(0)
             val apiLevelNote = if (runtimeVerifiedAndroidApiLevel > 0) " on Android API $runtimeVerifiedAndroidApiLevel" else ""
             val analysisSummary = "Static analysis only: $classifiedImportSymbols/$distinctImportSymbols symbols triaged ($classificationCoveragePercent%); $directApiCandidates direct-name candidates ($runtimeVerifiedNdkCandidates runtime exports resolved$apiLevelNote), $semanticApiCandidates semantic targets, $unmappedApiSymbols unmapped. No game code or API implementation was translated."
+            // Shown on the generated launcher; the full summary above stays in the
+            // artifact's machine-readable metadata.
+            val analysisStats = "Static analysis only: $classifiedImportSymbols/$distinctImportSymbols symbols triaged ($classificationCoveragePercent%); $directApiCandidates direct-name candidates ($runtimeVerifiedNdkCandidates runtime exports resolved$apiLevelNote), $semanticApiCandidates semantic targets, $unmappedApiSymbols unmapped."
             val analysisInfo = JSONObject()
                 .put("distinctImportSymbols", distinctImportSymbols)
                 .put("classifiedImportSymbols", classifiedImportSymbols)
@@ -142,6 +146,7 @@ internal class PlaceholderApkBuilder(private val context: Context) {
                 .put("bundleId", bundleId)
                 .put("iconSource", iconSource)
                 .put("analysisSummary", analysisSummary)
+                .put("analysisStats", analysisStats)
                 .put("analysisOnly", analysisInfo)
                 .put("placeholderOnly", true)
                 .put("gameCodeIncluded", false)
@@ -224,6 +229,10 @@ internal class PlaceholderApkBuilder(private val context: Context) {
             require(sha256(verification.signerCertificates.first().encoded) == certificateHash) {
                 "generated APK signer changed during packaging"
             }
+            val audit = InstallAudit.inspect(context, resultFile, packageName)
+            require(audit.blockers.isEmpty()) {
+                "generated APK would not install: ${audit.blockers.joinToString("; ")}"
+            }
             val conversion = JSONObject()
                 .put("status", "GENERATED")
                 .put("completeGameConversion", false)
@@ -241,6 +250,9 @@ internal class PlaceholderApkBuilder(private val context: Context) {
                 .put("bytes", resultFile.length())
                 .put("iconSource", iconSource)
                 .put("iconSha256", sha256(iconBytes))
+                .put("installAudit", JSONObject()
+                    .put("installable", audit.installable)
+                    .put("warnings", JSONArray().apply { audit.warnings.forEach { put(it) } }))
                 .put("originalIconAvailable", originalIconAvailable)
                 .put("analysisOnly", analysisInfo)
                 .put("signing", JSONObject()
@@ -261,7 +273,7 @@ internal class PlaceholderApkBuilder(private val context: Context) {
             backupFile.delete()
             progress(100, "Installable preview ready; game code was not translated and the game will not run")
             return conversion
-        } catch (error: Exception) {
+        } catch (error: Throwable) {
             if (!finalized) {
                 if (resultInstalled) resultFile.delete()
                 if (backupFile.isFile && !resultFile.exists()) backupFile.renameTo(resultFile)

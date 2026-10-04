@@ -1,5 +1,6 @@
 #include "ioscompat_registry.hpp"
 #include "apple_time_compat.h"
+#include "radek_ios_shims.h"
 
 #include <array>
 #include <atomic>
@@ -85,11 +86,17 @@ struct VerifiedSeed {
     void (*handler)();
 };
 
+// The four time shims from apple_time_compat.cpp plus every shim declared in
+// radek_ios_shims.h. Both sides expand the same table, so the registry and the
+// on-device resolver in jni.cpp can never disagree about what is implemented.
+#define RADEK_VERIFIED_SEED(darwin, android) {darwin, #android, toGeneric(&android)},
+
 const VerifiedSeed kVerifiedSeeds[] = {
     {"_CFAbsoluteTimeGetCurrent", "CFAbsoluteTimeGetCurrent", toGeneric(&CFAbsoluteTimeGetCurrent)},
     {"_CACurrentMediaTime", "CACurrentMediaTime", toGeneric(&CACurrentMediaTime)},
     {"_mach_absolute_time", "mach_absolute_time", toGeneric(&mach_absolute_time)},
     {"_mach_timebase_info", "mach_timebase_info", toGeneric(&mach_timebase_info)},
+    RADEK_IOS_SHIM_TABLE(RADEK_VERIFIED_SEED)
 };
 
 bool validSymbolName(const char *name) {
