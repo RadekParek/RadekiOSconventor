@@ -1,7 +1,9 @@
 """Offline leaf-function lifting. This module never executes guest instructions.
 
 The IR can describe a broader machine than the current proven backend accepts.
-Only the explicitly decoded straight-line integer subset is lowerable today.
+Only the explicitly decoded straight-line integer subset is lowerable today:
+MOV-immediate, MOVK, register MOV (a plain zero-extending copy), immediate
+ADD/SUB and RET.
 """
 
 from dataclasses import dataclass, field, asdict
@@ -17,6 +19,7 @@ class Unsupported(ValueError):
 class Op(str, Enum):
     CONST = "const"
     INSERT = "insert"
+    MOV = "mov"
     ADD = "add"
     SUB = "sub"
     RETURN = "return"
@@ -85,6 +88,10 @@ def _emit_arm64(i: Instruction) -> bytes:
             words.append(0x72A00000 | ((value >> 16) << 5) | i.dst)
     elif i.op == Op.INSERT:
         words = [0x72800000 | ((i.shift // 16) << 21) | (i.immediate << 5) | i.dst]
+    elif i.op == Op.MOV:
+        # ORR <W|X>d, WZR/XZR, <W|X>m — a plain register copy.
+        base = 0xAA000000 if i.width == 64 else 0x2A000000
+        words = [base | (i.src << 16) | (31 << 5) | i.dst]
     elif i.op in (Op.ADD, Op.SUB):
         if not 0 <= i.immediate <= 4095:
             raise Unsupported("ARM immediate cannot be lowered to a single safe ADD/SUB")
@@ -126,6 +133,10 @@ def _emit_armv7(i: Instruction) -> bytes:
         if i.shift != 16:
             raise Unsupported("ARMv7 backend only lowers a high-half MOVK/MOVT")
         words = [_movt(i.dst, i.immediate & 0xFFFF)]
+    elif i.op == Op.MOV:
+        if not (0 <= i.src <= 15 and 0 <= i.dst <= 15):
+            raise Unsupported("ARMv7 MOV register operand out of range")
+        words = [0xE1A00000 | i.src | (i.dst << 12)]
     elif i.op in (Op.ADD, Op.SUB):
         immediate = _armv7_immediate(i.immediate)
         if immediate is None:
@@ -190,6 +201,16 @@ def lift(
                 i = Instruction(
                     Op.ADD if w >> 30 & 1 == 0 else Op.SUB, start, w & 31, w >> 5 & 31, w >> 10 & 4095
                 )
+            elif w & 0x7FE00000 == 0x2A000000 and w & 0xFC00 == 0 and w & 0x3E0 == 0x3E0:
+                # ORR <W|X>d, WZR/XZR, <W|X>m with no shift: a plain register
+                # copy (the canonical MOV-register encoding).
+                width = 64 if w >> 31 & 1 else 32
+                source = w >> 16 & 31
+                if source == 31:
+                    # MOV <W|X>d, WZR/XZR zeroes the destination.
+                    i = Instruction(Op.CONST, start, w & 31, immediate=0, width=width)
+                else:
+                    i = Instruction(Op.MOV, start, w & 31, source, width=width)
             else:
                 raise Unsupported(f"ARM64 instruction 0x{w:08x} at +0x{start:x} is not in the proven subset")
         elif not thumb:
@@ -217,6 +238,15 @@ def lift(
                     )
                 else:
                     raise Unsupported("ARM data processing operation outside proven subset")
+            elif w & 0xFFFF0FF0 == 0xE1A00000:
+                # MOV Rd, Rm (cond AL, no shift, S=0): a plain register copy.
+                source = w & 15
+                destination = w >> 12 & 15
+                if source == 15:
+                    raise Unsupported("MOV from PC is not a closed integer value")
+                if destination == 15:
+                    raise Unsupported("MOV to PC is control flow, not a closed integer copy")
+                i = Instruction(Op.MOV, start, destination, source)
             else:
                 raise Unsupported(f"ARM instruction 0x{w:08x} at +0x{start:x} is unsupported")
         else:
@@ -248,6 +278,15 @@ def lift(
                     immediate=imm,
                     shift=16 if top else 0,
                 )
+            elif w & 0xFF00 == 0x4600:
+                # MOV Rd, Rm (T2 register form, including high registers).
+                source = w >> 3 & 15
+                destination = (w & 0x80) >> 4 | w & 7
+                if source in (13, 15):
+                    raise Unsupported("MOV from SP/PC is not a closed integer value")
+                if destination == 15:
+                    raise Unsupported("MOV to PC is control flow, not a closed integer copy")
+                i = Instruction(Op.MOV, start, destination, source)
             else:
                 raise Unsupported(
                     f"Thumb instruction 0x{w:04x} at +0x{start:x} is unsupported (branches/IT require a future CFG backend)"

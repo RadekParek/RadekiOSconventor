@@ -38,12 +38,27 @@ def emit(program: Program, function_name: str = "radek_translated_entry") -> str
     for position, instruction in enumerate(instructions):
         if returned:
             raise Unsupported("instructions follow the return in the lifted leaf")
-        if instruction.width != 32:
+        # Every subset write zero-extends into the 64-bit register, so the
+        # tracked 32-bit value fully describes the state; register copies
+        # (MOV) preserve that invariant and are accepted at either width.
+        if instruction.width not in (32, 64) or (instruction.width == 64 and instruction.op not in (
+            Op.MOV,
+            Op.CONST,
+        )):
             raise Unsupported("C leaf backend only supports 32-bit integer instructions")
         if instruction.op == Op.CONST:
             dst = register(instruction.dst)
             immediate = instruction.immediate & 0xFFFFFFFF
+            if instruction.width == 64 and instruction.immediate != 0:
+                raise Unsupported("C leaf backend cannot materialize a 64-bit constant")
             body.append(f"    r[{dst}] = UINT32_C(0x{immediate:08x});")
+            initialized.add(dst)
+        elif instruction.op == Op.MOV:
+            dst = register(instruction.dst)
+            src = register(instruction.src)
+            if src not in initialized:
+                raise Unsupported("C MOV reads an uninitialized register")
+            body.append(f"    r[{dst}] = r[{src}];")
             initialized.add(dst)
         elif instruction.op == Op.INSERT:
             dst = register(instruction.dst)

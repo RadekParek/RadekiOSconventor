@@ -36,6 +36,24 @@ class CBackendTests(unittest.TestCase):
                 "armv7",
                 42,
             ),
+            (
+                # MOV W0,#40 ; MOV W1,W0 ; MOV X2,X1 ; ADD W2,W2,#2 ; MOV W0,W2 ; RET
+                struct.pack(
+                    "<IIIIII", 0x52800500, 0x2A0003E1, 0xAA0103E2, 0x11000842, 0x2A0203E0, 0xD65F03C0
+                ),
+                "arm64",
+                False,
+                "arm64",
+                42,
+            ),
+            (
+                # Thumb: MOVS r0,#41 ; MOV r1,r0 ; ADDS r1,#1 (via MOV chain) ; MOV r0,r1 ; BX LR
+                struct.pack("<HHHHHH", 0x2029, 0x4601, 0x3101, 0x4608, 0x4684, 0x4770),
+                "armv7",
+                True,
+                "arm64",
+                42,
+            ),
         )
         for index, (code, source_arch, thumb, target_arch, expected) in enumerate(cases):
             with self.subTest(index=index), tempfile.TemporaryDirectory() as directory:

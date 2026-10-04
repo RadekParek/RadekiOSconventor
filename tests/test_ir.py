@@ -103,6 +103,78 @@ class IRTests(unittest.TestCase):
         )
         self.assertEqual(add.machine_code, struct.pack("<III", 0xE3001001, 0xE28104FF, 0xE12FFF1E))
 
+    def test_arm64_register_mov_preserved(self):
+        # MOV W0,#42 ; MOV W1,W0 ; MOV X0,X1 ; RET
+        code = struct.pack("<IIII", 0x52800540, 0x2A0003E1, 0xAA0103E0, 0xD65F03C0)
+        p = lift(code, "arm64")
+        self.assertEqual(p.machine_code, code)
+        self.assertEqual(
+            [i.op for i in p.blocks[0].instructions], [Op.CONST, Op.MOV, Op.MOV, Op.RETURN]
+        )
+        self.assertEqual(p.blocks[0].instructions[2].width, 64)
+        self.assertEqual(p.blocks[0].instructions[1].width, 32)
+
+    def test_arm64_mov_from_xzr_zeroes_destination(self):
+        # MOVZ W0,#7 ; MOV X0,XZR ; ADD W0,W0,#5 ; RET  -> returns 5
+        code = struct.pack("<IIII", 0x528000E0, 0xAA1F03E0, 0x11001400, 0xD65F03C0)
+        p = lift(code, "arm64")
+        zero = p.blocks[0].instructions[1]
+        self.assertEqual(zero.op, Op.CONST)
+        self.assertEqual(zero.immediate, 0)
+        self.assertEqual(zero.width, 64)
+
+    def test_arm64_register_mov_lowers_to_armv7(self):
+        code = struct.pack("<IIII", 0x52800540, 0x2A0003E1, 0x2A0103E0, 0xD65F03C0)
+        program = lift(code, "arm64", target_abi="armeabi-v7a")
+        self.assertEqual(
+            program.machine_code,
+            struct.pack("<IIII", 0xE300002A, 0xE1A01000, 0xE1A00001, 0xE12FFF1E),
+        )
+
+    def test_arm_register_mov_decoded_and_lowered(self):
+        # MOV r0,#42 ; MOV r1,r0 ; MOV r0,r1 ; BX LR
+        source = struct.pack("<IIII", 0xE3A0002A, 0xE1A01000, 0xE1A00001, 0xE12FFF1E)
+        preserved = lift(source, "armv7", target_arch="armv7")
+        self.assertEqual(
+            preserved.machine_code,
+            struct.pack("<IIII", 0xE300002A, 0xE1A01000, 0xE1A00001, 0xE12FFF1E),
+        )
+        lowered = lift(source, "armv7")
+        self.assertEqual(
+            lowered.machine_code,
+            struct.pack("<IIII", 0x52800540, 0x2A0003E1, 0x2A0103E0, 0xD65F03C0),
+        )
+        # Shifted or flag-setting MOV forms stay outside the proven subset.
+        for word in (0xE1A01080, 0xE1B00001):
+            with self.subTest(word=word), self.assertRaises(Unsupported):
+                lift(struct.pack("<III", 0xE3A0002A, word, 0xE12FFF1E), "armv7")
+        with self.assertRaisesRegex(Unsupported, "PC"):
+            lift(struct.pack("<III", 0xE3A0002A, 0xE1A0F001, 0xE12FFF1E), "armv7")
+
+    def test_thumb_register_mov_lowered(self):
+        # MOVS r0,#42 ; MOV r1,r0 ; MOV r0,r1 ; MOV r12,r0 ; BX LR
+        source = struct.pack("<HHHHH", 0x202A, 0x4601, 0x4608, 0x4684, 0x4770)
+        program = lift(source, "armv7", True)
+        self.assertEqual(
+            program.machine_code,
+            struct.pack(
+                "<IIIII", 0x52800540, 0x2A0003E1, 0x2A0103E0, 0x2A0003EC, 0xD65F03C0
+            ),
+        )
+        armv7 = lift(source, "armv7", True, target_arch="armv7")
+        self.assertEqual(
+            armv7.machine_code,
+            struct.pack(
+                "<IIIII", 0xE300002A, 0xE1A01000, 0xE1A00001, 0xE1A0C000, 0xE12FFF1E
+            ),
+        )
+
+    def test_mov_rejects_uninitialized_source_and_stack_reads(self):
+        with self.assertRaisesRegex(Unsupported, "closed leaf"):
+            lift(struct.pack("<III", 0x52800540, 0x2A0203E0, 0xD65F03C0), "arm64")
+        with self.assertRaisesRegex(Unsupported, "SP/PC"):
+            lift(struct.pack("<HHH", 0x202A, 0x4668, 0x4770), "armv7", True)
+
     def test_uninitialized_inputs(self):
         for code in (
             struct.pack("<I", 0xD65F03C0),

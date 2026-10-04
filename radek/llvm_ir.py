@@ -1,10 +1,10 @@
 """Textual LLVM IR emission for the proven closed-integer leaf subset.
 
 This is deliberately much narrower than a general ARM lifter. It consumes the
-IR produced by :mod:`radek.ir` (MOV-immediate, MOVK, immediate ADD/SUB, RET),
-which has already rejected memory, calls, branches, external state and unknown
-instructions. It does not lift arbitrary Mach-O functions or recover original
-source code.
+IR produced by :mod:`radek.ir` (MOV-immediate, MOVK, register MOV, immediate
+ADD/SUB, RET), which has already rejected memory, calls, branches, external
+state and unknown instructions. It does not lift arbitrary Mach-O functions or
+recover original source code.
 """
 
 from __future__ import annotations
@@ -62,14 +62,28 @@ def emit(program: Program, function_name: str = "radek_lifted") -> str:
     for position, instruction in enumerate(instructions):
         if returned:
             raise Unsupported("instructions follow the return in the lifted leaf")
-        if instruction.width != 32:
+        # Subset writes zero-extend into 64-bit registers, so the tracked
+        # i32 value is complete; MOV copies are accepted at either width.
+        if instruction.width not in (32, 64) or (instruction.width == 64 and instruction.op not in (
+            Op.MOV,
+            Op.CONST,
+        )):
             raise Unsupported("only the proven 32-bit integer subset is supported by LLVM emission")
         if instruction.op == Op.CONST:
             if instruction.dst is None:
                 raise Unsupported("constant instruction has no destination register")
+            if instruction.width == 64 and instruction.immediate != 0:
+                raise Unsupported("LLVM emission cannot materialize a 64-bit constant")
             value = _integer(instruction.immediate)
             name = fresh()
             body.append(f"  {name} = add i32 0, {value}")
+            registers[instruction.dst] = name
+        elif instruction.op == Op.MOV:
+            if instruction.dst is None or instruction.src is None:
+                raise Unsupported("MOV instruction has an incomplete register operand")
+            source = reg(instruction.src)
+            name = fresh()
+            body.append(f"  {name} = add i32 {source}, 0")
             registers[instruction.dst] = name
         elif instruction.op == Op.INSERT:
             if instruction.dst is None or instruction.shift not in (0, 16):
