@@ -1,0 +1,16 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application
+        android:allowBackup="false"
+        android:icon="@drawable/generated_placeholder_icon"
+        android:label="__RADEK_PLACEHOLDER_LABEL__"
+        android:theme="@android:style/Theme.Material.NoActionBar">
+        <activity
+            android:name="dev.radek.generated.GeneratedPlaceholderActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

@@ -4,8 +4,12 @@
   progress and architecture-independent icon recovery; `AssetCatalogIcon` reads bounded raster
   renditions from compiled `Assets.car`; `AndroidApiMapper` reports unimplemented symbol/API
   candidates without claiming a relink; `SafeZip` handles untrusted extraction; `Plist` handles
-  XML/binary parsing; `NativeBridge` calls C++ through JNI; `ResultProvider` is read-only and only
-  exposes a host APK accepted under the complete-game contract.
+  XML/binary parsing; `NativeBridge` calls C++ through JNI; `PlaceholderApkBuilder` customizes,
+  signs and verifies a bundled source-free Android shell; `ResultProvider` has separate, strict
+  paths for complete-game host APKs and explicitly non-playable placeholder APKs.
+- `placeholder-template/`: minimal Android activity and fallback icon. The converter build extracts
+  only its manifest, resource table, DEX and fallback icon as assets (not the signed template APK);
+  per-import metadata/icon branding is applied only after the user invokes **Force convert to .apk**.
 - `native/src/macho.cpp`: host/Android shared C++ Mach-O analyzer. It never executes the input.
   JSON describes source structure, not conversion success.
 - `native/include/runtime.hpp`: experimental portable runtime and storage primitives with host tests.
@@ -16,6 +20,10 @@
 - `radek/ir.py`: explicit register/width/flag-aware instruction records, decoding, proof and
   ARM64/ARMv7 lowering. ARM32 inputs target `armeabi-v7a`; unsupported instruction classes raise
   `Unsupported`. Lowered bytes are currently only an in-memory experiment, never a game artifact.
+- `radek/llvm_ir.py`: emits textual LLVM IR only from the proven closed-integer leaf IR and
+  asks `llvm-as` to verify syntax when that tool is available. `leaf-experiment.ll` is a research
+  artifact; it does not lift arbitrary ARM code, provide C/C++ game source, or qualify for NDK/APK
+  packaging.
 - `radek/resources.py`: icon normalization, resource inventory, executable/signature exclusion.
 - `radek/dex.py`: bounded DEX integrity and class-identity inspection.
 - `radek/apk.py`: importer/host APK validation. Game-APK creation is deliberately disabled until
@@ -38,10 +46,12 @@ The importer's analysis path is:
 - `READY`: reserved for a future complete native game conversion whose APK passes independent
   static validation. No current IPA-to-game path can enter `READY`.
 
-The app's **Force convert to .apk** button does not override these states. If complete conversion is
-unavailable, it explains the limitation and emits no APK. A host result is shareable/installable
-only after the `complete-game-v1` contract passes attachment checks; the CLI currently emits no
-such result.
+The app's **Force convert to .apk** action does not override these states or claim game translation.
+It separately builds a signed placeholder launcher carrying the app name and recovered icon where
+available; its screen says that no game code was translated and that the game will not run. The
+placeholder has its own filename, metadata, progress and provider validation. A host result remains
+shareable/installable only after the `complete-game-v1` contract passes attachment checks; the CLI
+currently emits no such result.
 
 ## Adding real support
 

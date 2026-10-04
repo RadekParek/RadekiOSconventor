@@ -15,6 +15,32 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28], manifest = Config.NONE)
 class AnalysisProgressRecoveryTest {
+    @Test fun interruptedPlaceholderBuildDoesNotBecomeGameCodeProgress() {
+        val library = Library(RuntimeEnvironment.getApplication())
+        val entry = File(library.root, "placeholder-${UUID.randomUUID()}").apply { mkdirs() }
+        try {
+            File(entry, "source.ipa").writeText("retained authorized source")
+            val report = JSONObject()
+                .put("state", "PARTIAL")
+                .put("source", JSONObject().put("sha256", "a".repeat(64)))
+                .put("conversionProgress", JSONObject().put("percent", 0).put("status", "NOT_BUILT"))
+                .put("portProgress", JSONObject().put("percent", 0).put("status", "NO_RUNNABLE_ANDROID_CODE_BUILT"))
+                .put("placeholderBuildProgress", JSONObject()
+                    .put("percent", 68)
+                    .put("status", "SIGNING")
+                    .put("message", "Signing placeholder"))
+            library.save(entry, report)
+
+            library.recoverInterrupted()
+
+            val recovered = JSONObject(File(entry, "report.json").readText())
+            assertEquals("FAILED", recovered.getJSONObject("placeholderBuildProgress").getString("status"))
+            assertEquals(0, recovered.getJSONObject("placeholderBuildProgress").getInt("percent"))
+            assertEquals("NOT_BUILT", recovered.getJSONObject("conversionProgress").getString("status"))
+            assertEquals("NO_RUNNABLE_ANDROID_CODE_BUILT", recovered.getJSONObject("portProgress").getString("status"))
+        } finally { entry.deleteRecursively() }
+    }
+
     @Test fun interruptedAnalysisKeepsItsLastProgressAndExplainsFailure() {
         val library = Library(RuntimeEnvironment.getApplication())
         val entry = File(library.root, "interrupted-${UUID.randomUUID()}").apply { mkdirs() }

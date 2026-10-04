@@ -10,7 +10,7 @@ import android.provider.OpenableColumns
 import org.json.JSONObject
 import java.io.File
 
-/** Read-only, URI-granted access to validated complete-game host APKs only. */
+/** Read-only URI access with distinct validation contracts for host and placeholder APKs. */
 class ResultProvider : ContentProvider() {
     override fun onCreate() = true
 
@@ -21,12 +21,17 @@ class ResultProvider : ContentProvider() {
         val entryDirectory = File(root, parts[0]).canonicalFile
         require(entryDirectory.path.startsWith(root.path + File.separator) && entryDirectory.isDirectory)
         val report = JSONObject(File(entryDirectory, "report.json").readText())
+        val requestedName = parts[1]
+        if (requestedName == ArtifactNames.placeholderApkFileName(report)) {
+            return PlaceholderArtifactContract.validate(report, entryDirectory, requestedName)
+        }
         val conversion = report.optJSONObject("hostConversion") ?: error("no complete-game conversion attached")
         val expectedName = ArtifactNames.apkFileName(report)
-        require(conversion.optString("status") == "ATTACHED" && conversion.optBoolean("completeGameConversion", false)) {
+        require(conversion.optString("status") == "ATTACHED" &&
+            conversion.optBoolean("completeGameConversion", false) && conversion.optString("contract") == "complete-game-v1") {
             "only complete-game conversions may be opened"
         }
-        require(conversion.optString("artifact") == expectedName && parts[1] == expectedName) {
+        require(conversion.optString("artifact") == expectedName && requestedName == expectedName) {
             "unsupported result name"
         }
         val result = File(entryDirectory, expectedName).canonicalFile

@@ -51,6 +51,14 @@ class Library(private val context: Context) {
                 if (!savedHash.matches(Regex("[0-9a-f]{64}"))) File(dir, "source.ipa").delete()
                 changed = true
             }
+            report.optJSONObject("placeholderBuildProgress")
+                ?.takeIf { it.optString("status") == "BUILDING" || it.optString("status") == "SIGNING" || it.optString("status") == "VERIFYING" }
+                ?.let { placeholder ->
+                    placeholder.put("status", "FAILED")
+                        .put("percent", 0)
+                        .put("message", "Placeholder build was interrupted before it finished; retry Force to rebuild it.")
+                    changed = true
+                }
             if (changed) save(dir, report)
         }
     }
@@ -85,7 +93,7 @@ class Library(private val context: Context) {
                 .put("percent", 0)
                 .put("stage", "NOT_STARTED")
                 .put("status", "NOT_BUILT")
-                .put("message", "No real Android conversion was run on-device; no placeholder APK will be emitted."))
+                .put("message", "No complete-game Android conversion was run during analysis; the separate Force action may create a non-playable placeholder."))
             .put("portProgress", JSONObject()
                 .put("percent", 0)
                 .put("status", "NO_RUNNABLE_ANDROID_GAME_CODE")
@@ -245,7 +253,7 @@ class Library(private val context: Context) {
                 encrypted -> "Protected/encrypted Mach-O. Conversion prohibited; no DRM or FairPlay bypass."
                 !hasCandidate -> "No supported ARM64/ARMv7/ARMv6 slice. ARM64e PAC reconstruction is blocked."
                 incompatible -> "Frameworks, imports, incomplete dyld bindings, metadata or embedded code require unsupported compatibility/linker implementations."
-                else -> "Analysis completed, but complete iOS-to-Android game-code translation, API replacement, and packaging are not implemented. No APK can be produced from this analysis."
+                else -> "Analysis completed, but complete iOS-to-Android game-code translation, API replacement, and packaging are not implemented. No playable game APK can be produced from this analysis; Force can build a separate branded placeholder."
             }
             report.put("blockers", JSONArray().put(reason)).put("hostCommand", "python3 -m radek analyze input.ipa --authorized --output workspace/analysis")
             val terminalState = if (encrypted || incompatible || !hasCandidate) ConversionState.BLOCKED else ConversionState.PARTIAL
@@ -254,7 +262,7 @@ class Library(private val context: Context) {
                 .put("stage", "NOT_BUILT")
                 .put("status", "NOT_BUILT")
                 .put("message", reason)
-                .put("basis", "No placeholder APK is emitted; only a real host conversion that passes validation can be attached."))
+                .put("basis", "No game code is translated during IPA analysis. A user-triggered placeholder is tracked separately and is not counted as Android game-code progress."))
             log(terminalState, reason, 100)
             save(dir, report)
         } catch (e: Exception) {

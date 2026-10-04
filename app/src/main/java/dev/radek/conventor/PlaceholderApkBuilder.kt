@@ -1,0 +1,316 @@
+package dev.radek.conventor
+
+import android.content.Context
+import android.graphics.BitmapFactory
+import com.android.apksig.ApkSigner
+import com.android.apksig.ApkVerifier
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.security.MessageDigest
+import java.util.zip.Deflater
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+
+/** Builds an explicitly non-playable Android shell from a bundled, source-free template APK. */
+internal class PlaceholderApkBuilder(private val context: Context) {
+    companion object {
+        private const val MAX_TEMPLATE_ENTRY_BYTES = 32L * 1024 * 1024
+        private const val MAX_ICON_BYTES = 16L * 1024 * 1024
+        private val PNG_SIGNATURE = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
+    }
+
+    private data class TemplateEntries(
+        val manifest: ByteArray,
+        val resources: ByteArray,
+        val dex: ByteArray,
+        val fallbackIcon: ByteArray,
+        val iconEntryPath: String,
+    )
+
+    fun build(dir: File, progress: (Int, String) -> Unit = { _, _ -> }): JSONObject {
+        require(dir.isDirectory && File(dir, "source.ipa").isFile) { "retained source IPA is missing" }
+        val reportFile = File(dir, "report.json")
+        val report = JSONObject(reportFile.readText())
+        val app = report.optJSONObject("application") ?: error("application metadata missing")
+        val source = report.optJSONObject("source") ?: error("source metadata missing")
+        val sourceHash = source.optString("sha256")
+        require(sourceHash.matches(Regex("[0-9a-f]{64}")) && app.optString("sha256") == sourceHash) {
+            "source IPA hash metadata is invalid"
+        }
+        val actualHash = sha256(File(dir, "source.ipa"))
+        require(actualHash == sourceHash) { "retained IPA does not match the analysis report" }
+        val name = sanitizeLabel(app.optString("name").ifBlank { app.optString("bundleId").substringAfterLast('.').ifBlank { "Imported iOS app" } })
+        val bundleId = app.optString("bundleId").take(255)
+        val resultName = ArtifactNames.placeholderApkFileName(report)
+        val resultFile = File(dir, resultName)
+        require(resultFile.parentFile?.canonicalFile == dir.canonicalFile) { "invalid placeholder result path" }
+
+        val reportContext = Library(context)
+        fun setProgress(percent: Int, status: String, message: String) {
+            report.put("placeholderBuildProgress", JSONObject()
+                .put("percent", percent.coerceIn(0, 100))
+                .put("status", status)
+                .put("message", message)
+                .put("updatedAt", java.time.Instant.now().toString()))
+            reportContext.save(dir, report)
+            progress(percent.coerceIn(0, 100), message)
+        }
+
+        val unsignedFile = File(dir, ".placeholder-unsigned.apk")
+        val signedFile = File(dir, ".placeholder-signed.apk")
+        val backupFile = File(dir, ".$resultName.backup")
+        val finalPending = File(dir, ".$resultName.pending")
+        var finalized = false
+        var resultInstalled = false
+        if (backupFile.isFile) {
+            if (!resultFile.exists()) backupFile.renameTo(resultFile) else backupFile.delete()
+        }
+        unsignedFile.delete(); signedFile.delete(); finalPending.delete()
+        try {
+            setProgress(3, "BUILDING", "Preparing an installable placeholder. iOS game code is not translated.")
+            val identity = PlaceholderSigningIdentity.loadOrCreate(
+                File(context.noBackupFilesDir, "placeholder-apk-signing-identity.bin"),
+            )
+            val certificateHash = sha256(identity.certificate.encoded)
+            val packageName = "dev.radek.placeholder.p${sourceHash.take(24)}${certificateHash.take(8)}"
+            require(packageName.length <= 127)
+            setProgress(12, "BUILDING", "Loading the Android placeholder shell and installation signer")
+            setProgress(18, "BUILDING", "Reading the bundled Android placeholder resources")
+            val templateEntries = TemplateEntries(
+                manifest = readAsset("placeholder-template/AndroidManifest.xml", 2L * 1024 * 1024),
+                resources = readAsset("placeholder-template/resources.arsc", MAX_TEMPLATE_ENTRY_BYTES),
+                dex = readAsset("placeholder-template/classes.dex", MAX_TEMPLATE_ENTRY_BYTES),
+                fallbackIcon = readAsset("placeholder-template/fallback-icon.png", MAX_ICON_BYTES),
+                iconEntryPath = readAsset("placeholder-template/icon-entry-path.txt", 1024).toString(Charsets.UTF_8),
+            )
+            val manifest = templateEntries.manifest
+            val resourceTable = templateEntries.resources
+            val dex = templateEntries.dex
+            val templateFallbackIcon = templateEntries.fallbackIcon
+            require(dex.isNotEmpty() && templateFallbackIcon.copyOfRange(0, minOf(8, templateFallbackIcon.size)).contentEquals(PNG_SIGNATURE)) {
+                "placeholder template is missing its launcher code or fallback icon"
+            }
+            val iconEntryPath = SafeZip.validateName(templateEntries.iconEntryPath)
+            require(iconEntryPath == templateEntries.iconEntryPath && iconEntryPath.startsWith("res/") &&
+                iconEntryPath.substringAfterLast('/') == "generated_placeholder_icon.png") {
+                "placeholder template icon resource path is invalid"
+            }
+            val appName = sanitizeLabel(name)
+            val customizedManifest = BinaryXmlManifest.customize(manifest, packageName, appName)
+            val customizedResources = ResourceTablePackagePatcher.customize(resourceTable, packageName)
+            setProgress(36, "BUILDING", "Branded the Android package with the IPA name and a unique package id")
+
+            val iconStatus = report.optJSONObject("icon")?.optString("status").orEmpty()
+            val iconFile = File(dir, "icon.png")
+            val candidateIcon = if (iconFile.isFile && iconFile.length() in 1..MAX_ICON_BYTES) {
+                iconFile.readBytes().takeIf { bytes ->
+                    bytes.size >= PNG_SIGNATURE.size && bytes.copyOfRange(0, PNG_SIGNATURE.size).contentEquals(PNG_SIGNATURE) && validPng(bytes)
+                }
+            } else null
+            val iconBytes = candidateIcon ?: templateFallbackIcon
+            val iconSource = when {
+                candidateIcon == null -> "TEMPLATE_FALLBACK"
+                iconStatus == "SUPPORTED" -> "RECOVERED_IPA_ICON"
+                else -> "GENERATED_APP_NAME_ICON"
+            }
+            val originalIconAvailable = iconSource == "RECOVERED_IPA_ICON"
+            val apiMapping = report.optJSONObject("apiMapping") ?: JSONObject()
+            val distinctImportSymbols = apiMapping.optInt("distinctImportSymbols", 0).coerceAtLeast(0)
+            val directApiCandidates = apiMapping.optInt("mappedNameCandidates", 0).coerceAtLeast(0)
+            val semanticApiCandidates = apiMapping.optInt("semanticRewriteCandidates", 0).coerceAtLeast(0)
+            val analysisSummary = "Static analysis only: $distinctImportSymbols imported symbols; $directApiCandidates direct-name and $semanticApiCandidates semantic API candidates. No game code or API implementation was translated."
+            val analysisInfo = JSONObject()
+                .put("distinctImportSymbols", distinctImportSymbols)
+                .put("directApiCandidates", directApiCandidates)
+                .put("semanticApiCandidates", semanticApiCandidates)
+                .put("translatedGameFunctions", 0)
+                .put("apiReplacementImplementations", 0)
+            val infoJson = JSONObject()
+                .put("gameName", appName)
+                .put("bundleId", bundleId)
+                .put("iconSource", iconSource)
+                .put("analysisSummary", analysisSummary)
+                .put("analysisOnly", analysisInfo)
+                .put("placeholderOnly", true)
+                .put("gameCodeIncluded", false)
+                .toString().toByteArray(Charsets.UTF_8)
+
+            setProgress(52, "BUILDING", "Adding app branding and an honest non-playable placeholder screen")
+            ZipOutputStream(unsignedFile.outputStream().buffered()).use { output ->
+                output.setLevel(Deflater.BEST_COMPRESSION)
+                writeEntry(output, "AndroidManifest.xml", customizedManifest)
+                writeEntry(output, "classes.dex", dex)
+                writeEntry(output, "resources.arsc", customizedResources)
+                writeEntry(output, iconEntryPath, iconBytes)
+                writeEntry(output, "assets/placeholder-info.json", infoJson)
+                writeEntry(output, "assets/ipa-icon.png", iconBytes)
+            }
+            require(unsignedFile.isFile && unsignedFile.length() > 0) { "could not assemble placeholder package" }
+
+            setProgress(68, "SIGNING", "Signing the placeholder APK for Android installation")
+            val signerConfig = ApkSigner.SignerConfig.Builder(
+                "RadekiOS placeholder",
+                identity.privateKey,
+                listOf(identity.certificate),
+            ).build()
+            ApkSigner.Builder(listOf(signerConfig))
+                .setInputApk(unsignedFile)
+                .setOutputApk(signedFile)
+                .setMinSdkVersion(26)
+                .setV1SigningEnabled(true)
+                .setV2SigningEnabled(true)
+                .setV3SigningEnabled(true)
+                .build()
+                .sign()
+            require(signedFile.isFile && signedFile.length() > 0) { "APK signing produced no output" }
+
+            setProgress(88, "VERIFYING", "Checking the generated APK signature and package structure")
+            val verification = ApkVerifier.Builder(signedFile).build().verify()
+            require(verification.isVerified) {
+                "generated placeholder APK signature verification failed: ${verification.errors.joinToString("; ")}"
+            }
+            require(verification.signerCertificates.isNotEmpty()) { "generated APK has no signer certificate" }
+            @Suppress("DEPRECATION")
+            val packageInfo = context.packageManager.getPackageArchiveInfo(
+                signedFile.path,
+                android.content.pm.PackageManager.GET_ACTIVITIES or android.content.pm.PackageManager.GET_SIGNATURES,
+            ) ?: error("Android could not parse the generated placeholder APK")
+            require(packageInfo.packageName == packageName) { "Android parsed an unexpected placeholder package id" }
+            require(packageInfo.activities.orEmpty().any { it.name == "dev.radek.generated.GeneratedPlaceholderActivity" }) {
+                "placeholder launcher activity is missing from the parsed package"
+            }
+            require(packageInfo.applicationInfo?.loadLabel(context.packageManager)?.toString() == appName) {
+                "Android did not parse the IPA application name from the placeholder manifest"
+            }
+
+            require(signedFile.copyTo(finalPending, overwrite = true).isFile) { "could not stage signed APK" }
+            if (resultFile.exists()) {
+                require(!backupFile.exists() || backupFile.delete()) { "cannot remove stale placeholder backup" }
+                require(resultFile.renameTo(backupFile)) { "cannot preserve the previous placeholder APK" }
+            }
+            require(finalPending.renameTo(resultFile)) { "could not save generated placeholder APK" }
+            resultInstalled = true
+            val resultHash = sha256(resultFile)
+            require(sha256(verification.signerCertificates.first().encoded) == certificateHash) {
+                "generated APK signer changed during packaging"
+            }
+            val conversion = JSONObject()
+                .put("status", "GENERATED")
+                .put("completeGameConversion", false)
+                .put("placeholderOnly", true)
+                .put("gameCodeTranslated", false)
+                .put("gameCodeIncluded", false)
+                .put("gamePlayable", false)
+                .put("installableAndroidPackage", true)
+                .put("artifact", resultFile.name)
+                .put("package", packageName)
+                .put("applicationName", appName)
+                .put("sourceBundleId", bundleId)
+                .put("sourceSha256", sourceHash)
+                .put("sha256", resultHash)
+                .put("bytes", resultFile.length())
+                .put("iconSource", iconSource)
+                .put("iconSha256", sha256(iconBytes))
+                .put("originalIconAvailable", originalIconAvailable)
+                .put("analysisOnly", analysisInfo)
+                .put("signing", JSONObject()
+                    .put("schemes", org.json.JSONArray().put("v1").put("v2").put("v3"))
+                    .put("certificateSha256", certificateHash))
+                .put("translationStatus", "NONE")
+                .put("translatedGameFunctions", 0)
+                .put("apiReplacementImplementations", 0)
+                .put("completedAt", java.time.Instant.now().toString())
+            report.put("placeholderConversion", conversion)
+            report.put("placeholderBuildProgress", JSONObject()
+                .put("percent", 100)
+                .put("status", "GENERATED")
+                .put("message", "Installable placeholder APK generated. It contains no translated game code and is not playable.")
+                .put("updatedAt", java.time.Instant.now().toString()))
+            reportContext.save(dir, report)
+            finalized = true
+            backupFile.delete()
+            progress(100, "Installable placeholder ready; game code was not translated and the game will not run")
+            return conversion
+        } catch (error: Exception) {
+            if (!finalized) {
+                if (resultInstalled) resultFile.delete()
+                if (backupFile.isFile && !resultFile.exists()) backupFile.renameTo(resultFile)
+            }
+            report.put("placeholderBuildProgress", JSONObject()
+                .put("percent", 0)
+                .put("status", "FAILED")
+                .put("message", error.message ?: error.javaClass.simpleName)
+                .put("updatedAt", java.time.Instant.now().toString()))
+            try { reportContext.save(dir, report) } catch (_: Exception) { }
+            throw error
+        } finally {
+            unsignedFile.delete()
+            signedFile.delete()
+            File(dir, ".${resultName}.pending").delete()
+        }
+    }
+
+    private fun sanitizeLabel(raw: String): String {
+        val output = StringBuilder()
+        var index = 0
+        while (index < raw.length && output.length < 160) {
+            val point = raw.codePointAt(index)
+            if (!Character.isISOControl(point) && Character.isValidCodePoint(point)) {
+                val count = Character.charCount(point)
+                if (output.length + count <= 160) output.appendCodePoint(point)
+            }
+            index += Character.charCount(point)
+        }
+        return output.toString().trim().ifBlank { "Imported iOS app" }
+    }
+
+    private fun validPng(bytes: ByteArray): Boolean {
+        return try {
+            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            if (bitmap == null) false else {
+                val valid = bitmap.width in 1..8192 && bitmap.height in 1..8192
+                bitmap.recycle()
+                valid
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun readAsset(name: String, maximum: Long): ByteArray = context.assets.open(name).use { input ->
+        val output = ByteArrayOutputStream()
+        val buffer = ByteArray(65536)
+        var total = 0L
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            total += count
+            require(total <= maximum) { "bundled placeholder asset exceeds size limit: $name" }
+            output.write(buffer, 0, count)
+        }
+        require(total > 0) { "bundled placeholder asset is empty: $name" }
+        output.toByteArray()
+    }
+
+    private fun writeEntry(zip: ZipOutputStream, name: String, bytes: ByteArray) {
+        val entry = ZipEntry(name).apply { time = 0L }
+        zip.putNextEntry(entry)
+        zip.write(bytes)
+        zip.closeEntry()
+    }
+
+    private fun sha256(file: File): String = file.inputStream().use { input ->
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buffer = ByteArray(65536)
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            digest.update(buffer, 0, count)
+        }
+        digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    }
+
+    private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
+        .digest(bytes).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+}

@@ -21,6 +21,9 @@ class PipelineTests(unittest.TestCase):
         report = self.run_fixture(analyze_only=True)
         self.assertEqual(report["state"], "PARTIAL")
         self.assertEqual(report["leafTranslationAssessment"]["backend"], "preserved-arm64")
+        self.assertEqual(report["llvmLift"]["status"], "EXPERIMENTAL_ENTRY_ONLY")
+        self.assertEqual(report["llvmLift"]["completeGameConversion"], False)
+        self.assertTrue((self.root / "job/leaf-experiment.ll").is_file())
         self.assertEqual(report["icon"]["status"], "SUPPORTED")
         self.assertFalse(list((self.root / "job").glob("job-*")))
         self.assertFalse((self.root / "job/input.apk").exists())
@@ -125,6 +128,7 @@ class PipelineTests(unittest.TestCase):
         result = self.run_fixture()
         self.assertEqual(result["state"], "BLOCKED")
         self.assertEqual(result["conversionProgress"]["status"], "NOT_BUILT")
+        self.assertEqual(result["llvmLift"]["status"], "EXPERIMENTAL_ENTRY_ONLY")
         self.assertEqual(result["portProgress"]["percent"], 0)
         self.assertFalse(result["leafTranslationAssessment"]["apkProduced"])
         self.assertEqual(result["apiTranslation"]["generatedApiReplacements"], 0)
@@ -168,6 +172,10 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(arm_mode["selectedArchitecture"], "armv6")
         self.assertEqual(arm_mode["leafTranslationAssessment"]["backend"], "offline-armv6-to-armv7")
         self.assertEqual(arm_mode["leafTranslationAssessment"]["targetAbi"], "armeabi-v7a")
+        self.assertIn(
+            'target triple = "armv7-unknown-linux-androideabi"',
+            (self.root / "job/leaf-experiment.ll").read_text(),
+        )
 
         thumb_source = ipa(
             self.root / "thumb.ipa",

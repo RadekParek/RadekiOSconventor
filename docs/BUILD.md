@@ -36,10 +36,11 @@ recovered icon when decodable (including supported compiled `Assets.car` renditi
 API candidates, blockers, the raw JSON report and analysis logs.
 
 The analysis progress bar measures input copying, extraction and analysis only. It is not code
-translation, APK build progress, runtime validation or playability. The importer's runnable game
-code remains at zero unless a complete host conversion is attached under the strict contract. The
-red **Force convert to .apk** action does not bypass missing features or install a placeholder; it
-explains that no complete game converter is available in this build.
+translation, APK build progress, runtime validation or playability. Runnable game code remains at
+zero unless a complete host conversion is attached under the strict contract. The red **Force convert
+to .apk** action builds a separately named, installable placeholder from a bundled Android shell;
+it uses the IPA app name and recovered icon where available, but contains no translated game code or
+gameplay. Its launch screen makes that limitation explicit.
 
 A host APK attachment must match the IPA's SHA-256/package identity and safe IPA-derived basename,
 carry `complete-game-v1` metadata, account for every reachable function and API implementation,
@@ -58,9 +59,12 @@ python3 -m radek analyze authorized.ipa --authorized --output workspace/analysis
 
 The workspace must not already exist. Reports and logs persist; extracted workspaces are removed.
 The host also reconstructs code metadata and records whether its narrow closed-integer leaf check
-succeeds. That check is an experiment, not a complete app conversion. If `convert` is invoked on an
-input that passes only this restricted check, it returns `BLOCKED` and produces no APK. This is
-intentional: the experiment does not translate all game code, APIs, resources, or lifecycle.
+succeeds. When that proof succeeds, `leaf-experiment.ll` contains textual LLVM IR for the single
+verified MOV-immediate/MOVK/immediate-ADD/SUB/RET leaf. If `llvm-as` is on `PATH`, the host
+checks the generated IR syntax and records that result. This is an experiment, not a complete app
+conversion, and the file is not linked into an APK. If `convert` is invoked on an input that passes
+only this restricted check, it returns `BLOCKED` and produces no APK. This is intentional: the
+experiment does not translate all game code, APIs, resources, or lifecycle.
 
 ARM selection for the analysis is deterministic: automatic selection prefers ARM64 in a FAT IPA
 containing both ARM32 and ARM64; supported ARM32-only inputs target 32-bit Android ARMv7 (`armeabi-v7a`).
@@ -94,9 +98,11 @@ separate device tests are supplied.
 
 ## Development signing and CI
 
-Gradle signs the **importer app** using its normal Android debug build configuration. The repository
-no longer embeds an APK-signing key or signs generated game stubs. There is no generated game APK to
-install or distribute.
+Gradle signs the **importer app** using its normal Android debug build configuration. No signing
+key is embedded in the repository. When Force is used, the app creates and retains an installation-
+local signer in no-backup private storage and signs only the generated placeholder shell; it does not
+sign translated game code or treat the placeholder as a game APK. CI publishes no imported-IPA
+placeholder APK.
 
 `.github/workflows/build.yml` runs native/Python/Android tests, builds and validates the importer,
 and uploads only `RadekiOSConventor-debug.apk` plus validation/test reports. CI does not publish a

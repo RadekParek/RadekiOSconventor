@@ -2,7 +2,7 @@
 
 An **offline IPA inspection and native-reconstruction workbench**, not an iOS emulator or a general game converter. It includes an Android importer/analyzer, a C++ Mach-O parser, and Python reconstruction tools.
 
-> **No game APKs are currently produced.** This repository does not implement complete iOS-to-Android game translation, actual framework/API replacement, or an Android lifecycle/runtime for converted games. API-name matches and semantic mappings are analysis candidates only. The narrow closed-integer entry experiment is not a game conversion; packaging it as an installable app has been disabled. Unsupported or incomplete conversions end in `BLOCKED` and emit no APK.
+> **No playable or complete-game APKs are currently produced.** This repository does not implement complete iOS-to-Android game translation, actual framework/API replacement, or an Android lifecycle/runtime for converted games. API-name matches and semantic mappings are analysis candidates only. The narrow closed-integer entry experiment is not a game conversion; packaging it as a game app remains disabled. The Android app can separately build an explicitly labelled, signed, installable placeholder, but it contains no translated game code and cannot run the IPA's game.
 
 ## Offline reconstruction
 
@@ -18,22 +18,28 @@ Authorized imports are analyzed before compatibility is assessed:
   and which linked frameworks or APIs remain unsupported.
 
 Results are written as `reconstruction.json` and `reconstruction.md` beside `report.json`.
+When (and only when) the entry routine passes the existing closed-integer proof, the host also
+writes `leaf-experiment.ll`: textual LLVM IR for that one MOV-immediate/MOVK/immediate-ADD/SUB/RET
+leaf. It is explicitly not the full binary lift, recovered source, a game-code port, or an APK input.
 Reconstruction is an engineering artifact, not original source; uncertain instructions and
-control flow are marked, and imported code is never executed.
+control flow are marked, and imported code is never executed. Objective-C `__objc_msgrefs` selector
+references are followed through their `__objc_selrefs` pointer slots when statically readable.
 
 ## APK output policy
 
 - CI builds **only the RadekiOSConventor importer/analyzer APK** (`RadekiOSConventor-debug.apk`).
-- Importing an IPA runs analysis only. It does not automatically create a game APK, icon APK,
-  placeholder, or stub. The red **Force convert to .apk** action explains when complete conversion
-  is unsupported; it never bypasses the conversion checks or opens an installer for a placeholder.
+- Importing an IPA runs analysis only and does not automatically create an APK. The red **Force
+  convert to .apk** action creates a separately named, signed and installable launcher placeholder
+  branded with the IPA app name and recovered icon where available. It contains no iOS executable,
+  translated game code or gameplay, and says so when launched. Placeholder creation does not count
+  as code-translation or complete-game progress.
 - A host APK can be attached only if its metadata declares the `complete-game-v1` contract and
   passes source-identity, complete reachable-code/API/resource, ABI, packaging and provenance
-  checks. The current host CLI has **no producer** for that contract, so the repository currently
-  has no path for attaching a game APK.
+  checks. Placeholder APK metadata and provider paths are separate; a placeholder can never satisfy
+  the host APK contract. The current host CLI has **no producer** for that contract.
 - The original IPA is retained only in private analysis storage until the library entry is deleted;
-  it is never packaged into an APK. Recovered icons are shown in the analysis library, not used to
-  brand a placeholder.
+  it is never packaged into an APK. A recovered icon is copied into the placeholder; if no original
+  icon is available, a generated/fallback icon is used and reported accurately.
 
 The host's ARM assessment prefers `arm64-v8a` when an IPA contains both ARM32 and ARM64. A
 supported ARM32-only input is assessed for `armeabi-v7a`. These ABI choices describe analysis and

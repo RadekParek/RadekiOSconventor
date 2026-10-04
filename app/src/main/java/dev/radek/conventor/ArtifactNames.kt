@@ -17,4 +17,8 @@ internal object ArtifactNames {
             .ifBlank { "ConvertedIPA" }
         return "$safe.apk"
     }
+
+    /** Kept separate from the strict complete-game APK artifact and provider path. */
+    fun placeholderApkFileName(report: JSONObject): String =
+        apkFileName(report).removeSuffix(".apk") + "-placeholder.apk"
 }

@@ -40,7 +40,7 @@ jobs:
         run: python3 tools/build_native.py
       - name: AddressSanitizer and UndefinedBehaviorSanitizer tests
         run: python3 tools/ci_run.py bash tools/test_sanitized.sh
-      - name: Host tests and no-placeholder conversion regressions
+      - name: Host tests and placeholder/complete-game separation regressions
         run: python3 tools/ci_run.py python3 -m unittest discover -v
       - name: Android unit tests, lint, JNI native build and APK
         run: python3 tools/ci_run.py ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug

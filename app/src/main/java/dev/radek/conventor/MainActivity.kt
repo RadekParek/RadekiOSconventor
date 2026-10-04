@@ -192,8 +192,8 @@ class MainActivity : Activity() {
         text("IPA to Android", 30f, textColor, true)
         text("Import an IPA to automatically inspect its code and Android compatibility.", 15f, muted)
         val info = card()
-        text("No complete game converter available", 17f, textColor, true, info)
-        text("The on-device app analyzes the IPA but does not translate iOS code or replace iOS APIs. No complete game converter is currently available, so analysis never emits an APK. A host APK is accepted only if it declares a complete game conversion and passes provenance and package checks.", 14f, muted, parent = info)
+        text("Complete game conversion unavailable", 17f, textColor, true, info)
+        text("The on-device app analyzes the IPA but does not translate iOS code or replace iOS APIs. Analysis does not emit a game APK. For an imported app you own or may convert, Force can separately build a signed, installable placeholder branded with its name and recovered icon; it contains no translated game code and is not playable. Host APKs remain accepted only when they declare a complete game conversion and pass provenance and package checks.", 14f, muted, parent = info)
         val add = button("Choose IPA", true) { authorize() }; add.isEnabled = !Jobs.busy
         button("Settings", parent = body) { settingsScreen() }.isEnabled = !Jobs.busy
         if (Jobs.busy) {
@@ -234,7 +234,7 @@ class MainActivity : Activity() {
                 text(analysis.optString("message"), 11f, muted, parent = item)
             }
             report.optJSONObject("conversionProgress")?.let { conversion ->
-                text("Android APK: ${conversion.optString("status", "NOT_BUILT")} · ${conversion.optString("message")}", 11f, muted, parent = item)
+                text("Complete-game APK: ${conversion.optString("status", "NOT_BUILT")} · ${conversion.optString("message")}", 11f, muted, parent = item)
             }
             report.optJSONObject("apiMapping")?.let { mapping ->
                 val mapped = mapping.optInt("mappedNameCandidates", 0)
@@ -337,7 +337,7 @@ class MainActivity : Activity() {
     }
     private fun authorize() {
         AlertDialog.Builder(this).setTitle("Authorized files only")
-            .setMessage("Confirm that you own this IPA or have permission to convert it. Protection mechanisms will not be bypassed. The source IPA is retained in app-private storage for analysis until you delete this library entry. This app will not make or install a placeholder APK; it only accepts an APK that passes the complete-game conversion contract.")
+            .setMessage("Confirm that you own this IPA or have permission to convert it. Protection mechanisms will not be bypassed. The source IPA is retained in app-private storage for analysis until you delete this library entry. Analysis does not translate the game; the separate Force action can create only a non-playable, installable placeholder with no translated game code. Complete-game host APKs still require the strict conversion contract.")
             .setNegativeButton("Cancel", null).setPositiveButton("I have permission") { _, _ ->
                 startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type = "*/*"; addCategory(Intent.CATEGORY_OPENABLE) }, pickerIpa)
             }.show()
@@ -403,7 +403,7 @@ class MainActivity : Activity() {
             val buildCard = card()
             text("Host APK validation/attachment · ${conversion.optInt("percent", 0)}% · ${conversion.optString("status", "NOT_BUILT")}", 16f, statusColor(conversion.optString("status")), true, buildCard)
             text(conversion.optString("message"), 12f, muted, parent = buildCard)
-            text("No placeholder APK is emitted. A host APK is accepted only when complete reachable code, API replacements, resources and lifecycle are accounted for; runtime playability remains untested.", 12f, muted, parent = buildCard)
+            text("This is the complete-game APK path; it requires translated reachable code, API replacements, resources and lifecycle. The separate Force action can produce an installable placeholder only, with no translated gameplay.", 12f, muted, parent = buildCard)
         }
         text("Compatibility report", 22f, textColor, true)
         val blockers = report.optJSONArray("blockers")
@@ -420,7 +420,7 @@ class MainActivity : Activity() {
         button("View full machine-readable report") { showText("Conversion report", report.toString(2)) }
         button("View real conversion logs") { showText("Logs", File(dir, "conversion.jsonl").takeIf { it.isFile }?.readText() ?: "No logs") }
         text("APK conversion", 22f, textColor, true)
-        text("A complete iOS-to-Android game translator and actual framework/API replacements are not implemented. The host CLI can inspect and reconstruct code, but its restricted experimental native-entry output is not a complete game port and is not accepted as an APK. No APK is produced for unsupported or incomplete conversions.", 14f, muted)
+        text("A complete iOS-to-Android game translator and framework/API replacements are not implemented. The host CLI can inspect and reconstruct code, but its restricted experimental native-entry output is not a complete game port and is not accepted as one. Force creates only a signed placeholder with the IPA app name and icon where available; the iOS executable and game code are not translated, so this placeholder will not run the game.", 14f, muted)
         button("Copy host analysis command") {
             val abi = preferences.getString("target_abi", "auto") ?: "auto"
             val suffix = if (abi == "auto") "" else " --target-abi $abi"
@@ -432,7 +432,8 @@ class MainActivity : Activity() {
             if (!Jobs.busy) startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type = "application/vnd.android.package-archive"; addCategory(Intent.CATEGORY_OPENABLE) }, pickerApk)
         }
         val hostConversion = report.optJSONObject("hostConversion")
-        val hostAttached = hostConversion?.optString("status") == "ATTACHED"
+        val hostAttached = hostConversion != null && hostConversion.optString("status") == "ATTACHED" &&
+            hostConversion.optBoolean("completeGameConversion", false) && hostConversion.optString("contract") == "complete-game-v1"
         val expectedHostName = ArtifactNames.apkFileName(report)
         val reportedHostName = hostConversion?.optString("artifact").orEmpty()
         val hostOutputFile = if (hostAttached && reportedHostName == expectedHostName) {
@@ -453,20 +454,55 @@ class MainActivity : Activity() {
                 if (intent == null) Toast.makeText(this, "Converted program is not installed or not visible to Android", Toast.LENGTH_LONG).show() else startActivity(intent)
             }
         }
-        if (File(dir, "source.ipa").isFile && hostOutputFile == null) {
-            dangerButton("Force convert to .apk") { explainUnsupportedConversion() }
+        val placeholderConversion = report.optJSONObject("placeholderConversion")
+        val placeholderName = ArtifactNames.placeholderApkFileName(report)
+        val placeholderOutputFile = if (placeholderConversion?.optString("status") == "GENERATED") {
+            runCatching { PlaceholderArtifactContract.validate(report, dir, placeholderName) }.getOrNull()
+        } else null
+        if (placeholderConversion?.optString("status") == "GENERATED" && placeholderOutputFile == null) {
+            text("The placeholder APK is missing or its digest/metadata is invalid; it cannot be installed or shared.", 13f, statusColor("FAILED"))
+        }
+        report.optJSONObject("placeholderBuildProgress")?.takeIf { it.optString("status") == "FAILED" }?.let { build ->
+            text("Placeholder build failed: ${build.optString("message")}", 13f, statusColor("FAILED"))
+        }
+        if (placeholderOutputFile != null) {
+            val iconDescription = when (placeholderConversion?.optString("iconSource")) {
+                "RECOVERED_IPA_ICON" -> "Original IPA icon included"
+                "GENERATED_APP_NAME_ICON" -> "Generated name-based icon included; no original icon was recovered"
+                else -> "Fallback icon included; no original icon was recovered"
+            }
+            text("Installable placeholder APK · $iconDescription", 13f, accent, true)
+            text("This launches a branded notice screen only. No iOS executable, translated game code, or playable gameplay is included.", 12f, muted)
+            button("Install ${placeholderOutputFile.name}", true) { installArtifact(dir, placeholderOutputFile.name) }
+            button("Share ${placeholderOutputFile.name}") { shareResultApk(dir, placeholderOutputFile.name) }
+        }
+        if (File(dir, "source.ipa").isFile && app.has("sha256") && hostOutputFile == null) {
+            text("Force builds a signed, installable placeholder APK only; it does not translate or run the game.", 12f, muted)
+            dangerButton(if (placeholderOutputFile != null) "Rebuild placeholder APK" else "Force convert to .apk") {
+                startPlaceholderBuild(dir)
+            }
         }
         button("Delete library entry") {
-            if (!Jobs.busy) AlertDialog.Builder(this).setTitle("Delete imported entry?").setMessage("Removes the retained IPA, analysis reports, recovered icon and any validated complete-game host APK from this device.")
+            if (!Jobs.busy) AlertDialog.Builder(this).setTitle("Delete imported entry?").setMessage("Removes the retained IPA, analysis reports, recovered icon, any validated complete-game host APK and any generated placeholder APK from this device.")
                 .setNegativeButton("Cancel", null).setPositiveButton("Delete") { _, _ -> dir.deleteRecursively(); home() }.show()
         }
     }
-    private fun explainUnsupportedConversion() {
-        AlertDialog.Builder(this)
-            .setTitle("Complete game conversion unavailable")
-            .setMessage("This build can analyze an IPA but does not translate its iOS code or replace its APIs with Android implementations. The host tool's restricted native-entry experiment is not a complete game conversion. Force will not create, install, or share an APK unless a complete conversion backend is available and its output passes validation.")
-            .setPositiveButton("OK", null)
-            .show()
+
+    private fun startPlaceholderBuild(dir: File) {
+        if (Jobs.busy) return
+        if (!File(dir, "source.ipa").isFile) {
+            Toast.makeText(this, "Retained IPA not found; placeholder cannot be built", Toast.LENGTH_LONG).show()
+            return
+        }
+        Jobs.begin("Building installable placeholder")
+        returnToDetailAfterJob = dir
+        wasBusy = true
+        Jobs.run {
+            PlaceholderApkBuilder(applicationContext).build(dir) { percent, message ->
+                Jobs.update(percent, message)
+            }
+        }
+        home()
     }
 
     private fun shareResultApk(dir: File, name: String) {
@@ -483,7 +519,7 @@ class MainActivity : Activity() {
             clipData = android.content.ClipData.newUri(contentResolver, file.name, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        startActivity(Intent.createChooser(share, "Share IPA-named APK result"))
+        startActivity(Intent.createChooser(share, "Share APK result"))
     }
 
     private fun showText(title: String, value: String) {
@@ -499,7 +535,7 @@ class MainActivity : Activity() {
         val context = applicationContext
         if (requestCode == pickerIpa) {
             Jobs.begin("Analyzing · ${documentDisplayName(uri)}")
-            Jobs.update(0, "Starting IPA analysis; no APK will be built")
+            Jobs.update(0, "Starting IPA analysis; game code is not translated")
             Jobs.run {
                 val library = Library(context)
                 val (dir, report) = library.import(uri) { percent, message -> Jobs.update(percent, message) }

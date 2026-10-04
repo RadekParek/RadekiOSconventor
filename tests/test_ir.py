@@ -1,6 +1,7 @@
 import struct
 import unittest
 from radek.ir import *
+from radek.llvm_ir import emit as emit_llvm, verify as verify_llvm
 
 
 class IRTests(unittest.TestCase):
@@ -140,3 +141,34 @@ class IRTests(unittest.TestCase):
         code = struct.pack("<IIII", 0x529FFFE0, 0x72BFFFE0, 0x11000400, 0xD65F03C0)
         p = lift(code, "arm64")
         self.assertEqual(p.machine_code, code)
+
+    def test_closed_leaf_emits_textual_llvm_ir(self):
+        code = struct.pack("<III", 0x52800500, 0x11000800, 0xD65F03C0)
+        text = emit_llvm(lift(code, "arm64"))
+        self.assertIn('target triple = "aarch64-unknown-linux-android"', text)
+        self.assertIn("define i32 @radek_lifted()", text)
+        self.assertIn("%v0 = add i32 0, 40", text)
+        self.assertIn("%v1 = add i32 %v0, 2", text)
+        self.assertIn("ret i32 %v1", text)
+        self.assertIn("not a complete Android game port", text)
+
+    def test_movk_llvm_lift_uses_masked_halfword_replacement(self):
+        code = struct.pack("<IIII", 0x529FFFE0, 0x72BFFFE0, 0x11000400, 0xD65F03C0)
+        text = emit_llvm(lift(code, "arm64"))
+        self.assertIn("and i32 %v0, 65535", text)
+        self.assertIn("or i32 %v1, -65536", text)
+        self.assertIn("add i32 %v2, 1", text)
+
+    def test_llvm_emitter_rejects_invalid_names_and_unsupported_programs(self):
+        program = lift(struct.pack("<II", 0x52800500, 0xD65F03C0), "arm64")
+        with self.assertRaisesRegex(Unsupported, "function name"):
+            emit_llvm(program, "bad name")
+        with self.assertRaisesRegex(Unsupported, "no verified lowering"):
+            unsupported = Program("arm64", [Block(0, [Instruction(Op.LOAD, 0)])], b"", 4)
+            emit_llvm(unsupported)
+
+    def test_optional_llvm_as_verifier_reports_missing_executable(self):
+        text = emit_llvm(lift(struct.pack("<II", 0x52800500, 0xD65F03C0), "arm64"))
+        result = verify_llvm(text, assembler="/path/that/does/not/exist/llvm-as")
+        self.assertEqual(result["status"], "FAILED")
+        self.assertIn("No such file", result["message"])

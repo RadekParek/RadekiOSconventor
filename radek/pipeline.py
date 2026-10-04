@@ -8,6 +8,7 @@ from .archive import extract_ipa, discover_app, read_plist, metadata
 from .analysis import analyze, dependency_graph, prove_leaf, capabilities
 from .icons import extract as extract_icon, launcher as launcher_icon
 from .ir import Unsupported
+from .llvm_ir import emit as emit_llvm_ir, verify as verify_llvm_ir
 from .recon import reconstruct
 from .recon.report import blockers as recon_blockers, markdown as recon_markdown, summary as recon_summary
 
@@ -47,6 +48,16 @@ class Pipeline:
                 "generatedApiReplacements": 0,
                 "codeGenerated": False,
                 "message": "No verified Android API replacement backend is implemented.",
+            },
+            "llvmLift": {
+                "status": "NOT_ATTEMPTED",
+                "irPath": None,
+                "functionCount": 0,
+                "verifiedByLlvmAs": False,
+                "completeGameConversion": False,
+                "message": (
+                    "No LLVM IR has been emitted; the optional leaf backend is limited to a closed integer subset."
+                ),
             },
             "portProgress": {
                 "percent": 0,
@@ -181,6 +192,16 @@ class Pipeline:
                 try:
                     selected, program = prove_leaf(executable, mach, graph, reconstruction, target_abi)
                 except Unsupported as exc:
+                    self.report["llvmLift"] = {
+                        "status": "BLOCKED",
+                        "irPath": None,
+                        "functionCount": 0,
+                        "verifiedByLlvmAs": False,
+                        "completeGameConversion": False,
+                        "message": (
+                            "The entry routine is outside the closed integer LLVM-lift subset: " + str(exc)
+                        ),
+                    }
                     self.report["blockers"] = [line for line in str(exc).split("; ") if line]
                     summary = self.report.get("reconstructionSummary") or {}
                     if summary:
@@ -192,6 +213,30 @@ class Pipeline:
                         )
                     self.transition("BLOCKED", str(exc))
                     return self.report
+                # The LLVM artifact is intentionally limited to this independently
+                # proven closed-integer entry leaf. It is not reconstructed game
+                # source and is never fed to an APK packager.
+                llvm_text = emit_llvm_ir(program)
+                llvm_path = self.output / "leaf-experiment.ll"
+                llvm_path.write_text(llvm_text, encoding="utf-8")
+                llvm_verification = verify_llvm_ir(llvm_text)
+                self.report["llvmLift"] = {
+                    "status": "EXPERIMENTAL_ENTRY_ONLY",
+                    "irPath": llvm_path.name,
+                    "functionCount": 1,
+                    "instructionCount": len(program.blocks[0].instructions),
+                    "sourceArchitecture": selected["architecture"],
+                    "targetAbi": program.target_abi,
+                    "verifiedByLlvmAs": llvm_verification["status"] == "VERIFIED",
+                    "llvmAsVerification": llvm_verification,
+                    "completeGameConversion": False,
+                    "message": (
+                        "A single closed-integer leaf was lifted to textual LLVM IR; this is not a game-code port."
+                    ),
+                }
+                self.log(
+                    "LLVM_LIFT", "Wrote one experimental closed-integer LLVM IR leaf; no APK code was emitted"
+                )
                 # A proven integer leaf is only a narrow translation experiment; it
                 # is not a complete iOS game. Never wrap it in a launcher APK or mark
                 # it READY. Keep the assessment separate from emitted runnable code.

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 from .disasm import Function, Instr
 from .image import MachOImage
-from .objc import ObjCRuntime
+from .objc import ObjCRuntime, selector_from_reference
 
 WIDTHS = {8: "uint64_t", 4: "uint32_t", 2: "uint16_t", 1: "uint8_t"}
 
@@ -152,13 +152,20 @@ class Reconstructor:
             if not section.size or not (section.address <= address < section.address + section.size):
                 continue
             name = section.name
-            pointer = self.image.read_pointer(address)
-            if name == "__objc_selrefs" and pointer:
-                selector = self.image.cstring(pointer)
+            if name == "__objc_selrefs":
+                selector = selector_from_reference(self.image, address)
                 return "objc_selrefs", selector, selector
-            if name == "__objc_msgrefs" and pointer:
-                selector = self.image.cstring(pointer)
-                return "objc_msgrefs", selector, selector
+            if name == "__objc_msgrefs":
+                stride = self.image.pointer_size * 2
+                relative = address - section.address
+                slot = relative % stride
+                if slot in (0, self.image.pointer_size):
+                    entry = address - slot
+                    selector_reference = self.image.read_pointer(entry + self.image.pointer_size)
+                    selector = selector_from_reference(self.image, selector_reference)
+                    return "objc_msgrefs", selector, selector
+                return "objc_msgrefs", None, None
+            pointer = self.image.read_pointer(address)
             if name == "__objc_classrefs" and pointer:
                 return "objc_classrefs", self._class_name(pointer), None
             if name == "__objc_superrefs" and pointer:
@@ -192,6 +199,11 @@ class Reconstructor:
                 continue
             if section.name == "__objc_methname":
                 return "selector", self.image.cstring(pointer)
+            if section.name == "__objc_selrefs":
+                return "selector", selector_from_reference(self.image, pointer)
+            if section.name == "__objc_msgrefs":
+                _label, _value, selector = self.describe_address(pointer)
+                return "selector", selector
             if section.name == "__objc_classname":
                 return "class", self.image.cstring(pointer)
             if section.name == "__objc_data":

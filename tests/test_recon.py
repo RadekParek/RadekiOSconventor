@@ -12,6 +12,7 @@ from radek.recon import swift as swift_mod
 from radek.recon.disasm import decode_arm64
 from radek.recon.image import load
 from radek.recon.report import blockers, markdown, summary
+from radek.recon.source import Reconstructor
 
 from .machobuild import (
     S_ATTR_PURE_INSTRUCTIONS,
@@ -122,7 +123,8 @@ def objc_image() -> tuple[Builder, dict]:
     builder.pointer(selrefs, 0x100001200)
     builder.pointer(classrefs, class_object)
     builder.pointer(msgrefs, 0)
-    builder.pointer(msgrefs, 0x100001200)
+    # __objc_msgrefs stores a selector-reference slot here, not the C string.
+    builder.pointer(msgrefs, builder.address(selrefs))
     builder.pointer(lazy, 0)
     builder.pointer(lazy, 0)
     builder.pointer(lazy, 0)
@@ -201,6 +203,17 @@ class ReconstructionTests(Base):
         self.assertIn("doWork", runtime.selectors)
         self.assertIn("MyClass", runtime.class_references)
         self.assertIn("doWork", runtime.message_selectors)
+        self.assertEqual(runtime.message_references[0]["selector"], "doWork")
+        self.assertEqual(runtime.message_references[0]["selectorReference"], "0x100004400")
+        reconstructor = Reconstructor(image, runtime)
+        self.assertEqual(
+            reconstructor.describe_address(image.section("__DATA", "__objc_selrefs").address),
+            ("objc_selrefs", "doWork", "doWork"),
+        )
+        self.assertEqual(
+            reconstructor.describe_address(image.section("__DATA", "__objc_msgrefs").address),
+            ("objc_msgrefs", "doWork", "doWork"),
+        )
 
     def test_relative_small_method_lists(self):
         builder = Builder()

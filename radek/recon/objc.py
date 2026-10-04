@@ -101,13 +101,22 @@ class ObjCRuntime:
     protocols: list[ObjCProtocol] = field(default_factory=list)
     selectors: list[str] = field(default_factory=list)
     message_selectors: list[str] = field(default_factory=list)
+    message_references: list[dict] = field(default_factory=list)
     class_references: list[str] = field(default_factory=list)
     super_references: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
     @property
     def present(self) -> bool:
-        return bool(self.classes or self.categories or self.protocols or self.selectors)
+        return bool(
+            self.classes
+            or self.categories
+            or self.protocols
+            or self.selectors
+            or self.message_references
+            or self.class_references
+            or self.super_references
+        )
 
     def report(self) -> dict:
         return {
@@ -136,6 +145,7 @@ class ObjCRuntime:
             ],
             "selectors": self.selectors[:500],
             "messageSelectors": self.message_selectors[:200],
+            "messageReferences": self.message_references[:200],
             "classReferences": self.class_references[:200],
             "notes": self.notes,
         }
@@ -170,6 +180,25 @@ def _plausible_selector(name: str | None) -> bool:
     if not name or len(name) > 256:
         return False
     return all(ch.isprintable() for ch in name)
+
+
+def selector_from_reference(image: MachOImage, address: int | None) -> str | None:
+    """Resolve a selector string or a pointer slot such as an ``__objc_selrefs`` entry.
+
+    ``__objc_msgrefs`` commonly points at the selector-reference slot rather
+    than at the selector's C string. Try the supplied address and at most two
+    bounded pointer dereferences; never scan arbitrary image data for a guessed
+    name.
+    """
+    current = address
+    for _ in range(3):
+        if not current:
+            return None
+        candidate = image.cstring(current)
+        if _plausible_selector(candidate):
+            return candidate
+        current = image.read_pointer(current)
+    return None
 
 
 def _methods(image: MachOImage, address: int, owner: str, kind: str) -> list[ObjCMethod]:
@@ -347,7 +376,14 @@ def recover(image: MachOImage) -> ObjCRuntime:
     cat_list = _first(image, "__objc_catlist")
     proto_list = _first(image, "__objc_protolist")
 
-    if not (class_list or cat_list or proto_list or _first(image, "__objc_methname")):
+    if not (
+        class_list
+        or cat_list
+        or proto_list
+        or _first(image, "__objc_methname")
+        or _first(image, "__objc_selrefs")
+        or _first(image, "__objc_msgrefs")
+    ):
         return runtime
 
     # Selectors: every string in __objc_methname plus explicit selector refs.
@@ -363,19 +399,32 @@ def recover(image: MachOImage) -> ObjCRuntime:
         data = image.section_bytes(section)
         for i in range(0, len(data) - image.pointer_size + 1, image.pointer_size):
             pointer = int.from_bytes(data[i : i + image.pointer_size], "little" if image.little_endian else "big")
-            name = image.cstring(pointer) if pointer else None
+            name = selector_from_reference(image, pointer)
             if name and name not in runtime.selectors:
                 runtime.selectors.append(name)
 
-    # Message refs: {imp/objc_msgSend pointer, selector reference}.
+    # Message refs: {imp/objc_msgSend pointer, selector reference}. The second
+    # field often points to a slot in __objc_selrefs, not directly to a string.
     for section in image.sections_named("__objc_msgrefs"):
         data = image.section_bytes(section)
         stride = image.pointer_size * 2
         for i in range(0, len(data) - stride + 1, stride):
-            pointer = int.from_bytes(
+            implementation = int.from_bytes(
+                data[i : i + image.pointer_size], "little" if image.little_endian else "big"
+            )
+            selector_reference = int.from_bytes(
                 data[i + image.pointer_size : i + stride], "little" if image.little_endian else "big"
             )
-            name = image.cstring(pointer) if pointer else None
+            name = selector_from_reference(image, selector_reference)
+            if len(runtime.message_references) < 200:
+                runtime.message_references.append(
+                    {
+                        "address": f"0x{section.address + i:x}",
+                        "implementation": f"0x{implementation:x}" if implementation else None,
+                        "selectorReference": f"0x{selector_reference:x}" if selector_reference else None,
+                        "selector": name,
+                    }
+                )
             if name and name not in runtime.message_selectors:
                 runtime.message_selectors.append(name)
 
