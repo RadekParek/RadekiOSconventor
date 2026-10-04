@@ -8,7 +8,7 @@ import java.nio.ByteOrder
 
 class ConvertedElfWriterTest {
     private val symbol = "Java_dev_radek_generated_MainActivity_runNative"
-    private val code = byteArrayOf(0x40, 0x02, 0x80, 0x52, 0x21, 0x04, 0x00, 0x11, 0xC0.toByte(), 0x03, 0x5F, 0xD6.toByte())
+    private val code = byteArrayOf(0x40, 0x02, 0x80.toByte(), 0x52, 0x21, 0x04, 0x00, 0x11, 0xC0.toByte(), 0x03, 0x5F, 0xD6.toByte())
 
     private fun le(buffer: ByteArray, offset: Int): ByteBuffer =
         ByteBuffer.wrap(buffer, offset, buffer.size - offset).order(ByteOrder.LITTLE_ENDIAN)
