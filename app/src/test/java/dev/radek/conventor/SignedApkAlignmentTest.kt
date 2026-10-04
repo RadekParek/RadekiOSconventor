@@ -5,12 +5,18 @@ import com.android.apksig.ApkVerifier
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.annotation.Config
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.file.Files
 import java.util.zip.ZipFile
 
 /** Integration regression for alignment on the final, signed APK (not just the input ZIP). */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [28], manifest = Config.NONE)
 class SignedApkAlignmentTest {
     private val symbol = "Java_dev_radek_generated_MainActivity_runNative"
     private val machineCode = byteArrayOf(0x40, 0x02, 0x80.toByte(), 0x52, 0x21, 0x04, 0x00, 0x11, 0xC0.toByte(), 0x03, 0x5F, 0xD6.toByte())
@@ -26,9 +32,11 @@ class SignedApkAlignmentTest {
                 symbol,
                 neededLibraries = listOf(CompatibilityRuntime.SONAME),
             )
+            val manifest = RuntimeEnvironment.getApplication().assets
+                .open("converted-template/AndroidManifest.xml").use { it.readBytes() }
             val shim = minimalArm64Elf()
             val entries = listOf(
-                AlignedApkZip.Entry("AndroidManifest.xml", ByteArray(17) { it.toByte() }),
+                AlignedApkZip.Entry("AndroidManifest.xml", manifest),
                 AlignedApkZip.Entry("classes.dex", ByteArray(32) { (it * 3).toByte() }),
                 AlignedApkZip.Entry("lib/arm64-v8a/libconverted.so", converted,
                     alignment = AlignedApkZip.NATIVE_LIBRARY_ALIGNMENT),
