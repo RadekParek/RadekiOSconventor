@@ -3,7 +3,9 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from radek.pipeline import Pipeline
+from radek import pipeline as pipeline_module
 from .fixtures import ipa, macho, fat
 
 
@@ -21,13 +23,75 @@ class PipelineTests(unittest.TestCase):
         report = self.run_fixture(analyze_only=True)
         self.assertEqual(report["state"], "PARTIAL")
         self.assertEqual(report["leafTranslationAssessment"]["backend"], "preserved-arm64")
-        self.assertEqual(report["llvmLift"]["status"], "EXPERIMENTAL_ENTRY_ONLY")
+        self.assertEqual(report["llvmLift"]["status"], "ENTRY_SUBSET_ONLY")
         self.assertEqual(report["llvmLift"]["completeGameConversion"], False)
         self.assertTrue((self.root / "job/leaf-experiment.ll").is_file())
+        self.assertTrue((self.root / "job/translated-entry.c").is_file())
+        self.assertTrue((self.root / "job/translated-entry.bin").is_file())
+        self.assertTrue((self.root / "job/libtranslated-entry.so").is_file())
+        self.assertEqual(report["nativeCodeArtifact"]["status"], "STANDALONE_ENTRY_FUNCTION_ONLY")
+        self.assertFalse(report["nativeCodeArtifact"]["linkedIntoGame"])
+        self.assertFalse(report["nativeCodeArtifact"]["apkProduced"])
+        self.assertGreater(report["portProgress"]["percent"], 0)
+        self.assertEqual(report["portProgress"]["translatedFunctions"], 1)
+        self.assertEqual(report["portProgress"]["translatedTextBytes"], 8)
+        self.assertEqual(
+            report["portProgress"]["percent"],
+            round(100 * report["portProgress"]["translatedTextBytes"] / report["portProgress"]["totalTextBytes"], 6),
+        )
+        self.assertEqual(report["apiTranslation"]["generatedApiReplacements"], 0)
+        self.assertEqual(report["conversionProgress"]["status"], "NOT_BUILT")
+        self.assertEqual(report["conversionProgress"]["percent"], 0)
+        self.assertFalse(report["leafTranslationAssessment"]["completeGameConversion"])
         self.assertEqual(report["icon"]["status"], "SUPPORTED")
         self.assertFalse(list((self.root / "job").glob("job-*")))
         self.assertFalse((self.root / "job/input.apk").exists())
         self.assertEqual(json.loads((self.root / "job/report.json").read_text())["state"], "PARTIAL")
+
+    def test_reachable_time_api_emits_real_source_but_is_not_linked(self):
+        original = pipeline_module.reconstruct
+
+        def mark_time_api_reachable(*args, **kwargs):
+            result = original(*args, **kwargs)
+            for image in result.get("images", []):
+                for slice_data in image.get("slices", []):
+                    apis = slice_data.get("apis") or {}
+                    entry_callers = [
+                        function.get("name")
+                        for function in slice_data.get("functions", [])
+                        if function.get("address") == slice_data.get("entryPoint")
+                    ]
+                    apis.setdefault("used", []).append(
+                        {
+                            "name": "_CFAbsoluteTimeGetCurrent",
+                            "framework": "CoreFoundation",
+                            "area": "foundation",
+                            "feasibility": "compatibility",
+                            "callers": entry_callers,
+                        }
+                    )
+                    apis["usedImportCount"] = apis.get("usedImportCount", 0) + 1
+                    apis.setdefault("summary", {})["compatibility"] = apis.get("summary", {}).get("compatibility", 0) + 1
+                    apis.setdefault("byFeasibility", {}).setdefault("compatibility", []).append(
+                        "_CFAbsoluteTimeGetCurrent"
+                    )
+            return result
+
+        with patch.object(pipeline_module, "reconstruct", side_effect=mark_time_api_reachable):
+            report = self.run_fixture(
+                macho(imports=["_CFAbsoluteTimeGetCurrent"]),
+                analyze_only=True,
+            )
+
+        translation = report["apiTranslation"]
+        self.assertEqual(translation["status"], "IMPLEMENTATIONS_GENERATED_NOT_LINKED")
+        self.assertEqual(translation["generatedApiReplacements"], 1)
+        self.assertEqual(translation["linkedApiReplacements"], 0)
+        self.assertTrue(translation["codeGenerated"])
+        self.assertFalse(translation["replacements"][0]["linkedIntoGame"])
+        self.assertTrue((self.root / "job/api-replacements/api-replacements.cpp").is_file())
+        generated = (self.root / "job/api-replacements/api-replacements.cpp").read_text()
+        self.assertIn("#define RADEK_API_CFAbsoluteTimeGetCurrent 1", generated)
 
     def test_unused_framework_dependency_needs_no_stub(self):
         result = self.run_fixture(
@@ -38,8 +102,8 @@ class PipelineTests(unittest.TestCase):
             analyze_only=True,
         )
         self.assertEqual(result["state"], "PARTIAL")
-        self.assertEqual(result["dependencies"]["edges"][0]["classification"], "not-required-by-experimental-leaf")
-        self.assertIn("does not implement the linked framework or the game", result["dependencies"]["edges"][0]["reason"])
+        self.assertEqual(result["dependencies"]["edges"][0]["classification"], "not-required-by-standalone-entry")
+        self.assertIn("does not implement the linked framework", result["dependencies"]["edges"][0]["reason"])
         self.assertEqual(result["leafTranslationAssessment"]["backend"], "preserved-arm64")
 
     def test_reachable_framework_call_remains_blocked(self):
@@ -103,7 +167,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(states["Metal"], "SUPPORTED")
         self.assertIn("no reachable API use", " ".join(c["detail"] for c in result["capabilities"]))
         self.assertIn("No complete iOS-to-Android game converter", " ".join(result["blockers"]))
-        self.assertEqual(result["dependencies"]["edges"][0]["classification"], "not-required-by-experimental-leaf")
+        self.assertEqual(result["dependencies"]["edges"][0]["classification"], "not-required-by-standalone-entry")
 
     def test_icon_is_recovered_from_assets_car(self):
         from .test_icons import catalog_bytes
@@ -128,8 +192,10 @@ class PipelineTests(unittest.TestCase):
         result = self.run_fixture()
         self.assertEqual(result["state"], "BLOCKED")
         self.assertEqual(result["conversionProgress"]["status"], "NOT_BUILT")
-        self.assertEqual(result["llvmLift"]["status"], "EXPERIMENTAL_ENTRY_ONLY")
-        self.assertEqual(result["portProgress"]["percent"], 0)
+        self.assertEqual(result["llvmLift"]["status"], "ENTRY_SUBSET_ONLY")
+        self.assertGreater(result["portProgress"]["percent"], 0)
+        self.assertTrue(result["leafTranslationAssessment"]["nativeCodeWritten"])
+        self.assertFalse(result["leafTranslationAssessment"]["nativeCodeLinkedIntoGame"])
         self.assertFalse(result["leafTranslationAssessment"]["apkProduced"])
         self.assertEqual(result["apiTranslation"]["generatedApiReplacements"], 0)
         self.assertFalse(result["apiTranslation"]["codeGenerated"])

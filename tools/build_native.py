@@ -24,4 +24,21 @@ subprocess.run(
     [compiler, *flags, str(root / "native/tests/runtime.cpp"), "-o", str(out / "runtime-tests")], check=True
 )
 subprocess.run([str(out / "runtime-tests")], check=True)
-print("Native analyzer and experimental runtime tests passed")
+api_source = root / "native/src/apple_time_compat.cpp"
+subprocess.run(
+    [compiler, *flags, "-shared", "-fPIC", str(api_source), "-o", str(out / "libioscompat.so")],
+    check=True,
+)
+subprocess.run(
+    [
+        compiler,
+        *flags,
+        str(root / "native/tests/apple_time_compat.cpp"),
+        str(api_source),
+        "-o",
+        str(out / "api-compat-tests"),
+    ],
+    check=True,
+)
+subprocess.run([str(out / "api-compat-tests")], check=True)
+print("Native analyzer, portable runtime, and Apple time API compatibility tests passed")

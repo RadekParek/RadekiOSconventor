@@ -4,16 +4,14 @@ This module is the host-side twin of ``app/src/main/java/dev/radek/conventor/
 Providers.kt``; ``tests/test_providers.py`` asserts the two tables agree, so the
 CLI report and the on-device report never diverge.
 
-Every entry names an implementation that actually exists on Android. Nothing is
-stubbed: an image with no Android contract is reported as ``blocked`` with the
-reason, rather than being silently mapped to a no-op.
+This inventory separates known Android libraries, platform targets, compatibility plans, and
+four exact compiled time shims. A provider/candidate entry is not proof that a converted game has
+been rewritten or linked to it. ``STATUS_PROVIDED`` denotes an Android system library; broad
+framework targets remain compatibility candidates until their ABI and behavior are implemented.
 
-* ``native-library``  - Android already ships the identical C ABI
-  (OpenGL ES, EGL, iconv, SQLite, zlib, bionic libc).
-* ``platform-api``    - the semantics are provided by a real Android platform API
-  (AAudio, MediaPlayer, Choreographer, android.view, sockets, Canvas).
-* ``runtime``         - the semantics are provided by the generated runtime that
-  ships inside every converted APK.
+* ``native-library`` - Android system libraries with reviewed C APIs.
+* ``platform-api`` - Android platform targets; semantic adaptation may still be required.
+* ``runtime`` - compatibility-runtime targets, not an Apple ABI claim.
 """
 
 from __future__ import annotations
@@ -98,8 +96,8 @@ TABLE: tuple[Provider, ...] = (
              "NSObject/NSString/NSData/NSArray/NSDictionary/NSNotificationCenter/NSUserDefaults over JVM objects, "
              "SharedPreferences and java.time."),
     Provider("CoreFoundation.framework/CoreFoundation", "CoreFoundation",
-             "dev.radek.runtime.Foundation · libioscompat.so", KIND_RUNTIME, STATUS_COMPATIBILITY,
-             "CFType/CFString/CFData/CFArray/CFDictionary/CFRunLoop semantics on JVM collections and android.os.Looper."),
+             "libioscompat.so (CFAbsoluteTimeGetCurrent, mach_absolute_time, mach_timebase_info)", KIND_RUNTIME, STATUS_COMPATIBILITY,
+             "Concrete Bionic-backed clock shims only; CoreFoundation object, collection, and run-loop ABI is not implemented."),
     Provider("libobjc.A.dylib", "libobjc", "libioscompat.so message dispatch",
              KIND_RUNTIME, STATUS_COMPATIBILITY,
              "Class registration, selector interning, IMP lookup, inheritance and autorelease pools."),
@@ -112,8 +110,8 @@ TABLE: tuple[Provider, ...] = (
              KIND_PLATFORM, STATUS_COMPATIBILITY,
              "CGAffineTransform/CGPoint/CGRect math is native; drawing goes to a real Android Canvas."),
     Provider("QuartzCore.framework/QuartzCore", "QuartzCore",
-             "android.view.Choreographer · System.nanoTime", KIND_PLATFORM, STATUS_COMPATIBILITY,
-             "CADisplayLink frames come from the Choreographer vsync callback; CACurrentMediaTime from CLOCK_MONOTONIC."),
+             "libioscompat.so CACurrentMediaTime · android.view.Choreographer (candidate)", KIND_PLATFORM, STATUS_COMPATIBILITY,
+             "CACurrentMediaTime has a concrete CLOCK_MONOTONIC shim; CADisplayLink and the QuartzCore object ABI are not linked or implemented."),
     Provider("OpenAL.framework/OpenAL", "OpenAL", "libaaudio.so software mixer",
              KIND_PLATFORM, STATUS_COMPATIBILITY,
              "al*/alc* buffers and sources are mixed into a real AAudio low-latency output stream."),
@@ -189,7 +187,31 @@ TABLE: tuple[Provider, ...] = (
              KIND_PLATFORM, STATUS_BLOCKED, "Bluetooth LE needs its own permission and GATT stack binding."),
 )
 
-#: Imported-symbol prefixes with a real Android implementation.
+#: Exact time-API shims with compiled Android implementations. These functions
+#: are available in libioscompat.so; they are not yet linked into converted games.
+IMPLEMENTED_C_API_SHIMS = {
+    "_CFAbsoluteTimeGetCurrent": "libioscompat.so:CFAbsoluteTimeGetCurrent",
+    "_CACurrentMediaTime": "libioscompat.so:CACurrentMediaTime",
+    "_mach_absolute_time": "libioscompat.so:mach_absolute_time",
+    "_mach_timebase_info": "libioscompat.so:mach_timebase_info",
+}
+
+#: Exact reviewed libc/libm/libdl name candidates. A same-name candidate is not
+#: proof that the Darwin ABI or its behavior can be linked safely.
+BIONIC_SYMBOL_CANDIDATES = frozenset(
+    """
+    abort abs atoi atof calloc clock_gettime close exit fclose feof ferror fflush fgetc fgets fopen fprintf
+    fputc fputs fread free fseek ftell fwrite getenv gettimeofday malloc memcmp memcpy memmove memset mkdir
+    open perror printf puts read realloc remove rename rmdir scanf snprintf sprintf strcmp strcpy strdup strerror
+    strlen strncat strncmp strncpy strnlen strrchr strchr strstr strtol strtoll strtoul strtoull tolower toupper
+    unlink vsnprintf write __stack_chk_fail pthread_create pthread_join pthread_mutex_init pthread_mutex_lock
+    pthread_mutex_unlock pthread_cond_init pthread_cond_wait pthread_cond_signal pthread_once socket connect send
+    recv bind listen accept shutdown dlopen dlsym dlclose dlerror acos asin atan atan2 ceil cos exp fabs floor log
+    pow sin sqrt tan acosf asinf atanf atan2f ceilf cosf expf fabsf floorf logf powf sinf sqrtf tanf
+    """.split()
+)
+
+#: Broad symbol-family triage hints only; these are not proof of replacement code.
 SYMBOL_PROVIDERS: tuple[tuple[str, str], ...] = (
     ("gl", "OpenGL ES (libGLESv2.so/libGLESv3.so)"),
     ("egl", "EGL (libEGL.so)"),
@@ -230,12 +252,15 @@ def for_install_name(path: str) -> Provider | None:
 
 
 def for_symbol(symbol: str) -> str | None:
+    """Return an exact shim or triage hint; unknown lower-case names stay unknown."""
+    if symbol in IMPLEMENTED_C_API_SHIMS:
+        return IMPLEMENTED_C_API_SHIMS[symbol]
     name = symbol.lstrip("_")
     for prefix, provider in SYMBOL_PROVIDERS:
         if name.startswith(prefix):
             return provider
-    if name and name[0].islower():
-        return "bionic libc/libm"
+    if name in BIONIC_SYMBOL_CANDIDATES:
+        return "bionic libc/libm/libdl (same-name candidate)"
     return None
 
 
@@ -253,7 +278,7 @@ def classify(install_name: str) -> dict:
 
 
 def coverage(dependencies: list, imports: list) -> int:
-    """Share of external requirements with a working Android provider (0-100)."""
+    """Static provider/candidate triage share (0-100), not linked implementation coverage."""
     total = len(dependencies) + len(imports)
     if not total:
         return 100

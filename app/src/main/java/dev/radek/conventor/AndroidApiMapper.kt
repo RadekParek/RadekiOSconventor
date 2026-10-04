@@ -11,6 +11,13 @@ import org.json.JSONObject
 internal object AndroidApiMapper {
     private const val MAX_SYMBOLS = 10_000
 
+    private val ndkRuntimeLibraries = setOf(
+        "libc.so", "libm.so", "libdl.so", "liblog.so", "libandroid.so", "libz.so", "libEGL.so",
+        "libGLESv1_CM.so", "libGLESv2.so", "libaaudio.so", "libmediandk.so", "libvulkan.so",
+        "libOpenSLES.so", "libOpenMAXAL.so", "libjnigraphics.so", "libbinder_ndk.so", "libamidi.so",
+        "libcamera2ndk.so", "libc++_shared.so",
+    )
+
     private val bionicLibraries = mapOf(
         "libc.so" to setOf(
             "abort", "abs", "atoi", "atof", "calloc", "clock_gettime", "close", "exit", "fclose", "feof",
@@ -89,7 +96,25 @@ internal object AndroidApiMapper {
         "SKScene" to "custom SurfaceView/Canvas renderer (game-loop rewrite required)",
     )
 
-    fun analyze(nodes: JSONArray): JSONObject {
+    /** Real, implemented ABI-shaped time wrappers built into the analyzer's libioscompat.so. */
+    private val implementedApiReplacements = mapOf(
+        "_CFAbsoluteTimeGetCurrent" to "CFAbsoluteTimeGetCurrent",
+        "_CACurrentMediaTime" to "CACurrentMediaTime",
+        "_mach_absolute_time" to "mach_absolute_time",
+        "_mach_timebase_info" to "mach_timebase_info",
+    )
+
+    /**
+     * If supplied, the NDK resolver checks public platform exports on this device.
+     * The compatibility resolver is separate: it verifies one of our concrete,
+     * compiled time shims, but neither resolver rewrites or links the IPA.
+     */
+    fun analyze(
+        nodes: JSONArray,
+        resolveNdkLibrary: ((String) -> String?)? = null,
+        runtimeApiLevel: Int? = null,
+        resolveApiReplacement: ((String) -> String?)? = null,
+    ): JSONObject {
         val symbols = linkedSetOf<String>()
         var truncated = false
         outer@ for (nodeIndex in 0 until nodes.length()) {
@@ -115,49 +140,119 @@ internal object AndroidApiMapper {
 
         val result = JSONArray()
         var directCandidates = 0
+        var runtimeVerifiedCandidates = 0
+        var implementedReplacementCandidates = 0
+        var runtimeVerifiedApiReplacements = 0
         var semanticCandidates = 0
+        var unmappedSymbols = 0
         symbols.sorted().forEach { source ->
             // Mach-O C symbols conventionally carry one leading underscore. Remove
             // only that decoration before matching; Objective-C symbols are parsed
             // separately and are never guessed into C ABI-compatible functions.
             val candidate = source.removePrefix("_")
-            val library = bionicLibraries.entries.firstOrNull { candidate in it.value }?.key
+            val catalogLibrary = bionicLibraries.entries.firstOrNull { candidate in it.value }?.key
+            val resolvedLibrary = if (resolveNdkLibrary == null) null else try {
+                resolveNdkLibrary.invoke(candidate)?.takeIf { it in ndkRuntimeLibraries }
+            } catch (_: UnsatisfiedLinkError) {
+                null
+            } catch (_: RuntimeException) {
+                null
+            }
+            val library = resolvedLibrary ?: catalogLibrary
             val semanticTarget = semanticTarget(source)
+            val replacementTarget = implementedApiReplacements[source]
+            val resolvedReplacement = if (replacementTarget == null || resolveApiReplacement == null) null else try {
+                resolveApiReplacement.invoke(source)
+            } catch (_: UnsatisfiedLinkError) {
+                null
+            } catch (_: RuntimeException) {
+                null
+            }
+            val replacementVerified = resolvedReplacement == "libioscompat.so:$replacementTarget"
             val direct = library != null
+            val verifiedOnDevice = resolvedLibrary != null
             if (direct) directCandidates++
-            else if (semanticTarget != null) semanticCandidates++
+            if (verifiedOnDevice) runtimeVerifiedCandidates++
+            if (replacementTarget != null) implementedReplacementCandidates++
+            if (replacementVerified) runtimeVerifiedApiReplacements++
+            if (!direct && replacementTarget == null && semanticTarget != null) semanticCandidates++
 
             val item = JSONObject()
                 .put("sourceSymbol", source)
                 .put("linkedOrRewritten", false)
                 .put("codeGenerated", false)
             when {
+                replacementTarget != null -> item
+                    .put("classification", "IMPLEMENTED_API_REPLACEMENT_AVAILABLE")
+                    .put("targetLibrary", "libioscompat.so")
+                    .put("targetSymbol", replacementTarget)
+                    .put("targetAndroidApi", "libioscompat.so:$replacementTarget")
+                    .put("implementationCodePresent", true)
+                    .put("runtimeVerified", replacementVerified)
+                    .put("resolutionEvidence", when {
+                        replacementVerified -> "CURRENT_DEVICE_COMPAT_LIBRARY_DLSYM"
+                        resolveApiReplacement != null -> "COMPAT_SOURCE_PRESENT_RUNTIME_NOT_RESOLVED"
+                        else -> "COMPILED_COMPATIBILITY_RUNTIME"
+                    })
+                    .put("translationStrategy", "real Bionic-backed time shim exists; Mach-O callsite rewrite and game linking are not implemented")
+                    .put("reason", when {
+                        replacementVerified -> "The concrete implementation export $replacementTarget was resolved from libioscompat.so on this device; the IPA callsite was not rewritten or linked."
+                        resolveApiReplacement != null -> "A concrete implementation is built into the analyzer runtime, but its export was not resolved on this device; no IPA callsite rewrite or game link was performed."
+                        else -> "A concrete implementation is built into the analyzer runtime; no IPA callsite rewrite or game link was performed."
+                    })
                 direct -> item
                     .put("classification", "BIONIC_SYMBOL_CANDIDATE")
                     .put("targetLibrary", library)
                     .put("targetSymbol", candidate)
-                    .put("translationStrategy", "potential direct NDK symbol link; ABI still requires verification")
-                    .put("reason", "Same-named Android NDK symbol found in $library; no binary relinking or code generation was performed.")
+                    .put("verifiedOnDevice", verifiedOnDevice)
+                    .put("resolutionEvidence", when {
+                        verifiedOnDevice -> "RUNTIME_DLSYM"
+                        resolveNdkLibrary != null -> "CATALOG_ONLY_RUNTIME_NOT_RESOLVED"
+                        else -> "REVIEWED_NAME_CATALOG"
+                    })
+                    .put("translationStrategy", "potential direct NDK symbol link; caller ABI and relocation still require verification")
+                    .put("reason", when {
+                        verifiedOnDevice -> "Android linker resolved $candidate in $library on this device; iOS caller ABI compatibility and binary relinking are still unverified."
+                        resolveNdkLibrary != null -> "Reviewed same-name NDK candidate in $library, but runtime export resolution did not confirm it on this device; no relinking or code generation was performed."
+                        else -> "Reviewed same-name Android NDK candidate in $library; no runtime export check, binary relinking or code generation was performed."
+                    })
                 semanticTarget != null -> item
                     .put("classification", "SEMANTIC_REWRITE_CANDIDATE")
                     .put("targetApi", semanticTarget)
                     .put("translationStrategy", "source/object/lifecycle rewrite required")
                     .put("reason", "Android API family candidate only; Objective-C object layout, method semantics and lifecycle are not binary-compatible.")
-                else -> item
-                    .put("classification", "UNMAPPED")
-                    .put("reason", classifyUnsupported(source))
+                else -> {
+                    unmappedSymbols++
+                    item
+                        .put("classification", "UNMAPPED")
+                        .put("reason", classifyUnsupported(source))
+                }
             }
             result.put(item)
         }
         val total = symbols.size
+        val classificationComplete = !truncated && result.length() == total
         return JSONObject()
-            .put("schemaVersion", 2)
-            .put("measure", "Direct candidates are same-named NDK symbols only. Semantic targets require source/object rewrites. Neither count represents generated or playable Android code.")
+            .put("schemaVersion", 5)
+            .put("measure", "Direct candidates are same-named Android NDK/system or shared C++ runtime symbols from the reviewed catalog or exact runtime export lookup. Runtime time-shim counts identify real exports in libioscompat.so, but none proves IPA callsite rewriting or game linking. Caller ABI compatibility, relocation and linking remain separate. Classification coverage is triage, not implementation coverage; no count represents playable Android code.")
+            .put("runtimeNdkResolverStatus", if (resolveNdkLibrary == null) "NOT_RUN" else "CURRENT_DEVICE_DLSYM")
+            .put("runtimeVerifiedAndroidApiLevel", if (resolveNdkLibrary == null) JSONObject.NULL else (runtimeApiLevel ?: JSONObject.NULL))
+            .put("runtimeVerifiedNdkCandidates", runtimeVerifiedCandidates)
+            .put("runtimeVerifiedCoveragePercent", if (total == 0) 0 else runtimeVerifiedCandidates * 100 / total)
+            .put("runtimeApiReplacementResolverStatus", if (resolveApiReplacement == null) "NOT_RUN" else "CURRENT_DEVICE_COMPAT_DLSYM")
+            .put("implementedApiReplacementCount", implementedReplacementCandidates)
+            .put("runtimeVerifiedApiReplacementCount", runtimeVerifiedApiReplacements)
             .put("distinctImportSymbols", total)
+            .put("classifiedImportSymbols", result.length())
+            .put("classificationCoveragePercent", if (total == 0 || !classificationComplete) 0 else 100)
+            .put("classificationStatus", if (classificationComplete) "COMPLETE" else "TRUNCATED")
             .put("mappedNameCandidates", directCandidates)
             .put("candidateCoveragePercent", if (total == 0) 0 else directCandidates * 100 / total)
             .put("semanticRewriteCandidates", semanticCandidates)
             .put("semanticRewriteCoveragePercent", if (total == 0) 0 else semanticCandidates * 100 / total)
+            .put("unmappedSymbolCount", unmappedSymbols)
+            .put("implementedTranslationCount", 0)
+            .put("implementedTranslationCoveragePercent", 0)
             .put("generatedTranslationCount", 0)
             .put("truncated", truncated)
             .put("symbols", result)

@@ -6,9 +6,17 @@ add_library(radek_analysis STATIC src/macho.cpp)
 set_target_properties(radek_analysis PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(radek_analysis PUBLIC include)
 target_compile_options(radek_analysis PRIVATE -Wall -Wextra -Werror)
+
+# This is a small, concrete Android compatibility library, not a general Apple
+# framework/runtime. It is linked into the analyzer so its exports can be
+# verified on-device, and is independently reusable by a future game linker.
+add_library(ioscompat SHARED src/apple_time_compat.cpp)
+target_include_directories(ioscompat PUBLIC include)
+target_compile_options(ioscompat PRIVATE -Wall -Wextra -Werror)
+
 if(ANDROID)
     add_library(radek SHARED src/jni.cpp)
-    target_link_libraries(radek PRIVATE radek_analysis)
+    target_link_libraries(radek PRIVATE radek_analysis ioscompat dl)
 else()
     add_executable(radek-macho src/main.cpp)
     target_link_libraries(radek-macho PRIVATE radek_analysis)
@@ -18,4 +26,9 @@ else()
     target_include_directories(runtime-tests PRIVATE include)
     target_link_libraries(runtime-tests PRIVATE Threads::Threads)
     add_test(NAME runtime COMMAND runtime-tests)
+    add_executable(api-compat-tests tests/apple_time_compat.cpp src/apple_time_compat.cpp)
+    target_include_directories(api-compat-tests PRIVATE include)
+    target_compile_options(api-compat-tests PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(api-compat-tests PRIVATE Threads::Threads)
+    add_test(NAME api-compat COMMAND api-compat-tests)
 endif()

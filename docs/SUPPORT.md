@@ -1,9 +1,10 @@
 # Support matrix and conversion contract
 
 “Supported” refers only to the operation listed. Inspection or candidate analysis is not evidence
-that an iOS app can be converted. The repository currently has no complete iOS-to-Android game
-translator. The Android importer can build a separately identified installable placeholder, but not
-a playable or complete-game APK.
+that an iOS app can be converted. The host now emits a real standalone Android library for one
+proven integer entry function and contains four concrete time API shims, but no complete
+iOS-to-Android game translator. The Android importer can build a separately identified installable
+placeholder, but not a playable or complete-game APK.
 
 | Area | Status | Contract / limitation |
 |---|---|---|
@@ -13,13 +14,13 @@ a playable or complete-game APK.
 | Mach-O thin/FAT/FAT64 | SUPPORTED | CPU/subtype, endian headers, bounded load-command/section/symbol parsing |
 | Mach-O loader metadata | PARTIAL | Relocations, dynamic tables, binds/imports/addends, export trie, chained-fixup metadata, dependencies, LC_MAIN and signature-blob metadata. Incomplete bind tables and unsupported loader semantics block conversion |
 | ObjC/Swift/unwind/init metadata | PARTIAL | Host reconstruction recovers selected Objective-C/Swift metadata and reports limitations; it does not implement the Apple runtime ABI |
-| ARM64 reconstruction | PARTIAL | A restricted closed integer leaf can be assessed/lowered in memory. No resulting game code or APK is emitted |
+| ARM64 reconstruction | PARTIAL | A restricted closed-integer entry leaf can be translated into `translated-entry.bin`, `translated-entry.c`, and a minimal ARM64 ET_DYN shared object. It is statically validated but not linked into a game or APK |
 | ARM64e | BLOCKED | PAC/ABI adaptation is not proven |
-| ARMv6/ARMv7/v7s/Thumb/Thumb-2 | PARTIAL | Selected immediate arithmetic/return instruction subsets can be lowered in memory to ARMv7 form. This does not make a game executable; no 32-bit APK is emitted |
+| ARMv6/ARMv7/v7s/Thumb/Thumb-2 | PARTIAL | Selected immediate arithmetic/return instruction subsets can be lowered to ARMv7 and emitted in the same isolated ET_DYN format. It is not linked into a game; no 32-bit game APK is emitted |
 | FAT ARM64 + ARM32 selection | SUPPORTED (selection only) | Automatic selection prefers ARM64. Explicit 32-bit target is accepted only when an ARM32 slice is present |
 | Supported ARM32-only target | SUPPORTED (selection only) | Selects `armeabi-v7a`; no complete converter currently emits an APK |
 | Offline source reconstruction | PARTIAL | Function discovery, CFGs, selected ARM disassembly, reference tracking and pseudocode with explicit uncertainty. Never presented as original source or executed |
-| Actual iOS-to-Android API replacements | NOT IMPLEMENTED | Same-name NDK symbols and semantic targets are candidates only. No replacement implementation is generated, linked or tested |
+| Actual iOS-to-Android API replacements | PARTIAL (four time APIs) | Bionic-backed shims implement `CFAbsoluteTimeGetCurrent`, `CACurrentMediaTime`, `mach_absolute_time`, and `mach_timebase_info`; host tests execute their behavior. Imports reached through resolved internal calls from the selected entry can generate shim source, but no Mach-O callsite is rewritten and no shim is linked into a game/APK |
 | Objective-C binary ABI / Swift | BLOCKED | The experimental portable runtime is not Apple's ABI/runtime and is not linked into game outputs |
 | UIKit, Foundation, graphics, audio, input, lifecycle | BLOCKED | No complete compatibility providers or game lifecycle/input translations exist |
 | Resources | PARTIAL | Icons and bundle resources can be inventoried/read for analysis. The placeholder includes app metadata, icon and a static-analysis summary only; no game assets are translated or packaged |
@@ -31,6 +32,16 @@ a playable or complete-game APK.
 | Android runtime/device validation | NOT TESTED | Static checks cannot prove execution or gameplay; reports say `NOT_TESTED` |
 
 ## Why symbol substitutions are not API implementations
+
+The app may report 100% **symbol classification/triage** when every observed import has been
+categorized as a name candidate, semantic-rewrite candidate, implemented-shim export, or unmapped.
+That is deliberately separate from direct NDK candidates and actual linked-implementation coverage.
+The four concrete time shims have host behavior tests; on Android, the mapper uses `dlopen`/`dlsym`/
+`dladdr` to verify their exports in `libioscompat.so`. This only proves the replacement function is
+available in the analyzer process: no IPA callsite is rewritten or linked, and other API behavior
+remains unimplemented. A name resolving at runtime does not prove caller ABI compatibility,
+minimum-API availability on other devices, relocation, or game integration. An `UNMAPPED`
+classification is a useful explicit blocker, not a conversion result.
 
 - Some OpenGL ES 1.x/2.x/3.x C entry points have Android equivalents, but each reachable symbol,
   GLES version, context/lifecycle path, and ABI binding still has to be proven and linked. A symbol
@@ -54,12 +65,20 @@ a playable or complete-game APK.
   metrics, recovered functions and listings, call graph, Objective-C metadata, Swift types/symbols,
   imports, linked frameworks and reachable API attribution.
 - `reconstruction.md` — readable evidence, reconstructed listings and reachable-API blockers.
-- `leaf-experiment.ll` — emitted only if the entry passes the closed-integer proof; one minimal LLVM
-  leaf, never full-game IR or APK input, and syntax-checked with `llvm-as` when it is available.
+- `translated-entry.bin`, `translated-entry.c`, and `libtranslated-entry.so` — emitted only if the
+  entry passes the closed-integer proof. The library exports one standalone native function and has
+  no imports or relocations; it is not a game binary or APK.
+- `api-replacements/` — when a reconstructed call path from the selected entry reaches one of four
+  supported time imports, contains the selected implementation source and header. The report marks
+  these artifacts generated but not linked to the game.
+- `leaf-experiment.ll` — supplementary LLVM IR for the same single leaf; syntax-checked with
+  `llvm-as` when available.
 
-The report may record an in-memory experimental leaf lowering, but marks it as an assessment only;
-`portProgress` remains zero and `conversionProgress.status` remains `NOT_BUILT`. A candidate symbol
-mapping is never counted as generated code.
+For a proven entry, `portProgress.percent` is the translated source-byte count divided by executable
+`__text` bytes in the selected Mach-O slice. It can be nonzero (or even 100% for a tiny synthetic
+binary) while the overall game remains incomplete; it is not a function/API/resource or gameplay
+score. `conversionProgress.status` remains `NOT_BUILT`. A candidate symbol mapping is never counted
+as generated code, and generated API source is reported separately from zero linked API replacements.
 
 ## ABI preference
 

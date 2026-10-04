@@ -67,8 +67,8 @@ object Providers {
             "dev.radek.runtime.Foundation · libioscompat.so", KIND_RUNTIME, STATUS_COMPATIBILITY,
             "NSObject/NSString/NSData/NSArray/NSDictionary/NSNotificationCenter/NSUserDefaults over JVM objects, SharedPreferences and java.time."),
         Provider("CoreFoundation.framework/CoreFoundation", "CoreFoundation",
-            "dev.radek.runtime.Foundation · libioscompat.so", KIND_RUNTIME, STATUS_COMPATIBILITY,
-            "CFType/CFString/CFData/CFArray/CFDictionary/CFRunLoop semantics on JVM collections and android.os.Looper."),
+            "libioscompat.so (CFAbsoluteTimeGetCurrent, mach_absolute_time, mach_timebase_info)", KIND_RUNTIME, STATUS_COMPATIBILITY,
+            "Concrete Bionic-backed clock shims only; CoreFoundation object, collection, and run-loop ABI is not implemented."),
         Provider("libobjc.A.dylib", "libobjc", "libioscompat.so message dispatch",
             KIND_RUNTIME, STATUS_COMPATIBILITY, "Class registration, selector interning, IMP lookup, inheritance and autorelease pools."),
         Provider("UIKit.framework/UIKit", "UIKit",
@@ -80,8 +80,8 @@ object Providers {
             KIND_PLATFORM, STATUS_COMPATIBILITY,
             "CGAffineTransform/CGPoint/CGRect math is native; drawing goes to a real Android Canvas."),
         Provider("QuartzCore.framework/QuartzCore", "QuartzCore",
-            "android.view.Choreographer · System.nanoTime", KIND_PLATFORM, STATUS_COMPATIBILITY,
-            "CADisplayLink frames come from the Choreographer vsync callback; CACurrentMediaTime from CLOCK_MONOTONIC."),
+            "libioscompat.so CACurrentMediaTime · android.view.Choreographer (candidate)", KIND_PLATFORM, STATUS_COMPATIBILITY,
+            "CACurrentMediaTime has a concrete CLOCK_MONOTONIC shim; CADisplayLink and the QuartzCore object ABI are not linked or implemented."),
         Provider("OpenAL.framework/OpenAL", "OpenAL", "libaaudio.so software mixer",
             KIND_PLATFORM, STATUS_COMPATIBILITY,
             "al*/alc* buffers and sources are mixed into a real AAudio low-latency output stream."),
@@ -155,8 +155,8 @@ object Providers {
     )
 
     /**
-     * External symbol prefixes with a real Android implementation. Used to score
-     * coverage of the symbols a slice actually imports.
+     * Broad symbol-family triage hints only; these are not proof of generated or linked code.
+     * The narrow compiled time shims are tracked separately by AndroidApiMapper.
      */
     private val SYMBOL_PROVIDERS = listOf(
         "gl" to "OpenGL ES (libGLESv2.so/libGLESv3.so)",

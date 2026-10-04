@@ -8,9 +8,6 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.security.MessageDigest
-import java.util.zip.Deflater
-import java.util.zip.ZipEntry
-import java.util.zip.ZipOutputStream
 
 /** Builds an explicitly non-playable Android shell from a bundled, source-free template APK. */
 internal class PlaceholderApkBuilder(private val context: Context) {
@@ -88,8 +85,9 @@ internal class PlaceholderApkBuilder(private val context: Context) {
             val resourceTable = templateEntries.resources
             val dex = templateEntries.dex
             val templateFallbackIcon = templateEntries.fallbackIcon
-            require(dex.isNotEmpty() && templateFallbackIcon.copyOfRange(0, minOf(8, templateFallbackIcon.size)).contentEquals(PNG_SIGNATURE)) {
-                "placeholder template is missing its launcher code or fallback icon"
+            require(validDex(dex) && templateFallbackIcon.size >= PNG_SIGNATURE.size &&
+                templateFallbackIcon.copyOfRange(0, PNG_SIGNATURE.size).contentEquals(PNG_SIGNATURE) && validPng(templateFallbackIcon)) {
+                "placeholder template is missing a valid launcher DEX or fallback icon"
             }
             val iconEntryPath = SafeZip.validateName(templateEntries.iconEntryPath)
             require(iconEntryPath == templateEntries.iconEntryPath && iconEntryPath.startsWith("res/") &&
@@ -117,13 +115,24 @@ internal class PlaceholderApkBuilder(private val context: Context) {
             val originalIconAvailable = iconSource == "RECOVERED_IPA_ICON"
             val apiMapping = report.optJSONObject("apiMapping") ?: JSONObject()
             val distinctImportSymbols = apiMapping.optInt("distinctImportSymbols", 0).coerceAtLeast(0)
+            val classifiedImportSymbols = apiMapping.optInt("classifiedImportSymbols", 0).coerceAtLeast(0)
+            val classificationCoveragePercent = apiMapping.optInt("classificationCoveragePercent", 0).coerceIn(0, 100)
+            val runtimeVerifiedNdkCandidates = apiMapping.optInt("runtimeVerifiedNdkCandidates", 0).coerceAtLeast(0)
+            val runtimeVerifiedAndroidApiLevel = apiMapping.optInt("runtimeVerifiedAndroidApiLevel", 0).coerceAtLeast(0)
             val directApiCandidates = apiMapping.optInt("mappedNameCandidates", 0).coerceAtLeast(0)
             val semanticApiCandidates = apiMapping.optInt("semanticRewriteCandidates", 0).coerceAtLeast(0)
-            val analysisSummary = "Static analysis only: $distinctImportSymbols imported symbols; $directApiCandidates direct-name and $semanticApiCandidates semantic API candidates. No game code or API implementation was translated."
+            val unmappedApiSymbols = apiMapping.optInt("unmappedSymbolCount", 0).coerceAtLeast(0)
+            val apiLevelNote = if (runtimeVerifiedAndroidApiLevel > 0) " on Android API $runtimeVerifiedAndroidApiLevel" else ""
+            val analysisSummary = "Static analysis only: $classifiedImportSymbols/$distinctImportSymbols symbols triaged ($classificationCoveragePercent%); $directApiCandidates direct-name candidates ($runtimeVerifiedNdkCandidates runtime exports resolved$apiLevelNote), $semanticApiCandidates semantic targets, $unmappedApiSymbols unmapped. No game code or API implementation was translated."
             val analysisInfo = JSONObject()
                 .put("distinctImportSymbols", distinctImportSymbols)
+                .put("classifiedImportSymbols", classifiedImportSymbols)
+                .put("classificationCoveragePercent", classificationCoveragePercent)
+                .put("runtimeVerifiedNdkCandidates", runtimeVerifiedNdkCandidates)
+                .put("runtimeVerifiedAndroidApiLevel", runtimeVerifiedAndroidApiLevel)
                 .put("directApiCandidates", directApiCandidates)
                 .put("semanticApiCandidates", semanticApiCandidates)
+                .put("unmappedApiSymbols", unmappedApiSymbols)
                 .put("translatedGameFunctions", 0)
                 .put("apiReplacementImplementations", 0)
             val infoJson = JSONObject()
@@ -136,17 +145,35 @@ internal class PlaceholderApkBuilder(private val context: Context) {
                 .put("gameCodeIncluded", false)
                 .toString().toByteArray(Charsets.UTF_8)
 
-            setProgress(52, "BUILDING", "Adding app branding and an honest non-playable placeholder screen")
-            ZipOutputStream(unsignedFile.outputStream().buffered()).use { output ->
-                output.setLevel(Deflater.BEST_COMPRESSION)
-                writeEntry(output, "AndroidManifest.xml", customizedManifest)
-                writeEntry(output, "classes.dex", dex)
-                writeEntry(output, "resources.arsc", customizedResources)
-                writeEntry(output, iconEntryPath, iconBytes)
-                writeEntry(output, "assets/placeholder-info.json", infoJson)
-                writeEntry(output, "assets/ipa-icon.png", iconBytes)
-            }
+            setProgress(52, "BUILDING", "Packaging aligned Android resources and an honest non-playable placeholder screen")
+            val expectedEntries = setOf(
+                "AndroidManifest.xml",
+                "classes.dex",
+                "resources.arsc",
+                iconEntryPath,
+                "assets/ipa-icon.png",
+                "assets/placeholder-info.json",
+            )
+            val alignedEntries = setOf(
+                "AndroidManifest.xml",
+                "classes.dex",
+                "resources.arsc",
+                iconEntryPath,
+                "assets/ipa-icon.png",
+            )
+            AlignedApkZip.write(
+                unsignedFile,
+                listOf(
+                    AlignedApkZip.Entry("AndroidManifest.xml", customizedManifest),
+                    AlignedApkZip.Entry("classes.dex", dex),
+                    AlignedApkZip.Entry("resources.arsc", customizedResources),
+                    AlignedApkZip.Entry(iconEntryPath, iconBytes),
+                    AlignedApkZip.Entry("assets/ipa-icon.png", iconBytes),
+                    AlignedApkZip.Entry("assets/placeholder-info.json", infoJson, compressed = true),
+                ),
+            )
             require(unsignedFile.isFile && unsignedFile.length() > 0) { "could not assemble placeholder package" }
+            AlignedApkZip.verify(unsignedFile, expectedEntries, alignedEntries)
 
             setProgress(68, "SIGNING", "Signing the placeholder APK for Android installation")
             val signerConfig = ApkSigner.SignerConfig.Builder(
@@ -267,16 +294,18 @@ internal class PlaceholderApkBuilder(private val context: Context) {
 
     private fun validPng(bytes: ByteArray): Boolean {
         return try {
-            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-            if (bitmap == null) false else {
-                val valid = bitmap.width in 1..8192 && bitmap.height in 1..8192
-                bitmap.recycle()
-                valid
-            }
+            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+            options.outWidth in 1..8192 && options.outHeight in 1..8192
         } catch (_: Exception) {
             false
         }
     }
+
+    private fun validDex(bytes: ByteArray): Boolean =
+        bytes.size >= 0x70 && bytes[0] == 'd'.code.toByte() && bytes[1] == 'e'.code.toByte() &&
+            bytes[2] == 'x'.code.toByte() && bytes[3] == '\n'.code.toByte() &&
+            (4..6).all { (bytes[it].toInt() and 0xff) in 0x30..0x39 } && bytes[7] == 0.toByte()
 
     private fun readAsset(name: String, maximum: Long): ByteArray = context.assets.open(name).use { input ->
         val output = ByteArrayOutputStream()
@@ -291,13 +320,6 @@ internal class PlaceholderApkBuilder(private val context: Context) {
         }
         require(total > 0) { "bundled placeholder asset is empty: $name" }
         output.toByteArray()
-    }
-
-    private fun writeEntry(zip: ZipOutputStream, name: String, bytes: ByteArray) {
-        val entry = ZipEntry(name).apply { time = 0L }
-        zip.putNextEntry(entry)
-        zip.write(bytes)
-        zip.closeEntry()
     }
 
     private fun sha256(file: File): String = file.inputStream().use { input ->

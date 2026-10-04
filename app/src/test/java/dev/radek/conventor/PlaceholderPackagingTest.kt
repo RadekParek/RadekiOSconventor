@@ -2,6 +2,7 @@ package dev.radek.conventor
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
@@ -16,7 +17,8 @@ class PlaceholderPackagingTest {
                 "package",
             ),
         )
-        val expectedLabel = "Žluťoučký drak 🎮"
+        // More than 127 UTF-8 bytes exercises Android's two-byte length8 encoding.
+        val expectedLabel = "Žluťoučký drak 🎮 ${"界".repeat(60)}"
         val patched = BinaryXmlManifest.customize(original, "dev.radek.placeholder.p0123456789abcdef01234567", expectedLabel)
 
         assertEquals(patched.size, u32(patched, 4).toInt())
@@ -25,6 +27,35 @@ class PlaceholderPackagingTest {
         assertEquals("dev.radek.placeholder.p0123456789abcdef01234567", strings[0])
         assertEquals(expectedLabel, strings[1])
         assertFalse((u32(pool, 16).toInt() and 1) != 0)
+    }
+
+    @Test fun binaryXmlManifestHandlesAaptUtf16StringPools() {
+        val original = binaryXml(
+            listOf("dev.radek.placeholder", "__RADEK_PLACEHOLDER_LABEL__", "manifest", "package"),
+            utf8 = false,
+        )
+        val expectedLabel = "Žluťoučký drak 🎮"
+        val patched = BinaryXmlManifest.customize(original, "dev.radek.placeholder.p0123456789abcdef01234567", expectedLabel)
+        val pool = patched.copyOfRange(8, 8 + u32(patched, 12).toInt())
+
+        // The patcher may safely emit UTF-8 after reading a UTF-16 source pool.
+        assertTrue((u32(pool, 16).toInt() and 0x100) != 0)
+        val strings = readPool(pool)
+        assertEquals("dev.radek.placeholder.p0123456789abcdef01234567", strings[0])
+        assertEquals(expectedLabel, strings[1])
+    }
+
+    @Test fun binaryXmlManifestKeepsLargeStringsInUtf16WhenUtf8LengthFieldsWouldOverflow() {
+        val large = "界".repeat(40_000)
+        val original = binaryXml(
+            listOf("dev.radek.placeholder", "__RADEK_PLACEHOLDER_LABEL__", large),
+            utf8 = false,
+        )
+        val patched = BinaryXmlManifest.customize(original, "dev.radek.placeholder.p0123456789abcdef01234567", "Game")
+        val pool = patched.copyOfRange(8, 8 + u32(patched, 12).toInt())
+
+        assertEquals(0, u32(pool, 16).toInt() and 0x100)
+        assertEquals(large, readPool(pool)[2])
     }
 
     @Test fun binaryXmlManifestRejectsUnsafePackageNames() {
@@ -49,16 +80,23 @@ class PlaceholderPackagingTest {
         }
     }
 
-    private fun binaryXml(strings: List<String>): ByteArray {
+    private fun binaryXml(strings: List<String>, utf8: Boolean = true): ByteArray {
         val data = ByteArrayOutputStream()
         val offsets = ArrayList<Int>()
         strings.forEach { value ->
             offsets += data.size()
-            val bytes = value.toByteArray(StandardCharsets.UTF_8)
-            writeLength8(data, value.length)
-            writeLength8(data, bytes.size)
-            data.write(bytes)
-            data.write(0)
+            if (utf8) {
+                val bytes = value.toByteArray(StandardCharsets.UTF_8)
+                writeLength8(data, value.length)
+                writeLength8(data, bytes.size)
+                data.write(bytes)
+                data.write(0)
+            } else {
+                writeLength16(data, value.length)
+                data.write(value.toByteArray(StandardCharsets.UTF_16LE))
+                data.write(0)
+                data.write(0)
+            }
         }
         while (data.size() % 4 != 0) data.write(0)
         val stringStart = 28 + offsets.size * 4
@@ -68,7 +106,7 @@ class PlaceholderPackagingTest {
         putU32(pool, stringStart + data.size())
         putU32(pool, strings.size)
         putU32(pool, 0)
-        putU32(pool, 0x100)
+        putU32(pool, if (utf8) 0x100 else 0)
         putU32(pool, stringStart)
         putU32(pool, 0)
         offsets.forEach { putU32(pool, it) }
@@ -92,12 +130,18 @@ class PlaceholderPackagingTest {
         val count = u32(pool, 8).toInt()
         val stringsStart = u32(pool, 20).toInt()
         val headerSize = u16(pool, 2)
+        val utf8 = (u32(pool, 16).toInt() and 0x100) != 0
         return (0 until count).map { index ->
             var offset = stringsStart + u32(pool, headerSize + index * 4).toInt()
-            val (_, afterUtf16) = readLength8(pool, offset)
-            offset = afterUtf16
-            val (length, stringStart) = readLength8(pool, offset)
-            String(pool, stringStart, length, StandardCharsets.UTF_8)
+            if (utf8) {
+                val (_, afterUtf16) = readLength8(pool, offset)
+                offset = afterUtf16
+                val (length, stringStart) = readLength8(pool, offset)
+                String(pool, stringStart, length, StandardCharsets.UTF_8)
+            } else {
+                val (length, stringStart) = readLength16(pool, offset)
+                String(pool, stringStart, length * 2, StandardCharsets.UTF_16LE)
+            }
         }
     }
 
@@ -132,6 +176,21 @@ class PlaceholderPackagingTest {
         if (value < 0x80) output.write(value) else {
             output.write((value ushr 8) or 0x80)
             output.write(value and 0xff)
+        }
+    }
+
+    private fun writeLength16(output: ByteArrayOutputStream, value: Int) {
+        if (value < 0x8000) putU16(output, value) else {
+            putU16(output, (value ushr 16) or 0x8000)
+            putU16(output, value and 0xffff)
+        }
+    }
+
+    private fun readLength16(data: ByteArray, offset: Int): Pair<Int, Int> {
+        val first = u16(data, offset)
+        return if (first and 0x8000 == 0) first to offset + 2 else {
+            val second = u16(data, offset + 2)
+            (((first and 0x7fff) shl 16) or second) to offset + 4
         }
     }
 

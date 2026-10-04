@@ -17,6 +17,7 @@ import android.widget.*
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.zip.ZipFile
 
@@ -40,6 +41,9 @@ private object Jobs {
         executor.execute { try { block() } catch (e: Exception) { update(percent, "Failed at $percent%: ${e.message}") } finally { busy = false; main.post { listener?.invoke() } } }
     }
 }
+
+private fun formatPortPercent(value: Double): String =
+    String.format(Locale.ROOT, "%.6f", value.coerceIn(0.0, 100.0)).trimEnd('0').trimEnd('.')
 
 class MainActivity : Activity() {
     private var bgColor = Color.rgb(11, 16, 29)
@@ -225,7 +229,8 @@ class MainActivity : Activity() {
             val state = report.optString("state", "FAILED")
             text(state, 11f, statusColor(state), true, item)
             report.optJSONObject("portProgress")?.let { port ->
-                text("Android game-code translation: ${port.optInt("percent", 0)}% · not a gameplay test", 11f, statusColor("BLOCKED"), true, item)
+                val percent = port.optDouble("percent", port.optInt("percent", 0).toDouble())
+                text("Android code-byte translation: ${formatPortPercent(percent)}% · scope in the basis · not gameplay", 11f, statusColor("BLOCKED"), true, item)
             }
             report.optJSONObject("analysisProgress")?.let { analysis ->
                 val value = analysis.optInt("percent", 0)
@@ -241,9 +246,20 @@ class MainActivity : Activity() {
                 val total = mapping.optInt("distinctImportSymbols", 0)
                 val coverage = mapping.optInt("candidateCoveragePercent", 0)
                 val semantic = mapping.optInt("semanticRewriteCandidates", 0)
+                val classified = mapping.optInt("classifiedImportSymbols", 0)
+                val triage = mapping.optInt("classificationCoveragePercent", 0)
+                val unmapped = mapping.optInt("unmappedSymbolCount", 0)
+                val verified = mapping.optInt("runtimeVerifiedNdkCandidates", 0)
+                val verifiedPercent = mapping.optInt("runtimeVerifiedCoveragePercent", 0)
+                val runtimeApi = mapping.optInt("runtimeVerifiedAndroidApiLevel", 0)
+                val runtimeStatus = mapping.optString("runtimeNdkResolverStatus", "NOT_RUN")
+                val runtimeSummary = if (runtimeStatus == "CURRENT_DEVICE_DLSYM") "API $runtimeApi exports verified: $verifiedPercent% ($verified/$total)" else "device export check not run"
+                val compatStatus = mapping.optString("runtimeApiReplacementResolverStatus", "NOT_RUN")
+                val compatCount = mapping.optInt("runtimeVerifiedApiReplacementCount", 0)
+                val compatSummary = if (compatStatus == "CURRENT_DEVICE_COMPAT_DLSYM") "$compatCount implemented time-API shim(s) verified (not linked)" else "time-shim export check not run"
                 val generated = report.optJSONObject("hostConversion")?.optInt("generatedApiReplacements", 0) ?: 0
-                val summary = if (total == 0) "API candidates: N/A (no imported symbols) · host-generated replacements: $generated"
-                    else "Candidates only: $coverage% direct NDK names ($mapped/$total) · $semantic semantic targets · host-generated replacements: $generated"
+                val summary = if (total == 0) "API symbol triage: N/A (no imported symbols) · $compatSummary · generated replacements: $generated"
+                    else "Symbol triage: $triage% ($classified/$total) · direct NDK candidates: $coverage% ($mapped/$total) · $runtimeSummary · $compatSummary · $semantic semantic · $unmapped unmapped · generated replacements: $generated"
                 text(summary, 11f, muted, parent = item)
             }
             report.optJSONObject("hostConversion")?.takeIf { it.optString("status") == "ATTACHED" }?.let { host ->
@@ -378,17 +394,35 @@ class MainActivity : Activity() {
             val coverage = mapping.optInt("candidateCoveragePercent", 0)
             val mappingCard = card()
             val semantic = mapping.optInt("semanticRewriteCandidates", 0)
-            val summary = if (total == 0) "Android API candidates: N/A (no imports)"
-                else "Direct NDK name candidates: $coverage% ($mapped/$total) · semantic rewrite candidates: $semantic"
+            val classified = mapping.optInt("classifiedImportSymbols", 0)
+            val triage = mapping.optInt("classificationCoveragePercent", 0)
+            val unmapped = mapping.optInt("unmappedSymbolCount", 0)
+            val verified = mapping.optInt("runtimeVerifiedNdkCandidates", 0)
+            val verifiedPercent = mapping.optInt("runtimeVerifiedCoveragePercent", 0)
+            val runtimeApi = mapping.optInt("runtimeVerifiedAndroidApiLevel", 0)
+            val runtimeStatus = mapping.optString("runtimeNdkResolverStatus", "NOT_RUN")
+            val runtimeSummary = if (runtimeStatus == "CURRENT_DEVICE_DLSYM") " · Android API $runtimeApi exports verified: $verifiedPercent% ($verified/$total)" else ""
+            val compatStatus = mapping.optString("runtimeApiReplacementResolverStatus", "NOT_RUN")
+            val implemented = mapping.optInt("runtimeVerifiedApiReplacementCount", 0)
+            val compatSummary = if (compatStatus == "CURRENT_DEVICE_COMPAT_DLSYM") " · $implemented implemented time-API shim(s) verified, not linked" else ""
+            val summary = if (total == 0) "Android API candidates: N/A (no imports)$compatSummary"
+                else "Symbol triage: $triage% ($classified/$total) · direct NDK name candidates: $coverage% ($mapped/$total)$runtimeSummary$compatSummary · semantic rewrites: $semantic · unmapped: $unmapped"
             text(summary, 16f, textColor, true, mappingCard)
             val generated = report.optJSONObject("hostConversion")?.optInt("generatedApiReplacements", 0) ?: 0
-            val mappingDisclosure = if (generated > 0) "The on-device mapper generated no code; an attached complete-game host conversion reports $generated generated API replacement(s). Runtime behavior is not device-tested."
-                else "No API implementation or replacement code was generated; these candidates do not predict gameplay compatibility or stability."
+            val triageNote = if (mapping.optString("classificationStatus") == "COMPLETE" && total > 0)
+                "All $classified observed import symbols were categorized; categorization is not translation."
+            else "Import categorization is incomplete or there were no imported symbols."
+            val mappingDisclosure = when {
+                generated > 0 -> "The on-device mapper generated no per-game code; an attached complete-game host conversion reports $generated generated API replacement(s). Runtime behavior is not device-tested. $triageNote"
+                implemented > 0 -> "$triageNote $implemented imported time API(s) resolve to concrete libioscompat.so implementations on this device, but no IPA callsite was rewritten and none was linked into a game. Other candidates are not implementations."
+                else -> "$triageNote A narrow time-API implementation is built into the analyzer runtime, but no matching export was verified for this IPA; no per-game replacement was linked. Other candidates do not predict gameplay compatibility or stability."
+            }
             text(mapping.optString("measure") + " $mappingDisclosure", 13f, muted, parent = mappingCard)
         }
         report.optJSONObject("portProgress")?.let { port ->
             val portCard = card()
-            text("Android game-code translation progress: ${port.optInt("percent", 0)}%", 16f, statusColor("BLOCKED"), true, portCard)
+            val percent = port.optDouble("percent", port.optInt("percent", 0).toDouble())
+            text("Android code-byte translation progress: ${formatPortPercent(percent)}%", 16f, statusColor("BLOCKED"), true, portCard)
             text(port.optString("basis"), 13f, muted, parent = portCard)
         }
         report.optJSONObject("analysisProgress")?.let { analysis ->

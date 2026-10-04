@@ -10,7 +10,8 @@ sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0' 'ndk;27.
 sdkmanager --licenses
 ```
 
-Run the native, host and Android importer checks:
+Run the native, host and Android importer checks (including the compiled `libioscompat.so` time
+shims and their host behavior tests):
 
 ```sh
 python3 tools/build_native.py
@@ -33,14 +34,16 @@ source IPA is stored in private app storage until the library entry is deleted. 
 bounded extraction and inspection, then removes its temporary extracted tree. It does not create a
 game APK. Details include bundle name/version/identifier, declared `MinimumOSVersion` (not inferred),
 recovered icon when decodable (including supported compiled `Assets.car` renditions), architectures,
-API candidates, blockers, the raw JSON report and analysis logs.
+API candidates, current-device time-shim export checks, blockers, the raw JSON report and analysis logs.
 
 The analysis progress bar measures input copying, extraction and analysis only. It is not code
 translation, APK build progress, runtime validation or playability. Runnable game code remains at
 zero unless a complete host conversion is attached under the strict contract. The red **Force convert
 to .apk** action builds a separately named, installable placeholder from a bundled Android shell;
 it uses the IPA app name and recovered icon where available, but contains no translated game code or
-gameplay. Its launch screen makes that limitation explicit.
+gameplay. Its launch screen makes that limitation explicit. The runtime packager reads either UTF-8
+or UTF-16 Android binary-XML string pools, then checks its exact ZIP entry set, uncompressed/aligned
+manifest, DEX, resource table and icon payloads before signing and verifying the APK.
 
 A host APK attachment must match the IPA's SHA-256/package identity and safe IPA-derived basename,
 carry `complete-game-v1` metadata, account for every reachable function and API implementation,
@@ -58,22 +61,32 @@ python3 -m radek analyze authorized.ipa --authorized --output workspace/analysis
 ```
 
 The workspace must not already exist. Reports and logs persist; extracted workspaces are removed.
-The host also reconstructs code metadata and records whether its narrow closed-integer leaf check
-succeeds. When that proof succeeds, `leaf-experiment.ll` contains textual LLVM IR for the single
-verified MOV-immediate/MOVK/immediate-ADD/SUB/RET leaf. If `llvm-as` is on `PATH`, the host
-checks the generated IR syntax and records that result. This is an experiment, not a complete app
-conversion, and the file is not linked into an APK. If `convert` is invoked on an input that passes
-only this restricted check, it returns `BLOCKED` and produces no APK. This is intentional: the
-experiment does not translate all game code, APIs, resources, or lifecycle.
+The host reconstructs code metadata and may prove one narrow closed-integer entry leaf. When that
+proof succeeds, it writes a raw Android instruction blob, portable C, a minimal loadable ARM shared
+object exporting `radek_translated_entry`, and supplementary `leaf-experiment.ll`. It statically
+checks the ELF architecture, symbol size/hash, and lack of undefined symbols; C is compiled and run
+against representative IR cases in the unit tests. No Android device load test is performed.
+
+If resolved reconstructed internal calls establish a path from the selected entry to one of four
+supported time imports, the host also emits the selected Bionic-backed implementation source under
+`api-replacements/`. The source is compiled and
+behavior-tested on the host, but is not linked to the translated entry or any APK. The report records
+one function's source instruction bytes divided by the selected slice's executable `__text` bytes as
+partial machine-code progress; `conversionProgress` remains `NOT_BUILT`. If `convert` is invoked on
+an input that passes only this restricted proof, it returns `BLOCKED`, retains any isolated native
+artifact, and produces no game APK. The experiment does not translate all game code, APIs, resources,
+or lifecycle.
 
 ARM selection for the analysis is deterministic: automatic selection prefers ARM64 in a FAT IPA
 containing both ARM32 and ARM64; supported ARM32-only inputs target 32-bit Android ARMv7 (`armeabi-v7a`).
 This target selection is not evidence that an APK was built. Explicit `--target-abi` overrides must
 have a matching input slice.
 
-The API mapper currently reports candidate symbols and semantic targets only. It does not rewrite
-Mach-O bindings, generate Android API implementations, or prove behavior. Unsupported reachable
-APIs remain blockers; no conversion output is claimed.
+The API mapper treats general symbol/semantic matches as candidates. Four narrow time API
+implementations exist in `libioscompat.so`, and an import may be selected for source generation only
+if a resolved reconstructed call path connects the selected entry to it. The mapper does not rewrite
+Mach-O bindings or link the shim to the standalone entry; unsupported entry-reachable APIs remain
+blockers and no playable conversion is claimed.
 
 ## Validation and status codes
 

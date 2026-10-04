@@ -97,13 +97,20 @@ class ProviderTests(unittest.TestCase):
             ("_objc_msgSend", "message dispatch"),
             ("_dispatch_async", "concurrent"),
             ("_pthread_create", "pthread"),
-            ("_mach_absolute_time", "CLOCK_MONOTONIC"),
+            ("_mach_absolute_time", "libioscompat.so"),
+            ("_CFAbsoluteTimeGetCurrent", "CFAbsoluteTimeGetCurrent"),
+            ("_CACurrentMediaTime", "CACurrentMediaTime"),
+            ("_mach_timebase_info", "mach_timebase_info"),
             ("_malloc", "bionic"),
         ):
             with self.subTest(symbol=symbol):
                 provider = providers.for_symbol(symbol)
                 self.assertIsNotNone(provider, symbol)
                 self.assertIn(expected, provider)
+
+    def test_unknown_lowercase_symbols_are_not_assumed_to_be_bionic(self):
+        self.assertIsNone(providers.for_symbol("_unknownAppleFunction"))
+        self.assertIsNone(providers.for_symbol("_private_vendor_entry"))
 
     def test_coverage_is_honest(self):
         self.assertEqual(100, providers.coverage([], []))
