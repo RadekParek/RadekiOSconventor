@@ -78,11 +78,12 @@ subset; every other IPA resolves straight to `PARTIAL`, `BLOCKED` or `FAILED`.
 - `READY`: entered only when the bounded complete-conversion gate proves the executable is exactly
   one closed-integer routine and a signed `complete-game-v1` APK was built and statically validated.
 
-The app's **Force convert to .apk** action routes on the on-device proof and never overrides these
-states: proven IPAs are converted into a signed APK whose translated entry runs through JNI;
-everything else gets a separately named, signed preview shell carrying the app name and recovered
-icon where available, whose screen says that no game code was translated and that the game will not
-run. The preview shell has its own filename, metadata, progress and provider validation. A host
+Proven IPAs are converted automatically during import — the signed APK whose translated entry runs
+through JNI is built and attached with no user action, leaving the entry in `READY`. The red **Force
+convert to .apk** action never overrides these states: for proven IPAs it simply rebuilds the
+converted APK; everything else gets a separately named, signed preview shell carrying the app name
+and recovered icon where available, whose screen says that no game code was translated and that the
+game will not run. The preview shell has its own filename, metadata, progress and provider validation. A host
 result remains shareable/installable only after the `complete-game-v1` contract passes attachment
 checks; the CLI produces such a result only for the proven bounded subset (see `radek/gamepack.py`).
 The CLI `convert` path may additionally emit `experimental-shell.apk` (`experimental-shell-v1`): a

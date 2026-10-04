@@ -14,7 +14,9 @@ from .archive import InputError
 
 
 _SYMBOL = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_PAGE_SIZE = 0x1000
+# 16 KiB segment alignment keeps the output loadable on both 4 KB-page and
+# 16 KB-page ARM64 kernels (APK packaging aligns the library file itself).
+_PAGE_SIZE = 0x4000
 _PT_LOAD = 1
 _PT_DYNAMIC = 2
 _PT_GNU_STACK = 0x6474E551

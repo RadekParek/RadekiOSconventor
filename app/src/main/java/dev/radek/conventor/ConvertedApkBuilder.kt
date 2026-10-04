@@ -30,6 +30,7 @@ internal class ConvertedApkBuilder(private val context: Context) {
         private const val JNI_SYMBOL = "Java_dev_radek_generated_MainActivity_runNative"
         private const val BACKEND = "radek-device-bounded-v1"
         private const val CONTRACT = "complete-game-v1"
+        private val DEX_NAME_REGEX = Regex("""classes[0-9]+\.dex""")
         private val PNG_SIGNATURE = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
     }
 
@@ -138,16 +139,35 @@ internal class ConvertedApkBuilder(private val context: Context) {
             setProgress(56, "PACKAGING", "Reading the bundled converted-app template")
             val templateManifest = readAsset("converted-template/AndroidManifest.xml", 2L * 1024 * 1024)
             val templateResources = readAsset("converted-template/resources.arsc", MAX_TEMPLATE_ENTRY_BYTES)
-            val templateDex = readAsset("converted-template/classes.dex", MAX_TEMPLATE_ENTRY_BYTES)
+            // AGP splits even the tiny launcher template into classes.dex +
+            // classesN.dex; Android loads every classesN.dex at the APK root, so
+            // all of them are embedded verbatim (manifest written by the embed task).
+            val templateDexNames = readAsset("converted-template/template-dex-entries.txt", 16 * 1024)
+                .toString(Charsets.UTF_8).lineSequence().map { it.trim() }.filter { it.isNotBlank() }
+                .map { it.substringBefore(':') }
+                .filter { it == "classes.dex" || DEX_NAME_REGEX.matches(it) }
+                .sortedWith(compareBy<String>({ it != "classes.dex" }, { it.length }, { it }))
+                .distinct()
+                .toList()
+            require(templateDexNames.firstOrNull() == "classes.dex") {
+                "converted template DEX manifest is missing classes.dex"
+            }
+            val templateDexes = templateDexNames.map { name ->
+                name to readAsset("converted-template/$name", MAX_TEMPLATE_ENTRY_BYTES)
+            }
             val templateFallbackIcon = readAsset("converted-template/fallback-icon.png", MAX_ICON_BYTES)
             val iconEntryPath = SafeZip.validateName(
                 readAsset("converted-template/icon-entry-path.txt", 1024).toString(Charsets.UTF_8),
             )
-            require(validDex(templateDex) && templateFallbackIcon.size >= PNG_SIGNATURE.size &&
+            require(templateDexes.all { (_, bytes) -> validDex(bytes) } &&
+                templateFallbackIcon.size >= PNG_SIGNATURE.size &&
                 templateFallbackIcon.copyOfRange(0, PNG_SIGNATURE.size).contentEquals(PNG_SIGNATURE) &&
                 validPng(templateFallbackIcon)) {
                 "converted template is missing a valid launcher DEX or fallback icon"
             }
+            require(templateDexes.any { (_, bytes) ->
+                String(bytes, Charsets.ISO_8859_1).contains("Ldev/radek/generated/MainActivity;")
+            }) { "converted template DEX files do not define the launcher entry class" }
             require(iconEntryPath.startsWith("res/") &&
                 iconEntryPath.substringAfterLast('/') == "generated_converted_icon.png") {
                 "converted template icon resource path is invalid"
@@ -211,10 +231,11 @@ internal class ConvertedApkBuilder(private val context: Context) {
             setProgress(68, "PACKAGING", "Assembling the converted APK entries")
             val entries = ArrayList<AlignedApkZip.Entry>()
             entries += AlignedApkZip.Entry("AndroidManifest.xml", manifest)
-            entries += AlignedApkZip.Entry("classes.dex", templateDex)
+            templateDexes.forEach { (name, bytes) -> entries += AlignedApkZip.Entry(name, bytes) }
             entries += AlignedApkZip.Entry("resources.arsc", resources)
             entries += AlignedApkZip.Entry(iconEntryPath, launcherIcon)
-            entries += AlignedApkZip.Entry("lib/arm64-v8a/libconverted.so", elf)
+            entries += AlignedApkZip.Entry("lib/arm64-v8a/libconverted.so", elf,
+                alignment = AlignedApkZip.NATIVE_LIBRARY_ALIGNMENT)
             entries += AlignedApkZip.Entry("assets/conversion.json", metadata.toString().toByteArray(Charsets.UTF_8), compressed = true)
             if (recoveredIcon != null) {
                 entries += AlignedApkZip.Entry("assets/ipa-icon.png", recoveredIcon, compressed = true)
@@ -223,10 +244,13 @@ internal class ConvertedApkBuilder(private val context: Context) {
                 entries += AlignedApkZip.Entry("assets/bundle/$relative", payload, compressed = true)
             }
             val expectedNames = entries.map { it.name }.toSet()
-            val alignedNames = setOf(
-                "AndroidManifest.xml", "classes.dex", "resources.arsc", iconEntryPath,
-                "lib/arm64-v8a/libconverted.so",
-            )
+            val alignedNames = buildMap<String, Int> {
+                put("AndroidManifest.xml", AlignedApkZip.ALIGNMENT)
+                put("resources.arsc", AlignedApkZip.ALIGNMENT)
+                put(iconEntryPath, AlignedApkZip.ALIGNMENT)
+                put("lib/arm64-v8a/libconverted.so", AlignedApkZip.NATIVE_LIBRARY_ALIGNMENT)
+                templateDexNames.forEach { put(it, AlignedApkZip.ALIGNMENT) }
+            }
             AlignedApkZip.write(unsignedFile, entries)
             require(unsignedFile.isFile && unsignedFile.length() > 0) { "could not assemble the converted APK" }
             AlignedApkZip.verify(unsignedFile, expectedNames, alignedNames)

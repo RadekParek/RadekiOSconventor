@@ -349,7 +349,7 @@ class Library(private val context: Context) {
                     .put("completeGameConversion", false)
                     .put("translatedFunctions", 1)
                     .put("translatedTextBytes", deviceTranslation.optInt("sourceBytes", 0))
-                    .put("basis", "The native prover verified that the whole executable __text is one closed-integer routine; Force convert turns that proof into a signed APK with the translated entry. Bytes are proven, not yet packaged."))
+                    .put("basis", "The native prover verified that the whole executable __text is one closed-integer routine; the importer packages that proof into a signed APK automatically after analysis. Bytes are proven, packaging follows below."))
             } else {
                 report.put("portProgress", JSONObject()
                     .put("percent", 0)
@@ -367,15 +367,50 @@ class Library(private val context: Context) {
             }
             report.put("blockers", JSONArray().put(reason)).put("hostCommand", "python3 -m radek analyze input.ipa --authorized --output workspace/analysis")
             val terminalState = if (encrypted || incompatible || !hasCandidate) ConversionState.BLOCKED else ConversionState.PARTIAL
-            report.put("conversionProgress", JSONObject()
-                .put("percent", 0)
-                .put("stage", "NOT_BUILT")
-                .put("status", "NOT_BUILT")
-                .put("message", reason)
-                .put("basis", if (deviceProven)
-                    "Conversion itself is user-triggered: Force convert packages the proven entry into a signed APK and then reports 100% here."
-                else
-                    "No game code is translated during IPA analysis. A user-triggered preview shell is tracked separately and is not counted as Android game-code progress."))
+            if (deviceProven && terminalState == ConversionState.PARTIAL) {
+                // Automatic bounded conversion: everything is statically proven, so
+                // the signed APK is built right after analysis with no user action.
+                report.put("conversionProgress", JSONObject()
+                    .put("percent", 5)
+                    .put("stage", "CONVERTING")
+                    .put("status", "RUNNING")
+                    .put("message", "Proven subset; packaging the translated entry into a signed APK automatically."))
+                log(ConversionState.CONVERTING, "Bounded conversion proof passed; building the signed APK automatically", 100)
+                save(dir, report)
+                try {
+                    ConvertedApkBuilder(context).build(dir) { percent, message -> progress(percent, message) }
+                    // The builder persisted its own updated report; reload it and
+                    // finish in READY so the entry needs no further action.
+                    val converted = JSONObject(File(dir, "report.json").readText())
+                    converted.put("blockers", JSONArray())
+                    converted.put("state", ConversionState.READY.name)
+                    val readyEvent = JSONObject()
+                        .put("time", java.time.Instant.now().toString())
+                        .put("stage", ConversionState.READY.name)
+                        .put("message", "Bounded conversion finished automatically: signed APK built and verified on-device")
+                    converted.optJSONArray("events")?.put(readyEvent)
+                    File(dir, "conversion.jsonl").appendText(readyEvent.toString() + "\n")
+                    save(dir, converted)
+                    return dir to converted
+                } catch (e: Exception) {
+                    report.put("autoConversion", JSONObject()
+                        .put("status", "FAILED")
+                        .put("message", e.message ?: e.javaClass.simpleName)
+                        .put("note", "The proof passed but packaging failed; Force convert can retry the build."))
+                    report.put("conversionProgress", JSONObject()
+                        .put("percent", 0)
+                        .put("stage", "NOT_BUILT")
+                        .put("status", "NOT_BUILT")
+                        .put("message", "Automatic conversion failed after the proof passed; Force convert can retry. ${e.message ?: e.javaClass.simpleName}"))
+                }
+            } else {
+                report.put("conversionProgress", JSONObject()
+                    .put("percent", 0)
+                    .put("stage", "NOT_BUILT")
+                    .put("status", "NOT_BUILT")
+                    .put("message", reason)
+                    .put("basis", "No game code is translated during IPA analysis. A user-triggered preview shell is tracked separately and is not counted as Android game-code progress."))
+            }
             log(terminalState, reason, 100)
             save(dir, report)
         } catch (e: Exception) {

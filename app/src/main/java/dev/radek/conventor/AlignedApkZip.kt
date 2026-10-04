@@ -11,15 +11,18 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
-/** ZIP writer/checks used by the runtime-built APK; stored resources are 4-byte aligned. */
+/** ZIP writer/checks used by the runtime-built APK; stored resources are 4-byte
+ *  aligned and native libraries are page-aligned (16 pages) so the linker can
+ *  mmap them straight out of the APK on 4 KB and 16 KB page devices. */
 internal object AlignedApkZip {
     private const val LOCAL_FILE_HEADER = 0x04034b50L
     private const val DATA_DESCRIPTOR = 0x08074b50L
     private const val LOCAL_HEADER_BYTES = 30L
-    private const val ALIGNMENT = 4
+    const val ALIGNMENT = 4
+    const val NATIVE_LIBRARY_ALIGNMENT = 16 * 4096
     private const val APK_ALIGNMENT_EXTRA_ID = 0xd935
 
-    data class Entry(val name: String, val bytes: ByteArray, val compressed: Boolean = false)
+    data class Entry(val name: String, val bytes: ByteArray, val compressed: Boolean = false, val alignment: Int = ALIGNMENT)
 
     fun write(file: File, entries: List<Entry>) {
         require(entries.isNotEmpty()) { "APK archive has no entries" }
@@ -48,7 +51,7 @@ internal object AlignedApkZip {
                         size = item.bytes.size.toLong()
                         compressedSize = item.bytes.size.toLong()
                         crc = crc32(item.bytes)
-                        val extra = alignmentExtra(counted.bytesWritten + LOCAL_HEADER_BYTES + nameBytes.size)
+                        val extra = alignmentExtra(counted.bytesWritten + LOCAL_HEADER_BYTES + nameBytes.size, item.alignment)
                         if (extra.isNotEmpty()) setExtra(extra)
                     }
                 }
@@ -59,9 +62,10 @@ internal object AlignedApkZip {
         }
     }
 
-    /** Ensures the built archive contains exactly the expected files and aligned stored APK payloads. */
-    fun verify(file: File, expectedNames: Set<String>, alignedStoredNames: Set<String>) {
-        require(alignedStoredNames.all { it in expectedNames }) { "alignment check names are not in the expected APK set" }
+    /** Ensures the built archive contains exactly the expected files and aligned
+     *  stored APK payloads; the map values are each entry's required alignment. */
+    fun verify(file: File, expectedNames: Set<String>, alignedStoredNames: Map<String, Int>) {
+        require(alignedStoredNames.keys.all { it in expectedNames }) { "alignment check names are not in the expected APK set" }
         ZipFile(file).use { zip ->
             val entries = zip.entries().asSequence().toList()
             val names = entries.map { it.name }
@@ -69,7 +73,7 @@ internal object AlignedApkZip {
             require(names.toSet() == expectedNames) {
                 "APK entry set mismatch (expected ${expectedNames.sorted()}, found ${names.sorted()})"
             }
-            alignedStoredNames.forEach { name ->
+            alignedStoredNames.keys.forEach { name ->
                 val entry = zip.getEntry(name) ?: error("APK is missing $name")
                 require(entry.method == ZipEntry.STORED) { "$name must be stored uncompressed in the APK" }
                 require(entry.size > 0 && entry.compressedSize == entry.size) { "$name has an invalid stored size" }
@@ -78,7 +82,7 @@ internal object AlignedApkZip {
         verifyLocalAlignment(file, alignedStoredNames)
     }
 
-    private fun verifyLocalAlignment(file: File, requiredNames: Set<String>) {
+    private fun verifyLocalAlignment(file: File, requiredNames: Map<String, Int>) {
         if (requiredNames.isEmpty()) return
         val found = HashSet<String>()
         ZipFile(file).use { zip ->
@@ -102,11 +106,12 @@ internal object AlignedApkZip {
                     val name = String(nameBytes, StandardCharsets.UTF_8)
                     val entry = zip.getEntry(name) ?: error("APK local entry is absent from its central directory: $name")
                     val dataOffset = headerEnd
-                    if (name in requiredNames) {
+                    val requiredAlignment = requiredNames[name]
+                    if (requiredAlignment != null) {
                         require(method == ZipEntry.STORED && entry.method == ZipEntry.STORED) {
                             "$name is not an uncompressed APK entry"
                         }
-                        require(dataOffset % ALIGNMENT == 0L) { "$name is not ${ALIGNMENT}-byte aligned" }
+                        require(dataOffset % requiredAlignment == 0L) { "$name is not ${requiredAlignment}-byte aligned" }
                         found += name
                     }
                     offset = dataOffset + entry.compressedSize
@@ -118,19 +123,20 @@ internal object AlignedApkZip {
                 }
             }
         }
-        require(found == requiredNames) { "APK is missing aligned stored entries: ${(requiredNames - found).sorted()}" }
+        require(found == requiredNames.keys) { "APK is missing aligned stored entries: ${(requiredNames.keys - found).sorted()}" }
     }
 
-    private fun alignmentExtra(dataOffsetWithoutExtra: Long): ByteArray {
-        val paddingBytes = ((ALIGNMENT - (dataOffsetWithoutExtra % ALIGNMENT)) % ALIGNMENT).toInt()
+    private fun alignmentExtra(dataOffsetWithoutExtra: Long, alignment: Int): ByteArray {
+        val paddingBytes = ((alignment - (dataOffsetWithoutExtra % alignment)) % alignment).toInt()
         if (paddingBytes == 0) return ByteArray(0)
+        require(paddingBytes <= 65535) { "stored entry alignment padding exceeds the ZIP extra field limit" }
         // ZIP extra fields are TLV records. Unknown IDs are ignored by Android; this
         // record adds only enough bytes to align the following stored payload.
         return ByteArray(4 + paddingBytes).also { extra ->
             extra[0] = (APK_ALIGNMENT_EXTRA_ID and 0xff).toByte()
             extra[1] = (APK_ALIGNMENT_EXTRA_ID ushr 8).toByte()
-            extra[2] = paddingBytes.toByte()
-            extra[3] = 0
+            extra[2] = (paddingBytes and 0xff).toByte()
+            extra[3] = ((paddingBytes ushr 8) and 0xff).toByte()
         }
     }
 

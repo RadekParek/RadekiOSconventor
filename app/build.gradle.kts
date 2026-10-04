@@ -37,16 +37,19 @@ fun registerTemplateEmbedTask(module: String, assetDirectory: String, iconFileNa
             val assetRoot = generatedAssets.get().dir(assetDirectory).asFile
             assetRoot.deleteRecursively()
             require(assetRoot.mkdirs()) { "cannot create generated $assetDirectory assets" }
-            val entries = mapOf(
-                "AndroidManifest.xml" to "AndroidManifest.xml",
-                "resources.arsc" to "resources.arsc",
-                "classes.dex" to "classes.dex",
-            )
             ZipFile(apks.single()).use { template ->
-                entries.forEach { (entryName, assetName) ->
+                // Android loads every classesN.dex at the APK root natively; AGP
+                // splits even tiny templates (R classes vs activity), so embed all.
+                val dexEntryNames = template.entries().asSequence()
+                    .map { it.name }
+                    .filter { it == "classes.dex" || Regex("""classes[0-9]+\.dex""").matches(it) }
+                    .sortedWith(compareBy<String>({ it != "classes.dex" }, { it.length }, { it }))
+                    .toList()
+                require(dexEntryNames.firstOrNull() == "classes.dex") { "$assetDirectory template has no classes.dex" }
+                (listOf("AndroidManifest.xml", "resources.arsc") + dexEntryNames).forEach { entryName ->
                     val entry = template.getEntry(entryName) ?: error("$assetDirectory template missing $entryName")
                     require(entry.size in 1..(32L * 1024 * 1024)) { "$assetDirectory template entry too large: $entryName" }
-                    val destination = File(assetRoot, assetName)
+                    val destination = File(assetRoot, entryName)
                     template.getInputStream(entry).use { input -> destination.outputStream().use { output -> input.copyTo(output) } }
                 }
                 val iconEntries = template.entries().asSequence().filter {
@@ -66,15 +69,17 @@ fun registerTemplateEmbedTask(module: String, assetDirectory: String, iconFileNa
                     .joinToString("\n") { "${it.name}:${it.size}" }
                 File(assetRoot, "template-dex-entries.txt").writeText(dexEntries)
             }
-            // The on-device packager writes exactly this classes.dex into every
+            // The on-device packager writes exactly these DEX files into every
             // generated APK; fail the build here if the launcher class is absent,
             // with a string-table dump so the cause is diagnosable.
-            val dexBytes = File(assetRoot, "classes.dex").readBytes()
-            val dexText = String(dexBytes, Charsets.ISO_8859_1)
+            val dexText = assetRoot.listFiles().orEmpty()
+                .filter { it.name == "classes.dex" || Regex("""classes[0-9]+\.dex""").matches(it.name) }
+                .sortedBy { it.name }
+                .joinToString("") { String(it.readBytes(), Charsets.ISO_8859_1) }
             require(dexText.contains(launcherClass)) {
                 val strings = Regex("[ -~]{12,}").findAll(dexText).map { it.value }.distinct().take(100).toList()
-                "$assetDirectory template classes.dex does not define $launcherClass " +
-                    "(apk=${apks.single().name}, dexBytes=${dexBytes.size}); dex entries: " +
+                "$assetDirectory template DEX files do not define $launcherClass " +
+                    "(apk=${apks.single().name}); dex entries: " +
                     File(assetRoot, "template-dex-entries.txt").readText() + "; strings: $strings"
             }
         }

@@ -2,7 +2,7 @@
 
 An **offline IPA inspection and bounded native-reconstruction workbench**, not an iOS emulator or a general game converter. It includes an Android importer/analyzer, a C++ Mach-O parser, and Python reconstruction tools.
 
-> **One bounded subset converts for real; everything else stays honestly unbuilt.** When an IPA's whole executable is statically proven to be exactly one closed-integer ARM entry routine (MOV-immediate, MOVK, register MOV, immediate ADD/SUB, RET) with no imports, dependencies, fixups or runtime metadata, both the host CLI and the on-device app convert it end to end into a signed, installable APK (`complete-game-v1`): the translated entry is packaged as `libconverted.so` and runs through JNI when the launcher opens, showing the message recovered from the IPA. See `tests/data/hello-test.ipa`, which converts to an APK that displays `hello test succesfull`. Outside that proven subset nothing is translated: the host can still lower the entry routine into a standalone shared object and report compatibility registries, and on the `convert` path it packages those artifacts into a signed, explicitly labelled **experimental shell** APK (`experimental-shell-v1`) that states on screen that no game code is translated. The Android app can separately build an explicitly labelled, signed, installable preview shell for unconvertible IPAs; it contains no translated game code and cannot run the IPA's game. Device execution and gameplay of bounded conversions are never claimed as tested.
+> **One bounded subset converts for real; everything else stays honestly unbuilt.** When an IPA's whole executable is statically proven to be exactly one closed-integer ARM entry routine (MOV-immediate, MOVK, register MOV, immediate ADD/SUB, RET) with no imports, dependencies, fixups or runtime metadata, both the host CLI and the on-device app convert it end to end into a signed, installable APK (`complete-game-v1`) — on Android this happens automatically during import, no extra button needed: the translated entry is packaged as `libconverted.so` and runs through JNI when the launcher opens, showing the message recovered from the IPA. See `tests/data/hello-test.ipa`, which converts to an APK that displays `hello test succesfull`. Outside that proven subset nothing is translated: the host can still lower the entry routine into a standalone shared object and report compatibility registries, and on the `convert` path it packages those artifacts into a signed, explicitly labelled **experimental shell** APK (`experimental-shell-v1`) that states on screen that no game code is translated. The Android app can separately build an explicitly labelled, signed, installable preview shell for unconvertible IPAs; it contains no translated game code and cannot run the IPA's game. Device execution and gameplay of bounded conversions are never claimed as tested.
 
 ## Offline reconstruction
 
@@ -54,13 +54,13 @@ pointer slots when statically readable.
 
 - CI builds **only the RadekiOSConventor importer/analyzer APK** (`RadekiOSConventor-debug.apk`),
   plus the hello-test bounded conversion used to exercise the complete-game pipeline.
-- Importing an IPA runs analysis only and does not automatically create an APK. The red **Force
-  convert to .apk** action routes by the on-device proof: if the executable is proven to be exactly
-  one closed-integer routine, it builds a real signed APK whose translated entry runs through JNI;
-  otherwise it builds a separately named, signed and installable preview shell branded with the IPA
-  app name and recovered icon where available. The preview shell contains no iOS executable,
-  translated game code or gameplay, and says so when launched. Preview-shell creation does not count
-  as code-translation or complete-game progress.
+- Importing an IPA runs analysis and — when the executable passes the bounded conversion proof —
+  automatically finishes the conversion into a signed, installable APK; no separate action is
+  needed for proven inputs. Everything outside the proven subset creates nothing on import; there,
+  the red **Force convert to .apk** action builds a separately named, signed and installable
+  preview shell branded with the IPA app name and recovered icon where available. The preview
+  shell contains no iOS executable, translated game code or gameplay, and says so when launched.
+  Preview-shell creation does not count as code-translation or complete-game progress.
 - A host APK can be attached only if its metadata declares the `complete-game-v1` contract and
   passes source-identity, complete reachable-code/API/resource, ABI, packaging and provenance
   checks. Preview-shell APK metadata and provider paths are separate; a preview shell can never

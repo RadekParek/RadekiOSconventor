@@ -11,7 +11,9 @@ import java.nio.ByteOrder
  * writer tiny makes its loader contract auditable and fail-closed.
  */
 internal object ConvertedElfWriter {
-    private const val PAGE_SIZE = 0x1000
+    // 16 KiB segment alignment: loadable on both 4 KB-page and 16 KB-page ARM64
+    // devices (the APK also places the library at a 16-page-aligned offset).
+    private const val PAGE_SIZE = 0x4000
     private const val SYMBOL_REGEX = "^[A-Za-z_][A-Za-z0-9_]*$"
     private const val MAX_CODE_BYTES = 16 * 1024 * 1024
 

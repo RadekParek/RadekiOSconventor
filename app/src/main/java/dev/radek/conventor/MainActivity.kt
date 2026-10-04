@@ -248,7 +248,7 @@ class MainActivity : Activity() {
         text("Import an IPA to automatically inspect its code and Android compatibility.", 15f, muted)
         val info = card()
         text("Bounded conversion, honest everywhere else", 17f, textColor, true, info)
-        text("The on-device app analyzes every IPA, and converts the proven subset: an executable whose whole code is one closed-integer routine is turned into a signed, installable APK whose translated entry runs through JNI. Anything outside that subset is not translated; Force then builds a signed, installable preview shell branded with the app name and recovered icon, clearly labelled as not playable. Host APKs are accepted only when they declare a complete game conversion and pass provenance and package checks.", 14f, muted, parent = info)
+        text("The on-device app analyzes every IPA, and converts the proven subset automatically during import: an executable whose whole code is one closed-integer routine becomes a signed, installable APK whose translated entry runs through JNI — no extra tap needed. Anything outside that subset is not translated; Force then builds a signed, installable preview shell branded with the app name and recovered icon, clearly labelled as not playable. Host APKs are accepted only when they declare a complete game conversion and pass provenance and package checks.", 14f, muted, parent = info)
         val add = button("Choose IPA", true) { authorize() }; add.isEnabled = !Jobs.busy
         button("Settings", parent = body) { settingsScreen() }.isEnabled = !Jobs.busy
         if (Jobs.busy) {

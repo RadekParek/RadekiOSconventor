@@ -38,14 +38,15 @@ game APK. Details include bundle name/version/identifier, declared `MinimumOSVer
 recovered icon when decodable (including supported compiled `Assets.car` renditions), architectures,
 API candidates, current-device time-shim export checks, blockers, the raw JSON report and analysis logs.
 
-The analysis progress bar measures input copying, extraction and analysis only. It is not code
-translation, APK build progress, runtime validation or playability. Runnable game code remains at
-zero unless the bounded conversion proof applies or a complete host conversion is attached under the
-strict contract. The red **Force convert to .apk** action routes on that proof: proven IPAs become a
-signed APK whose translated entry routine runs through JNI and displays the message recovered from
-the IPA; everything else becomes a separately named, installable preview shell from the bundled
-Android template that uses the IPA app name and recovered icon where available but contains no
-translated game code or gameplay — its launch screen makes that limitation explicit. The runtime
+The analysis progress bar measures input copying and extraction; when the bounded conversion proof
+applies, the same import job continues into the packaging stages and builds the signed APK
+automatically. Runnable game code remains at zero unless that proof applies or a complete host
+conversion is attached under the strict contract. Proven IPAs become a signed APK whose translated
+entry routine runs through JNI and displays the message recovered from the IPA, with no extra user
+action. Everything else can be turned, via the red **Force convert to .apk** action, into a
+separately named, installable preview shell from the bundled Android template that uses the IPA app
+name and recovered icon where available but contains no translated game code or gameplay — its
+launch screen makes that limitation explicit. The runtime
 packager reads either UTF-8 or UTF-16 Android binary-XML string pools, then checks its exact ZIP
 entry set, uncompressed/aligned manifest, DEX, resource table and icon payloads before signing and
 verifying the APK.
