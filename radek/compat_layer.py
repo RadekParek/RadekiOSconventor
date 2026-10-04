@@ -68,19 +68,34 @@ def _emit_stub_machinery(count: int) -> str:
         "// --- Explicit stub handlers: resolution targets, NOT implementations. ---",
         "// Each stub records its invocation and returns a documented safe default.",
         "// Calling a stub is observable; it never reproduces the Darwin API.",
+        "// The table is seeded in 128-wide chunks because clang rejects a single",
+        "// fold expression wider than its expression-nesting limit.",
         "namespace {",
-        f"constexpr unsigned long kRadekStubCount = {pool}UL;",
-        "std::atomic<unsigned long long> gRadekStubCalls[kRadekStubCount]{};",
-        "template <int Slot>",
+        f"constexpr unsigned long kRadekStubCount = {count}UL;",
+        f"std::atomic<unsigned long long> gRadekStubCalls[{pool}]{{}};",
+        "template <std::size_t Slot>",
         "void radekStubTrampoline() {",
         "    gRadekStubCalls[Slot].fetch_add(1, std::memory_order_relaxed);",
         "}",
-        "template <std::size_t... Slot>",
-        "auto radekStubTable(std::index_sequence<Slot...>) -> std::array<void (*)(), sizeof...(Slot)> {",
-        "    return {{&radekStubTrampoline<Slot>...}};",
+        f"void (*gRadekStubTable[{pool}])();",
+        "template <std::size_t Slot>",
+        "void radekSeedOne() {",
+        "    if constexpr (Slot < kRadekStubCount)",
+        "        gRadekStubTable[Slot] = &radekStubTrampoline<Slot>;",
         "}",
-        f"const std::array<void (*)(), {pool}> kRadekStubTable = "
-        f"radekStubTable(std::make_index_sequence<{pool}>{{}});",
+        "template <std::size_t Base, std::size_t... Off>",
+        "void radekSeedChunk(std::index_sequence<Off...>) {",
+        "    (radekSeedOne<Base + Off>(), ...);",
+        "}",
+        "template <std::size_t... Chunk>",
+        "void radekSeedAll(std::index_sequence<Chunk...>) {",
+        "    (radekSeedChunk<Chunk * 128>(std::make_index_sequence<128>{}), ...);",
+        "}",
+        f"constexpr unsigned long kRadekStubSeedChunks = ({count}UL + 127UL) / 128UL;",
+        "const bool kRadekStubTableSeeded = [] {",
+        "    radekSeedAll(std::make_index_sequence<kRadekStubSeedChunks>{});",
+        "    return true;",
+        "}();",
         "} // namespace",
         "",
     ]
@@ -104,7 +119,7 @@ def _emit_entries(entries: list[tuple[str, str, int, int]]) -> str:
             handler = (
                 f"reinterpret_cast<void (*)()>(&{_VERIFIED_SHIMS[name][0]})"
                 if kind == KIND_VERIFIED
-                else f"kRadekStubTable[{stub_slot}]"
+                else f"gRadekStubTable[{stub_slot}]"
             )
             lines.append(
                 f"    {{{_c_string_literal(name)}, {_c_string_literal(android)}, {kind}, {handler}}},"

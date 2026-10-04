@@ -75,30 +75,35 @@ class CompatLayerTests(unittest.TestCase):
             self.assertFalse(by_name["_glDrawArrays"]["implementationPresent"])
             self._assert_source_compiles_and_resolves(output / "ioscompat")
 
+    @staticmethod
+    def _compile(source_dir: Path, directory: Path) -> Path:
+        library = Path(directory) / "libioscompat.so"
+        subprocess.run(
+            [
+                os.environ.get("CXX", "g++"),
+                "-std=c++17",
+                "-shared",
+                "-fPIC",
+                "-pthread",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-I",
+                str(source_dir),
+                str(source_dir / "libioscompat.cpp"),
+                "-o",
+                str(library),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return library
+
     @unittest.skipUnless(shutil.which(os.environ.get("CXX", "g++")), "C++ compiler unavailable")
     def _assert_source_compiles_and_resolves(self, source_dir: Path):
         with tempfile.TemporaryDirectory() as directory:
-            library = Path(directory) / "libioscompat.so"
-            subprocess.run(
-                [
-                    os.environ.get("CXX", "g++"),
-                    "-std=c++17",
-                    "-shared",
-                    "-fPIC",
-                    "-pthread",
-                    "-Wall",
-                    "-Wextra",
-                    "-Werror",
-                    "-I",
-                    str(source_dir),
-                    str(source_dir / "libioscompat.cpp"),
-                    "-o",
-                    str(library),
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            library = self._compile(source_dir, Path(directory))
             lib = ctypes.CDLL(str(library))
             lib.radek_compat_generated_classify.restype = ctypes.c_char_p
             lib.radek_compat_generated_resolve.restype = ctypes.c_void_p
@@ -143,6 +148,35 @@ class CompatLayerTests(unittest.TestCase):
             self.assertEqual(
                 lib.radek_compat_generated_entry_at(5, darwin, android, kind), -1
             )
+
+    @unittest.skipUnless(shutil.which(os.environ.get("CXX", "g++")), "C++ compiler unavailable")
+    def test_large_registry_seeds_across_multiple_template_chunks(self):
+        # clang rejects folds wider than its nesting limit; the generated source
+        # must stay compilable well beyond one 128-wide chunk.
+        imports = [f"_radek_generated_symbol_{index}" for index in range(300)]
+        imports.append("_CFAbsoluteTimeGetCurrent")
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            report = generate(reconstruction(imports), output)
+            self.assertEqual(report["stubbedHandlers"], 300)
+            library = self._compile(output / "ioscompat", Path(directory))
+            lib = ctypes.CDLL(str(library))
+            lib.radek_compat_generated_classify.restype = ctypes.c_char_p
+            lib.radek_compat_generated_entry_count.restype = ctypes.c_ulong
+            lib.radek_compat_generated_invoke_stub.restype = ctypes.c_longlong
+            lib.radek_compat_generated_stub_call_total.restype = ctypes.c_ulonglong
+            self.assertEqual(lib.radek_compat_generated_entry_count(), 301)
+            self.assertEqual(
+                lib.radek_compat_generated_classify(b"_radek_generated_symbol_299"), b"stubbed"
+            )
+            self.assertEqual(
+                lib.radek_compat_generated_classify(b"_CFAbsoluteTimeGetCurrent"), b"verified"
+            )
+            # A stub from the last seeded chunk resolves and records its call.
+            self.assertEqual(
+                lib.radek_compat_generated_invoke_stub(b"_radek_generated_symbol_299"), 0
+            )
+            self.assertEqual(lib.radek_compat_generated_stub_call_total(), 1)
 
     def test_unsafe_symbol_names_are_never_embedded(self):
         with tempfile.TemporaryDirectory() as directory:

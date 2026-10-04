@@ -45,16 +45,28 @@ template <std::size_t Slot> std::int64_t stubTrampoline() { return noteStubCall(
 
 std::int64_t overflowTrampoline() { return noteStubCall(radek_compat::kStubPoolSize); }
 
-template <std::size_t... Slots>
-void seedTrampolines(std::array<void (*)(), radek_compat::kStubPoolSize> &table,
-                     std::index_sequence<Slots...>) {
-    ((table[Slots] = reinterpret_cast<void (*)()>(&stubTrampoline<Slots>)), ...);
+// Fold expressions are seeded in 128-wide chunks: clang rejects a single fold
+// wider than its expression-nesting limit (256), while g++ accepts it.
+constexpr std::size_t kSeedChunkWidth = 128;
+static_assert(radek_compat::kStubPoolSize % kSeedChunkWidth == 0, "pool must split into chunks");
+
+template <std::size_t Base, std::size_t... Off>
+void seedChunk(std::array<void (*)(), radek_compat::kStubPoolSize> &table,
+               std::index_sequence<Off...>) {
+    ((table[Base + Off] = reinterpret_cast<void (*)()>(&stubTrampoline<Base + Off>)), ...);
+}
+
+template <std::size_t... Chunk>
+void seedAll(std::array<void (*)(), radek_compat::kStubPoolSize> &table,
+             std::index_sequence<Chunk...>) {
+    (seedChunk<Chunk * kSeedChunkWidth>(table, std::make_index_sequence<kSeedChunkWidth>{}), ...);
 }
 
 const std::array<void (*)(), radek_compat::kStubPoolSize> &trampolines() {
     static const std::array<void (*)(), radek_compat::kStubPoolSize> table = [] {
         std::array<void (*)(), radek_compat::kStubPoolSize> filled{};
-        seedTrampolines(filled, std::make_index_sequence<radek_compat::kStubPoolSize>{});
+        seedAll(filled,
+                std::make_index_sequence<radek_compat::kStubPoolSize / kSeedChunkWidth>{});
         return filled;
     }();
     return table;
