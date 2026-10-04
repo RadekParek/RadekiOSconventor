@@ -52,35 +52,41 @@ jobs:
           set -e
           echo "convert exit code: $code (3 = BLOCKED, the expected honest state)"
           # Surface the report before asserting so any failure is diagnosable.
-          python3 - <<'DIAG'
-          import json, pathlib
-          path = pathlib.Path(".local/sample-conversion/report.json")
-          if path.is_file():
-              report = json.load(path.open())
-              keys = ("state", "portProgress", "compatRegistry", "experimentalShell",
-                      "conversionProgress", "error")
-              print(json.dumps({k: report.get(k) for k in keys}, indent=2))
-          else:
-              print("report.json was not written")
-          DIAG
           test "$code" -eq 3  # BLOCKED: honest state, complete-game conversion unsupported
           test -f .local/sample-conversion/libtranslated-entry.so
           test -f .local/sample-conversion/translated-entry.c
           test -f .local/sample-conversion/ioscompat/libioscompat.cpp
           test -f .local/sample-conversion/ioscompat/registry.json
           python3 - <<'EOF'
-          import json
-          report = json.load(open(".local/sample-conversion/report.json"))
-          assert report["state"] == "BLOCKED", report["state"]
-          assert report["portProgress"]["percent"] > 0, report["portProgress"]
-          registry = report["compatRegistry"]
-          assert registry["verifiedImplementations"] == 1, registry
-          assert registry["stubbedHandlers"] == 2, registry
-          assert registry["unresolvedImports"] == 0, registry
-          shell = report["experimentalShell"]
-          assert shell["status"] == "BUILT_NOT_A_GAME", shell
-          assert shell["completeGameConversion"] is False, shell
-          assert report["conversionProgress"]["status"] == "NOT_BUILT", report["conversionProgress"]
+          import json, pathlib, sys
+          path = pathlib.Path(".local/sample-conversion/report.json")
+          if not path.is_file():
+              print("::error::sample conversion report.json was not written")
+              sys.exit(1)
+          report = json.load(path.open())
+          keys = ("state", "portProgress", "compatRegistry", "experimentalShell",
+                  "conversionProgress", "error")
+          diagnostic = {k: report.get(k) for k in keys}
+          print(json.dumps(diagnostic, indent=2))
+          checks = (
+              ("state is BLOCKED", report["state"] == "BLOCKED"),
+              ("translated-byte progress > 0", report["portProgress"]["percent"] > 0),
+              ("1 verified shim", report["compatRegistry"]["verifiedImplementations"] == 1),
+              ("2 stubbed handlers", report["compatRegistry"]["stubbedHandlers"] == 2),
+              ("0 unresolved imports", report["compatRegistry"]["unresolvedImports"] == 0),
+              ("experimental shell built and labelled",
+               report["experimentalShell"]["status"] == "BUILT_NOT_A_GAME"),
+              ("shell never claims game conversion",
+               report["experimentalShell"].get("completeGameConversion") is False),
+              ("complete-game progress stays NOT_BUILT",
+               report["conversionProgress"]["status"] == "NOT_BUILT"),
+          )
+          failed = [label for label, ok in checks if not ok]
+          if failed:
+              shell = report.get("experimentalShell") or {}
+              message = "; ".join(failed) + " | experimentalShell=" + json.dumps(shell)[:1500]
+              print("::error title=sample conversion check failed::" + message)
+              sys.exit(1)
           print("sample conversion honest-status checks passed")
           EOF
       - name: Validate the labelled experimental shell APK

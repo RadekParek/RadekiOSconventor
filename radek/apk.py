@@ -188,6 +188,8 @@ def _generate_debug_keystore(work: Path, log=None) -> tuple[Path, str]:
             "-genkeypair",
             "-keystore",
             keystore,
+            "-storetype",
+            "PKCS12",
             "-alias",
             "radek-experimental",
             "-keyalg",
