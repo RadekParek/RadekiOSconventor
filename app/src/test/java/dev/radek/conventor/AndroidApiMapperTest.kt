@@ -154,13 +154,22 @@ class AndroidApiMapperTest {
         )
 
         // The resolver is only consulted for symbols with no other mapping.
-        assertEquals(listOf("_alSourcePlay", "_glDrawArrays"), registered)
-        assertEquals(1, mapping.getInt("mappedNameCandidates"))
-        assertEquals(2, mapping.getInt("compatStubHandlerCount"))
-        assertEquals(0, mapping.getInt("compatVerifiedHandlerCount"))
-        assertEquals(66, mapping.getInt("compatHandlerCoveragePercent"))
-        assertEquals("DYNAMIC_REGISTRY_REGISTRATION", mapping.getString("compatHandlerResolverStatus"))
-        assertEquals(0, mapping.getInt("unmappedSymbolCount"))
+        assertEquals("resolver must see exactly the otherwise-unmapped symbols", 2, registered.size)
+        assertEquals(
+            "resolver invocations",
+            setOf("_alSourcePlay", "_glDrawArrays"),
+            registered.toSet(),
+        )
+        assertEquals("direct bionic candidates", 1, mapping.getInt("mappedNameCandidates"))
+        assertEquals("stub handler count", 2, mapping.getInt("compatStubHandlerCount"))
+        assertEquals("verified handler count", 0, mapping.getInt("compatVerifiedHandlerCount"))
+        assertEquals("handler coverage percent", 66, mapping.getInt("compatHandlerCoveragePercent"))
+        assertEquals(
+            "resolver status",
+            "DYNAMIC_REGISTRY_REGISTRATION",
+            mapping.getString("compatHandlerResolverStatus"),
+        )
+        assertEquals("unmapped after registration", 0, mapping.getInt("unmappedSymbolCount"))
         // Stubs are triage/resolution coverage, never implementation coverage.
         assertEquals(0, mapping.getInt("implementedTranslationCount"))
         assertEquals(0, mapping.getInt("implementedTranslationCoveragePercent"))
@@ -168,12 +177,12 @@ class AndroidApiMapperTest {
         val items = (0 until mapping.getJSONArray("symbols").length())
             .map { mapping.getJSONArray("symbols").getJSONObject(it) }
         val gl = items.single { it.getString("sourceSymbol") == "_glDrawArrays" }
-        assertEquals("COMPAT_STUB_HANDLER_REGISTERED", gl.getString("classification"))
-        assertEquals("libioscompat.so", gl.getString("targetLibrary"))
-        assertEquals("radek_compat_stub_0", gl.getString("targetSymbol"))
-        assertFalse(gl.getBoolean("implementationCodePresent"))
-        assertFalse(gl.getBoolean("linkedOrRewritten"))
-        assertTrue(gl.getString("reason").contains("does not implement"))
+        assertEquals("gl classification", "COMPAT_STUB_HANDLER_REGISTERED", gl.getString("classification"))
+        assertEquals("gl target library", "libioscompat.so", gl.getString("targetLibrary"))
+        assertEquals("gl target symbol", "radek_compat_stub_0", gl.getString("targetSymbol"))
+        assertFalse("gl must not claim implementation", gl.getBoolean("implementationCodePresent"))
+        assertFalse("gl must not claim linking", gl.getBoolean("linkedOrRewritten"))
+        assertTrue("gl reason states non-implementation", gl.getString("reason").contains("does not implement"))
     }
 
     @Test fun compatResolverExceptionsFallBackToUnmapped() {
