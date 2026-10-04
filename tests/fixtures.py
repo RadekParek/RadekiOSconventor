@@ -143,6 +143,16 @@ def fat(slices, wide=False, little=False):
     return bytes(out)
 
 
+# Fixed timestamp so committed fixture IPAs are byte-for-byte reproducible.
+_FIXED_ZIP_TIME = (2020, 1, 1, 0, 0, 0)
+
+
+def _write(z: zipfile.ZipFile, name: str, data: bytes | str) -> None:
+    info = zipfile.ZipInfo(name, date_time=_FIXED_ZIP_TIME)
+    info.compress_type = zipfile.ZIP_DEFLATED
+    z.writestr(info, data)
+
+
 def ipa(path: Path, executable=None, binary=True, extra=None, icon=True):
     info = {
         "CFBundleExecutable": "Fixture",
@@ -155,15 +165,16 @@ def ipa(path: Path, executable=None, binary=True, extra=None, icon=True):
         "CFBundleIcons": {"CFBundlePrimaryIcon": {"CFBundleIconFiles": ["AppIcon"]}},
     }
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        z.writestr(
+        _write(
+            z,
             "Payload/Fixture.app/Info.plist",
             plistlib.dumps(info, fmt=plistlib.FMT_BINARY if binary else plistlib.FMT_XML),
         )
-        z.writestr("Payload/Fixture.app/Fixture", executable or macho())
+        _write(z, "Payload/Fixture.app/Fixture", executable or macho())
         if icon:
-            z.writestr("Payload/Fixture.app/AppIcon@2x.png", fallback_icon())
-        z.writestr("Payload/Fixture.app/en.lproj/Localizable.strings", '"hello" = "Hello";')
-        z.writestr("Payload/Fixture.app/config.json", '{"fixture":true}')
+            _write(z, "Payload/Fixture.app/AppIcon@2x.png", fallback_icon())
+        _write(z, "Payload/Fixture.app/en.lproj/Localizable.strings", b'"hello" = "Hello";')
+        _write(z, "Payload/Fixture.app/config.json", b'{"fixture":true}')
         for name, content in (extra or {}).items():
-            z.writestr(name, content)
+            _write(z, name, content)
     return path

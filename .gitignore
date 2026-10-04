@@ -5,6 +5,8 @@ __pycache__/
 *.pyc
 local.properties
 *.ipa
+# The committed synthetic sample fixture is byte-reproducible and authorized by design.
+!tests/data/sample-leaf.ipa
 *.apk
 *.keystore
 *.jks
