@@ -95,7 +95,6 @@ class AlignedApkZipTest {
             AlignedApkZip.write(ByteArrayOutputStream(), listOf(AlignedApkZip.Entry("../outside", byteArrayOf(1))))
         }
     }
-}
 
     /**
      * A ZIP extra field length is a 16-bit field. Padding large enough to
@@ -178,3 +177,4 @@ class AlignedApkZipTest {
 
     private fun readU32(input: RandomAccessFile): Long =
         readU16(input).toLong() or (readU16(input).toLong() shl 16)
+}
