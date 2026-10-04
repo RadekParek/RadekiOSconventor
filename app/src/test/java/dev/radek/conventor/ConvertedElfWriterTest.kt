@@ -32,6 +32,7 @@ class ConvertedElfWriterTest {
         header.long                                // e_entry
         val phoff = header.long.toInt()
         val shoff = header.long
+        header.int                                 // e_flags
         assertEquals(64, header.short.toInt())     // e_ehsize
         assertEquals(56, header.short.toInt())     // e_phentsize
         val phnum = header.short.toInt()

@@ -41,9 +41,20 @@ class PlaceholderTemplateAssetTest {
 
         // The launcher DEX must define the contract entry class, and the icon
         // entry path must point at the generated converted icon resource.
-        assertTrue(dex.size > 0x70 && dex[0] == 'd'.code.toByte() && dex[1] == 'e'.code.toByte())
-        assertTrue(String(dex, Charsets.ISO_8859_1).contains("Ldev/radek/generated/MainActivity;"))
-        assertTrue(iconPath.startsWith("res/") && iconPath.endsWith("generated_converted_icon.png"))
+        assertTrue(
+            "classes.dex has a bad header: size=${dex.size} first=${dex.take(8).joinToString { "%02x".format(it) }}",
+            dex.size > 0x70 && dex[0] == 'd'.code.toByte() && dex[1] == 'e'.code.toByte(),
+        )
+        val dexText = String(dex, Charsets.ISO_8859_1)
+        val strings = Regex("[ -~]{12,}").findAll(dexText).map { it.value }.distinct().take(40).toList()
+        assertTrue(
+            "classes.dex does not contain the launcher class descriptor; strings found: $strings",
+            dexText.contains("Ldev/radek/generated/MainActivity;"),
+        )
+        assertTrue(
+            "icon entry path is invalid: '$iconPath'",
+            iconPath.startsWith("res/") && iconPath.endsWith("generated_converted_icon.png"),
+        )
     }
 
     private fun u32(data: ByteArray, offset: Int): Long =
