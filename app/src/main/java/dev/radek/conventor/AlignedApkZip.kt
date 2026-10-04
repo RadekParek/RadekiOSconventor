@@ -127,12 +127,17 @@ internal object AlignedApkZip {
     }
 
     private fun alignmentExtra(dataOffsetWithoutExtra: Long, alignment: Int): ByteArray {
-        val paddingBytes = ((alignment - (dataOffsetWithoutExtra % alignment)) % alignment).toInt()
-        if (paddingBytes == 0) return ByteArray(0)
+        val misaligned = (dataOffsetWithoutExtra % alignment).toInt()
+        if (misaligned == 0) return ByteArray(0)
+        // The extra field itself costs a 4-byte TLV header; reserve room for it so
+        // the payload that follows the extra field lands on the required boundary.
+        var extraTotal = alignment - misaligned
+        if (extraTotal < 4) extraTotal += alignment
+        val paddingBytes = extraTotal - 4
         require(paddingBytes <= 65535) { "stored entry alignment padding exceeds the ZIP extra field limit" }
         // ZIP extra fields are TLV records. Unknown IDs are ignored by Android; this
         // record adds only enough bytes to align the following stored payload.
-        return ByteArray(4 + paddingBytes).also { extra ->
+        return ByteArray(extraTotal).also { extra ->
             extra[0] = (APK_ALIGNMENT_EXTRA_ID and 0xff).toByte()
             extra[1] = (APK_ALIGNMENT_EXTRA_ID ushr 8).toByte()
             extra[2] = (paddingBytes and 0xff).toByte()
