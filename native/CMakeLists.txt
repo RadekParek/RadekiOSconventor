@@ -10,9 +10,10 @@ target_compile_options(radek_analysis PRIVATE -Wall -Wextra -Werror)
 # This is a small, concrete Android compatibility library, not a general Apple
 # framework/runtime. It is linked into the analyzer so its exports can be
 # verified on-device, and is independently reusable by a future game linker.
-add_library(ioscompat SHARED src/apple_time_compat.cpp)
+add_library(ioscompat SHARED src/apple_time_compat.cpp src/ioscompat_registry.cpp)
 target_include_directories(ioscompat PUBLIC include)
 target_compile_options(ioscompat PRIVATE -Wall -Wextra -Werror)
+find_package(Threads REQUIRED)
 
 if(ANDROID)
     add_library(radek SHARED src/jni.cpp)
@@ -31,4 +32,10 @@ else()
     target_compile_options(api-compat-tests PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(api-compat-tests PRIVATE Threads::Threads)
     add_test(NAME api-compat COMMAND api-compat-tests)
+    add_executable(ioscompat-registry-tests tests/ioscompat_registry.cpp src/ioscompat_registry.cpp
+                                            src/apple_time_compat.cpp)
+    target_include_directories(ioscompat-registry-tests PRIVATE include)
+    target_compile_options(ioscompat-registry-tests PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(ioscompat-registry-tests PRIVATE Threads::Threads)
+    add_test(NAME ioscompat-registry COMMAND ioscompat-registry-tests)
 endif()

@@ -25,8 +25,18 @@ subprocess.run(
 )
 subprocess.run([str(out / "runtime-tests")], check=True)
 api_source = root / "native/src/apple_time_compat.cpp"
+registry_source = root / "native/src/ioscompat_registry.cpp"
 subprocess.run(
-    [compiler, *flags, "-shared", "-fPIC", str(api_source), "-o", str(out / "libioscompat.so")],
+    [
+        compiler,
+        *flags,
+        "-shared",
+        "-fPIC",
+        str(api_source),
+        str(registry_source),
+        "-o",
+        str(out / "libioscompat.so"),
+    ],
     check=True,
 )
 subprocess.run(
@@ -41,4 +51,19 @@ subprocess.run(
     check=True,
 )
 subprocess.run([str(out / "api-compat-tests")], check=True)
-print("Native analyzer, portable runtime, and Apple time API compatibility tests passed")
+subprocess.run(
+    [
+        compiler,
+        *flags,
+        str(root / "native/tests/ioscompat_registry.cpp"),
+        str(registry_source),
+        str(api_source),
+        "-o",
+        str(out / "ioscompat-registry-tests"),
+    ],
+    check=True,
+)
+subprocess.run([str(out / "ioscompat-registry-tests")], check=True)
+print(
+    "Native analyzer, portable runtime, Apple time API, and compatibility registry tests passed"
+)

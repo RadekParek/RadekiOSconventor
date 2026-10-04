@@ -1,3 +1,4 @@
+#include "ioscompat_registry.hpp"
 #include "macho.hpp"
 #include <jni.h>
 #include <dlfcn.h>
@@ -147,4 +148,47 @@ extern "C" JNIEXPORT jstring JNICALL Java_dev_radek_conventor_NativeBridge_findI
     std::string result = "libioscompat.so:";
     result += target;
     return env->NewStringUTF(result.c_str());
+}
+
+// --- Dynamic compatibility-registry bridge (libioscompat.so registry) -------
+// Classification is honest by construction: "verified:<symbol>" identifies one
+// of the tested implementation bodies; "stubbed:<trampoline>" identifies an
+// explicitly unimplemented resolution handler and nothing else.
+
+extern "C" JNIEXPORT jboolean JNICALL Java_dev_radek_conventor_NativeBridge_compatRegisterStub(
+    JNIEnv *env, jobject, jstring symbol) {
+    if (!symbol) return JNI_FALSE;
+    const char *name = env->GetStringUTFChars(symbol, nullptr);
+    if (!name) return JNI_FALSE; // JNI has already raised an exception.
+    const bool registered = radek_compat::registerStub(name);
+    env->ReleaseStringUTFChars(symbol, name);
+    return registered ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jstring JNICALL Java_dev_radek_conventor_NativeBridge_compatClassify(JNIEnv *env, jobject,
+                                                                                            jstring symbol) {
+    if (!symbol) return nullptr;
+    const char *name = env->GetStringUTFChars(symbol, nullptr);
+    if (!name) return nullptr; // JNI has already raised an exception.
+    const radek_compat::Record *record = radek_compat::lookup(name);
+    std::string result;
+    if (record) {
+        result = record->kind == radek_compat::Kind::Verified ? "verified:" : "stubbed:";
+        result += record->androidSymbol;
+    }
+    env->ReleaseStringUTFChars(symbol, name);
+    return result.empty() ? nullptr : env->NewStringUTF(result.c_str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL Java_dev_radek_conventor_NativeBridge_compatSummary(JNIEnv *env, jobject) {
+    std::string json = "{\"verifiedCount\":";
+    json += std::to_string(radek_compat::verifiedCount());
+    json += ",\"stubCount\":";
+    json += std::to_string(radek_compat::stubCount());
+    json += ",\"stubPoolSize\":";
+    json += std::to_string(radek_compat::kStubPoolSize);
+    json += ",\"stubCallTotal\":";
+    json += std::to_string(radek_compat::stubCallTotal());
+    json += "}";
+    return env->NewStringUTF(json.c_str());
 }

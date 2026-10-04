@@ -12,3 +12,8 @@ RADEK_ANALYZER="$PWD/.local/bin/radek-macho-sanitized" \
   -fsanitize=address,undefined -fno-omit-frame-pointer -no-pie \
   -I native/include native/tests/runtime.cpp -o .local/bin/runtime-sanitized
 .local/bin/runtime-sanitized
+"${CXX:-g++}" -std=c++17 -g -O1 -pthread -Wall -Wextra -Werror \
+  -fsanitize=address,undefined -fno-omit-frame-pointer -no-pie \
+  -I native/include native/tests/ioscompat_registry.cpp native/src/ioscompat_registry.cpp \
+  native/src/apple_time_compat.cpp -o .local/bin/ioscompat-registry-sanitized
+.local/bin/ioscompat-registry-sanitized
