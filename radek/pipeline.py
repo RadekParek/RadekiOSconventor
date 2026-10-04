@@ -107,6 +107,19 @@ class Pipeline:
                     f"experimental shell APK was not built ({exc})."
                 ),
             }
+        try:
+            return self._build_experimental_shell_with(tools, work, program)
+        except Exception as exc:  # noqa: BLE001 - honest failure record, pipeline continues
+            return {
+                "status": "FAILED_TO_BUILD",
+                "completeGameConversion": False,
+                "message": (
+                    f"Experimental shell build failed: {type(exc).__name__}: {exc}. Nothing was "
+                    "claimed as built."
+                ),
+            }
+
+    def _build_experimental_shell_with(self, tools, work: Path, program) -> dict:
         artifacts: dict[str, tuple[str, bytes]] = {}
         candidates = [
             ("libtranslated-entry.so", "native-code"),
@@ -134,22 +147,12 @@ class Pipeline:
             "translatedSourceBytes": program.source_size,
             "translatedPercent": self.report.get("portProgress", {}).get("percent", 0),
         }
-        try:
-            result = build_experimental_shell(work, self.output, tools, provenance, artifacts, log=self.log)
-            self.log(
-                "PACKAGING",
-                "Built, aligned and signed the labelled experimental shell APK (not a game conversion)",
-            )
-            return result
-        except Exception as exc:  # noqa: BLE001 - honest failure record, pipeline continues
-            return {
-                "status": "FAILED_TO_BUILD",
-                "completeGameConversion": False,
-                "message": (
-                    f"Experimental shell build failed: {type(exc).__name__}: {exc}. Nothing was "
-                    "claimed as built."
-                ),
-            }
+        result = build_experimental_shell(work, self.output, tools, provenance, artifacts, log=self.log)
+        self.log(
+            "PACKAGING",
+            "Built, aligned and signed the labelled experimental shell APK (not a game conversion)",
+        )
+        return result
 
     def save(self, force: bool = False):
         # Progress can arrive faster than the report needs to be rewritten; every

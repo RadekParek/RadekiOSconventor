@@ -2,6 +2,7 @@ import hashlib
 import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 from pathlib import Path
 from radek.apk import (
@@ -431,3 +432,78 @@ class ExperimentalShellTests(unittest.TestCase):
                     "assets/conversion-metadata.json", json.dumps(self._metadata())
                 )
             self.assertEqual(validate_experimental_shell(apk)["status"], "INVALID")
+
+
+class ExperimentalShellBuildSimulationTests(unittest.TestCase):
+    """Exercise the full build_experimental_shell glue with simulated tools.
+
+    Each tool invocation is faked just enough to produce the artifacts the
+    next stage consumes, so the Python-side wiring (aapt2 link output
+    handling, javac/d8 sequencing, zip append, zipalign/apksigner calls and
+    self-validation) runs exactly as in CI.
+    """
+
+    def test_simulated_toolchain_builds_and_self_validates_shell(self):
+        import json
+        import shutil
+
+        from radek import apk as apk_module
+        from radek.apk import Toolchain, build_experimental_shell
+        from tests.test_dex import dex
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sdk = root / "sdk"
+            build = sdk / "build-tools" / "35.0.0"
+            build.mkdir(parents=True)
+            platform = sdk / "platforms" / "android-35"
+            platform.mkdir(parents=True)
+            (platform / "android.jar").write_bytes(b"fake")
+            for name in ("aapt2", "zipalign", "apksigner", "d8"):
+                (build / name).write_text("#!/bin/sh\nexit 0\n")
+                (build / name).chmod(0o755)
+            tools = Toolchain(sdk, build)
+            calls = []
+
+            def fake_run(args, log=None, timeout=180):
+                calls.append([str(a) for a in args])
+                argv = [str(a) for a in args]
+                tool = Path(argv[0]).name
+                if tool == "aapt2" and "link" in argv:
+                    out = Path(argv[argv.index("-o") + 1])
+                    gen = Path(argv[argv.index("--java") + 1])
+                    with zipfile.ZipFile(out, "w") as package:
+                        package.writestr("AndroidManifest.xml", b"<binary/>")
+                        package.writestr("resources.arsc", b"\x00")
+                    (gen / "dev" / "radek" / "experimental" / "shell").mkdir(parents=True)
+                    (gen / "dev" / "radek" / "experimental" / "shell" / "R.java").write_text(
+                        "package dev.radek.experimental.shell; final class R {}"
+                    )
+                elif tool == "d8":
+                    out = Path(argv[argv.index("--output") + 1])
+                    (out / "classes.dex").write_bytes(bytes(dex()))
+                elif tool == "zipalign":
+                    shutil.copyfile(argv[-2], argv[-1])
+                elif tool == "apksigner" and "sign" in argv:
+                    shutil.copyfile(argv[-1], Path(argv[argv.index("--out") + 1]))
+                elif tool == "apksigner" and "verify" in argv:
+                    pass
+                return ""
+
+            with patch.object(apk_module, "run", side_effect=fake_run):
+                result = build_experimental_shell(
+                    root / "work",
+                    root / "out",
+                    tools,
+                    {"targetAbi": "arm64-v8a"},
+                    {"libtranslated-entry.so": ("native-code", b"\x7fELF-test")},
+                )
+        self.assertEqual(result["status"], "BUILT_NOT_A_GAME")
+        self.assertEqual(result["contract"], "experimental-shell-v1")
+        self.assertTrue(result["validation"]["status"] == "VALID")
+        tool_names = [Path(c[0]).name for c in calls]
+        for expected in ("aapt2", "javac", "d8", "zipalign", "apksigner"):
+            self.assertIn(expected, tool_names)
+        self.assertIn("keytool", tool_names)
+        # keytool runs before apksigner sign
+        self.assertLess(tool_names.index("keytool"), len(tool_names) - 1 - tool_names[::-1].index("apksigner"))

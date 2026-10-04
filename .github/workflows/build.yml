@@ -50,6 +50,19 @@ jobs:
           python3 -m radek convert tests/data/sample-leaf.ipa --authorized --output .local/sample-conversion
           code=$?
           set -e
+          echo "convert exit code: $code (3 = BLOCKED, the expected honest state)"
+          # Surface the report before asserting so any failure is diagnosable.
+          python3 - <<'DIAG'
+          import json, pathlib
+          path = pathlib.Path(".local/sample-conversion/report.json")
+          if path.is_file():
+              report = json.load(path.open())
+              keys = ("state", "portProgress", "compatRegistry", "experimentalShell",
+                      "conversionProgress", "error")
+              print(json.dumps({k: report.get(k) for k in keys}, indent=2))
+          else:
+              print("report.json was not written")
+          DIAG
           test "$code" -eq 3  # BLOCKED: honest state, complete-game conversion unsupported
           test -f .local/sample-conversion/libtranslated-entry.so
           test -f .local/sample-conversion/translated-entry.c

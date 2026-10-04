@@ -226,6 +226,7 @@ def build_experimental_shell(
     android_jar = _android_jar(tools)
     build = work / "experimental-shell-build"
     build.mkdir(parents=True, exist_ok=True)
+    output.mkdir(parents=True, exist_ok=True)
 
     compiled = build / "compiled-res.zip"
     run([tools.tool("aapt2"), "compile", "--dir", sources / "res", "-o", compiled], log=log)
