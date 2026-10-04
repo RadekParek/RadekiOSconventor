@@ -199,7 +199,14 @@ class PipelineTests(unittest.TestCase):
         self.assertFalse(result["leafTranslationAssessment"]["apkProduced"])
         self.assertEqual(result["apiTranslation"]["generatedApiReplacements"], 0)
         self.assertFalse(result["apiTranslation"]["codeGenerated"])
-        self.assertFalse(list((self.root / "job").glob("*.apk")))
+        # Convert never emits a game APK. The only package that may exist is the
+        # labelled experimental shell, and only if it passes its own contract.
+        from radek.apk import validate_experimental_shell
+
+        for apk in (self.root / "job").glob("*.apk"):
+            self.assertEqual(apk.name, "experimental-shell.apk")
+            self.assertEqual(validate_experimental_shell(apk)["status"], "VALID")
+            self.assertEqual(result["experimentalShell"]["status"], "BUILT_NOT_A_GAME")
 
     def test_embedded_framework_graph(self):
         main = macho(dependencies=["@executable_path/Frameworks/Embedded.framework/Embedded"])
