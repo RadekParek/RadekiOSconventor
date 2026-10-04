@@ -367,6 +367,9 @@ class ExperimentalShellTests(unittest.TestCase):
         self.assertIn("no game code is translated", EXPERIMENTAL_SHELL_NOTICE.lower())
         self.assertIn("shell_notice", activity)
         self.assertIn("Radek Experimental Shell", strings)
+        # aapt2 rejects unescaped apostrophes; the notice contains one (IPA's).
+        self.assertIn("\\'", strings)
+        self.assertNotIn("IPA's", strings)
 
     def test_valid_shell_zip_passes_sdk_free_checks(self):
         from radek.apk import validate_experimental_shell

@@ -128,10 +128,15 @@ _EXPERIMENTAL_MANIFEST = """<?xml version="1.0" encoding="utf-8"?>
 
 _EXPERIMENTAL_STRINGS = """<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Radek Experimental Shell</string>
+    <string name="app_name">{app_name}</string>
     <string name="shell_notice">{notice}</string>
 </resources>
 """
+
+
+def _android_string_escape(value: str) -> str:
+    """Escape a value for an Android <string> resource (aapt2 rules)."""
+    return value.replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"')
 
 _EXPERIMENTAL_ACTIVITY = """package dev.radek.experimental.shell;
 
@@ -163,7 +168,11 @@ def experimental_shell_sources(work: Path) -> Path:
         _EXPERIMENTAL_MANIFEST.format(package=EXPERIMENTAL_SHELL_PACKAGE), encoding="utf-8"
     )
     (root / "res" / "values" / "strings.xml").write_text(
-        _EXPERIMENTAL_STRINGS.format(notice=EXPERIMENTAL_SHELL_NOTICE), encoding="utf-8"
+        _EXPERIMENTAL_STRINGS.format(
+            app_name=_android_string_escape("Radek Experimental Shell"),
+            notice=_android_string_escape(EXPERIMENTAL_SHELL_NOTICE),
+        ),
+        encoding="utf-8",
     )
     (root / "src" / "ExperimentalShellActivity.java").write_text(
         _EXPERIMENTAL_ACTIVITY, encoding="utf-8"
