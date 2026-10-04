@@ -72,8 +72,9 @@ internal object InstallAudit {
         } else if (activities.none { it.exported }) {
             blockers += "no exported activity was parsed from this APK, so Android cannot launch it"
         }
-        if (parsed.providers.orEmpty().isNotEmpty()) {
-            warnings += "the APK declares ${parsed.providers.size} content provider(s); a duplicate authority on this device blocks installation"
+        val declaredProviders = parsed.providers.orEmpty()
+        if (declaredProviders.isNotEmpty()) {
+            warnings += "the APK declares ${declaredProviders.size} content provider(s); a duplicate authority on this device blocks installation"
         }
 
         blockers += nativeLibraryIssues(apk)

@@ -112,13 +112,11 @@ object SafeZip {
                 val uncompressedTotal = entries.sumOf { it.size }
                 requireStorage(destination, uncompressedTotal + source.length())
                 val names = mutableSetOf<String>()
-                var total = 0L
                 var extractedBytes = 0L
                 entries.forEachIndexed { index, entry ->
                     val name = memberName(entry.name)
                     require(names.add(name.lowercase(java.util.Locale.ROOT))) { "duplicate/case-colliding ZIP path" }
                     require(entry.size in 0..MAX_FILE && entry.compressedSize >= 0 && entry.size <= maxOf(1L, entry.compressedSize) * 250) { "ZIP expansion limit" }
-                    total += entry.size
                     val target = File(destination, name)
                     require(target.canonicalPath.startsWith(destination.canonicalPath + File.separator))
                     if (entry.isDirectory) {
