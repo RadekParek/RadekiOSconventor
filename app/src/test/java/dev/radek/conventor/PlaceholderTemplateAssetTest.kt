@@ -32,6 +32,10 @@ class PlaceholderTemplateAssetTest {
         val dex = assets.open("converted-template/classes.dex").use { it.readBytes() }
         val iconPath = assets.open("converted-template/icon-entry-path.txt").use { it.readBytes() }
             .toString(Charsets.UTF_8)
+        val dexManifest = runCatching {
+            assets.open("converted-template/template-dex-entries.txt").use { it.readBytes() }
+                .toString(Charsets.UTF_8)
+        }.getOrDefault("<missing>")
 
         val packageName = "dev.radek.converted.p0123456789abcdef0123"
         val patchedManifest = BinaryXmlManifest.customize(manifest, packageName, "Hello Test")
@@ -46,9 +50,10 @@ class PlaceholderTemplateAssetTest {
             dex.size > 0x70 && dex[0] == 'd'.code.toByte() && dex[1] == 'e'.code.toByte(),
         )
         val dexText = String(dex, Charsets.ISO_8859_1)
-        val strings = Regex("[ -~]{12,}").findAll(dexText).map { it.value }.distinct().take(40).toList()
+        val strings = Regex("[ -~]{12,}").findAll(dexText).map { it.value }.distinct().take(80).toList()
         assertTrue(
-            "classes.dex does not contain the launcher class descriptor; strings found: $strings",
+            "classes.dex does not contain the launcher class descriptor; dex entries: " +
+                "$dexManifest; strings found: $strings",
             dexText.contains("Ldev/radek/generated/MainActivity;"),
         )
         assertTrue(

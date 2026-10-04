@@ -10,8 +10,10 @@ class ConvertedElfWriterTest {
     private val symbol = "Java_dev_radek_generated_MainActivity_runNative"
     private val code = byteArrayOf(0x40, 0x02, 0x80.toByte(), 0x52, 0x21, 0x04, 0x00, 0x11, 0xC0.toByte(), 0x03, 0x5F, 0xD6.toByte())
 
+    // slice() makes absolute get(index) relative to the wrapped offset; without
+    // it ByteBuffer.wrap keeps array-based indices and reads the wrong bytes.
     private fun le(buffer: ByteArray, offset: Int): ByteBuffer =
-        ByteBuffer.wrap(buffer, offset, buffer.size - offset).order(ByteOrder.LITTLE_ENDIAN)
+        ByteBuffer.wrap(buffer, offset, buffer.size - offset).slice().order(ByteOrder.LITTLE_ENDIAN)
 
     @Test
     fun `builds a valid aarch64 ET_DYN with the JNI export`() {

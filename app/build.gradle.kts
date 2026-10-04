@@ -23,7 +23,7 @@ android {
     buildTypes { release { isMinifyEnabled = false } }
 }
 
-fun registerTemplateEmbedTask(module: String, assetDirectory: String, iconFileName: String): TaskProvider<*> {
+fun registerTemplateEmbedTask(module: String, assetDirectory: String, iconFileName: String, launcherClass: String): TaskProvider<*> {
     val templateApkDirectory = project(module).layout.buildDirectory.dir("outputs/apk/debug")
     val generatedAssets = layout.buildDirectory.dir("generated/assets/$assetDirectory")
     return tasks.register("embed${assetDirectory.replace("-", "").replaceFirstChar { it.uppercase() }}") {
@@ -58,6 +58,24 @@ fun registerTemplateEmbedTask(module: String, assetDirectory: String, iconFileNa
                 val iconDestination = File(assetRoot, "fallback-icon.png")
                 template.getInputStream(iconEntry).use { input -> iconDestination.outputStream().use { output -> input.copyTo(output) } }
                 File(assetRoot, "icon-entry-path.txt").writeText(iconEntry.name)
+                // Diagnostics: record every DEX entry of the template APK so the
+                // unit tests can see the exact layout the packager consumes.
+                val dexEntries = template.entries().asSequence()
+                    .filter { it.name.endsWith(".dex") }
+                    .sortedBy { it.name }
+                    .joinToString("\n") { "${it.name}:${it.size}" }
+                File(assetRoot, "template-dex-entries.txt").writeText(dexEntries)
+            }
+            // The on-device packager writes exactly this classes.dex into every
+            // generated APK; fail the build here if the launcher class is absent,
+            // with a string-table dump so the cause is diagnosable.
+            val dexBytes = File(assetRoot, "classes.dex").readBytes()
+            val dexText = String(dexBytes, Charsets.ISO_8859_1)
+            require(dexText.contains(launcherClass)) {
+                val strings = Regex("[ -~]{12,}").findAll(dexText).map { it.value }.distinct().take(100).toList()
+                "$assetDirectory template classes.dex does not define $launcherClass " +
+                    "(apk=${apks.single().name}, dexBytes=${dexBytes.size}); dex entries: " +
+                    File(assetRoot, "template-dex-entries.txt").readText() + "; strings: $strings"
             }
         }
     }.also { task ->
@@ -66,8 +84,8 @@ fun registerTemplateEmbedTask(module: String, assetDirectory: String, iconFileNa
     }
 }
 
-val embedPlaceholderTemplate = registerTemplateEmbedTask(":placeholder-template", "placeholder-template", "generated_placeholder_icon.png")
-val embedConvertedTemplate = registerTemplateEmbedTask(":converted-template", "converted-template", "generated_converted_icon.png")
+val embedPlaceholderTemplate = registerTemplateEmbedTask(":placeholder-template", "placeholder-template", "generated_placeholder_icon.png", "Ldev/radek/generated/GeneratedPlaceholderActivity;")
+val embedConvertedTemplate = registerTemplateEmbedTask(":converted-template", "converted-template", "generated_converted_icon.png", "Ldev/radek/generated/MainActivity;")
 
 // Surface full assertion messages and test stdout in the CI console; the default
 // logging prints only the exception class and source line, which hides values.
