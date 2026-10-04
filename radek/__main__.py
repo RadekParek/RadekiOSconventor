@@ -3,7 +3,7 @@ import json
 import sys
 from pathlib import Path
 from .pipeline import Pipeline
-from .apk import Toolchain, validate_apk
+from .apk import Toolchain, validate_apk, validate_experimental_shell
 
 
 def main():
@@ -24,6 +24,11 @@ def main():
             default="auto",
             help="assessment target ABI; auto prefers ARM64 in a FAT IPA and selects ARMv7 for ARM32-only inputs; no APK is emitted",
         )
+    p = sub.add_parser(
+        "validate-shell",
+        help="validate an honestly labelled experimental shell APK (never a complete-game APK)",
+    )
+    p.add_argument("apk", type=Path)
     p = sub.add_parser("validate")
     p.add_argument("apk", type=Path)
     p.add_argument("--package", required=True)
@@ -41,6 +46,10 @@ def main():
     )
     args = parser.parse_args()
     try:
+        if args.command == "validate-shell":
+            result = validate_experimental_shell(args.apk, Toolchain.discover())
+            print(json.dumps(result, indent=2))
+            return 0 if result["status"] == "VALID" else 1
         if args.command == "validate":
             result = validate_apk(
                 args.apk,

@@ -5,10 +5,12 @@ import json
 import tempfile
 import time
 from pathlib import Path
+from .apk import Toolchain, build_experimental_shell
 from .archive import extract_ipa, discover_app, read_plist, metadata
 from .analysis import analyze, dependency_graph, prove_leaf, capabilities
 from .api_translation import generate as generate_api_replacements
 from .c_backend import emit as emit_c
+from .compat_layer import generate as generate_compat_registry
 from .elf import inspect as inspect_elf
 from .elf_writer import build_shared_object
 from .icons import extract as extract_icon, launcher as launcher_icon
@@ -77,8 +79,77 @@ class Pipeline:
                 "status": "NOT_BUILT",
                 "message": "No complete iOS-to-Android game conversion backend is implemented.",
             },
+            "experimentalShell": {
+                "status": "NOT_ATTEMPTED",
+                "completeGameConversion": False,
+                "message": (
+                    "The honestly labelled experimental shell APK is only attempted on the convert "
+                    "path after isolated translated artifacts exist; it is never a complete-game APK."
+                ),
+            },
         }
         self._last_save = None
+
+    def _attempt_experimental_shell(self, work: Path, program) -> dict:
+        """Try to build the honest experimental shell APK around the artifacts.
+
+        Never raises: a missing toolchain or a failed build is reported as-is.
+        The shell is labelled on screen and in metadata as not being a game.
+        """
+        try:
+            tools = Toolchain.discover()
+        except RuntimeError as exc:
+            return {
+                "status": "SKIPPED_NO_ANDROID_TOOLCHAIN",
+                "completeGameConversion": False,
+                "message": (
+                    "No Android SDK build-tools were available for this run, so the labelled "
+                    f"experimental shell APK was not built ({exc})."
+                ),
+            }
+        artifacts: dict[str, tuple[str, bytes]] = {}
+        candidates = [
+            ("libtranslated-entry.so", "native-code"),
+            ("translated-entry.c", "portable-c"),
+            ("translated-entry.bin", "machine-code"),
+            ("leaf-experiment.ll", "llvm-ir"),
+        ]
+        for relative in sorted(self.output.rglob("*")):
+            if relative.is_dir() or relative.suffix not in {".cpp", ".h", ".json"}:
+                continue
+            if relative.parent.name in {"ioscompat", "api-replacements"}:
+                candidates.append((str(relative.relative_to(self.output)), "compat-source"))
+        for name, kind in candidates:
+            path = self.output / name
+            if not path.is_file() or path.stat().st_size > 8 * 1024 * 1024:
+                continue
+            artifacts[Path(name).name if "/" not in name else name.replace("/", "_")] = (
+                kind,
+                path.read_bytes(),
+            )
+        provenance = {
+            "sourceApplication": self.report.get("application", {}),
+            "targetAbi": program.target_abi,
+            "machineCodeSha256": hashlib.sha256(program.machine_code).hexdigest(),
+            "translatedSourceBytes": program.source_size,
+            "translatedPercent": self.report.get("portProgress", {}).get("percent", 0),
+        }
+        try:
+            result = build_experimental_shell(work, self.output, tools, provenance, artifacts, log=self.log)
+            self.log(
+                "PACKAGING",
+                "Built, aligned and signed the labelled experimental shell APK (not a game conversion)",
+            )
+            return result
+        except Exception as exc:  # noqa: BLE001 - honest failure record, pipeline continues
+            return {
+                "status": "FAILED_TO_BUILD",
+                "completeGameConversion": False,
+                "message": (
+                    f"Experimental shell build failed: {type(exc).__name__}: {exc}. Nothing was "
+                    "claimed as built."
+                ),
+            }
 
     def save(self, force: bool = False):
         # Progress can arrive faster than the report needs to be rewritten; every
@@ -191,6 +262,17 @@ class Pipeline:
                 api_translation = generate_api_replacements(reconstruction, self.output)
                 api_translation["reconstructedApiUseCount"] = self.report["reconstructionSummary"].get("usedApis", 0)
                 self.report["apiTranslation"] = api_translation
+                # Full resolution registry: every observed Darwin import gets a
+                # verified implementation or an explicitly labelled stub handler.
+                # Stub counts are resolution coverage, never implementation coverage.
+                self.report["compatRegistry"] = generate_compat_registry(reconstruction, self.output)
+                self.log(
+                    "ANALYZING",
+                    "Compatibility registry: "
+                    f'{self.report["compatRegistry"].get("verifiedImplementations", 0)} verified '
+                    f'implementation(s), {self.report["compatRegistry"].get("stubbedHandlers", 0)} '
+                    "explicit unimplemented stub handler(s) generated",
+                )
                 try:
                     selected, program = prove_leaf(executable, mach, graph, reconstruction, target_abi)
                 except Unsupported as exc:
@@ -354,6 +436,14 @@ class Pipeline:
                     "assessment does not translate the game's full reachable code, APIs, lifecycle, or assets."
                 )
                 self.report.setdefault("blockers", []).append(blocker)
+                if not analyze_only:
+                    self.report["experimentalShell"] = self._attempt_experimental_shell(work, program)
+                    if self.report["experimentalShell"].get("status") == "BUILT_NOT_A_GAME":
+                        self.report["conversionProgress"]["message"] = (
+                            "No complete-game APK was produced. The isolated translated function and any "
+                            "generated API shims were not linked into a game. A separately labelled "
+                            "experimental shell APK packages the artifacts for inspection only."
+                        )
                 if analyze_only:
                     self.transition(
                         "PARTIAL",

@@ -1,10 +1,18 @@
-"""APK validation utilities; game-APK packaging stays disabled without a full translator."""
+"""APK validation utilities; game-APK packaging stays disabled without a full translator.
+
+A separate, honestly labelled *experimental shell* APK can be built from the
+isolated translated artifacts and the generated compatibility-registry source.
+It carries the ``experimental-shell-v1`` contract, states on screen and in
+metadata that no game code is translated, and can never satisfy the
+``complete-game-v1`` attachment checks.
+"""
 
 from __future__ import annotations
 import hashlib
 import json
 import os
 import re
+import secrets
 import subprocess
 import zipfile
 from dataclasses import dataclass
@@ -13,6 +21,13 @@ from .archive import InputError, safe_name
 from .dex import classes as dex_classes
 
 BUILD_TOOLS = "35.0.0"
+
+EXPERIMENTAL_SHELL_CONTRACT = "experimental-shell-v1"
+EXPERIMENTAL_SHELL_PACKAGE = "dev.radek.experimental.shell"
+EXPERIMENTAL_SHELL_NOTICE = (
+    "Experimental conversion shell. This APK packages isolated analysis artifacts only. "
+    "No game code is translated, no iOS APIs are implemented, and the IPA's game does not run."
+)
 
 
 def artifact_filename(source_name: str | Path) -> str:
@@ -87,6 +102,296 @@ def elf_info(data: bytes) -> dict:
     from .elf import inspect
 
     return inspect(data)
+
+
+# --- Honestly labelled experimental shell APK -------------------------------
+# The shell packages the isolated translated artifacts and the generated
+# compatibility-registry source so they can be inspected on-device. It states
+# what it is in its launcher text and metadata, and it is explicitly not a
+# game conversion.
+
+_EXPERIMENTAL_MANIFEST = """<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="{package}"
+    android:versionCode="1"
+    android:versionName="0.1-experimental">
+    <application android:label="@string/app_name" android:allowBackup="false">
+        <activity android:name=".ExperimentalShellActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+"""
+
+_EXPERIMENTAL_STRINGS = """<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Radek Experimental Shell</string>
+    <string name="shell_notice">{notice}</string>
+</resources>
+"""
+
+_EXPERIMENTAL_ACTIVITY = """package dev.radek.experimental.shell;
+
+import android.app.Activity;
+import android.os.Bundle;
+import android.widget.TextView;
+
+/** Shows the honest status of this package: artifacts only, no game. */
+public final class ExperimentalShellActivity extends Activity {{
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {{
+        super.onCreate(savedInstanceState);
+        TextView text = new TextView(this);
+        text.setPadding(48, 96, 48, 48);
+        text.setTextSize(16f);
+        text.setText(getString(R.string.shell_notice));
+        setContentView(text);
+    }}
+}}
+"""
+
+
+def experimental_shell_sources(work: Path) -> Path:
+    """Write the manifest, resources and launcher source for the shell APK."""
+    root = work / "experimental-shell-src"
+    (root / "res" / "values").mkdir(parents=True, exist_ok=True)
+    (root / "src").mkdir(parents=True, exist_ok=True)
+    (root / "AndroidManifest.xml").write_text(
+        _EXPERIMENTAL_MANIFEST.format(package=EXPERIMENTAL_SHELL_PACKAGE), encoding="utf-8"
+    )
+    (root / "res" / "values" / "strings.xml").write_text(
+        _EXPERIMENTAL_STRINGS.format(notice=EXPERIMENTAL_SHELL_NOTICE), encoding="utf-8"
+    )
+    (root / "src" / "ExperimentalShellActivity.java").write_text(
+        _EXPERIMENTAL_ACTIVITY, encoding="utf-8"
+    )
+    return root
+
+
+def _android_jar(tools: Toolchain) -> Path:
+    platforms = tools.sdk / "platforms"
+    candidates = sorted(platforms.glob("android-*/android.jar")) if platforms.is_dir() else []
+    if not candidates:
+        raise RuntimeError("no Android platform android.jar found under " + str(platforms))
+    return candidates[-1]
+
+
+def _generate_debug_keystore(work: Path, log=None) -> tuple[Path, str]:
+    keystore = work / "experimental-shell.keystore"
+    password = secrets.token_hex(16)
+    run(
+        [
+            "keytool",
+            "-genkeypair",
+            "-keystore",
+            keystore,
+            "-alias",
+            "radek-experimental",
+            "-keyalg",
+            "RSA",
+            "-keysize",
+            "2048",
+            "-validity",
+            "10000",
+            "-storepass",
+            password,
+            "-keypass",
+            password,
+            "-dname",
+            "CN=Radek Experimental Shell (local debug identity)",
+        ],
+        log=log,
+    )
+    return keystore, password
+
+
+def build_experimental_shell(
+    work: Path,
+    output: Path,
+    tools: Toolchain,
+    provenance: dict,
+    artifacts: dict[str, tuple[str, bytes]] | None = None,
+    log=None,
+) -> dict:
+    """Assemble, align and sign the honest experimental shell APK.
+
+    ``artifacts`` maps an APK entry name to ``(kind, payload)``: translated
+    code or compatibility-registry sources produced by this run. Every step
+    uses the real Android toolchain (aapt2, javac, d8, zipalign, apksigner).
+    """
+    sources = experimental_shell_sources(work)
+    android_jar = _android_jar(tools)
+    build = work / "experimental-shell-build"
+    build.mkdir(parents=True, exist_ok=True)
+
+    compiled = build / "compiled-res.zip"
+    run([tools.tool("aapt2"), "compile", "--dir", sources / "res", "-o", compiled], log=log)
+    base_apk = build / "base.apk"
+    gen = build / "gen"
+    run(
+        [
+            tools.tool("aapt2"),
+            "link",
+            "-o",
+            base_apk,
+            "-I",
+            android_jar,
+            "--manifest",
+            sources / "AndroidManifest.xml",
+            "--java",
+            gen,
+            "--min-sdk-version",
+            "21",
+            "--target-sdk-version",
+            "35",
+            compiled,
+        ],
+        log=log,
+    )
+
+    classes = build / "classes"
+    classes.mkdir(parents=True, exist_ok=True)
+    java_sources = [str(sources / "src" / "ExperimentalShellActivity.java")]
+    java_sources += [str(path) for path in sorted(gen.rglob("R.java"))]
+    run(
+        [
+            "javac",
+            "-source",
+            "17",
+            "-target",
+            "17",
+            "-nowarn",
+            "-classpath",
+            android_jar,
+            "-d",
+            classes,
+            *java_sources,
+        ],
+        log=log,
+    )
+    dex_dir = build / "dex"
+    dex_dir.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            tools.tool("d8"),
+            "--min-api",
+            "21",
+            "--lib",
+            android_jar,
+            "--output",
+            dex_dir,
+            *[str(path) for path in sorted(classes.rglob("*.class"))],
+        ],
+        log=log,
+    )
+    dex = dex_dir / "classes.dex"
+    if not dex.is_file():
+        raise RuntimeError("d8 produced no classes.dex")
+
+    metadata = {
+        "contract": EXPERIMENTAL_SHELL_CONTRACT,
+        "generator": "RadekiOSConventor",
+        "honestLabeling": True,
+        "containsGameCode": False,
+        "completeGameConversion": False,
+        "disclosure": EXPERIMENTAL_SHELL_NOTICE,
+        "provenance": provenance,
+        "artifacts": sorted((artifacts or {}).keys()),
+    }
+    aligned = build / "aligned.apk"
+    with zipfile.ZipFile(base_apk, "a", compression=zipfile.ZIP_STORED) as package:
+        package.writestr("classes.dex", dex.read_bytes())
+        package.writestr(
+            "assets/conversion-metadata.json", json.dumps(metadata, indent=2, ensure_ascii=True)
+        )
+        for entry, (kind, payload) in sorted((artifacts or {}).items()):
+            package.writestr(f"assets/{kind}/{entry}", payload)
+    run([tools.tool("zipalign"), "-f", "4", base_apk, aligned], log=log)
+
+    keystore, password = _generate_debug_keystore(build, log=log)
+    final = output / "experimental-shell.apk"
+    run(
+        [
+            tools.tool("apksigner"),
+            "sign",
+            "--ks",
+            keystore,
+            "--ks-pass",
+            "pass:" + password,
+            "--key-pass",
+            "pass:" + password,
+            "--out",
+            final,
+            aligned,
+        ],
+        log=log,
+    )
+    validation = validate_experimental_shell(final, tools)
+    if validation.get("status") != "VALID":
+        raise RuntimeError("experimental shell failed its own validation: " + validation.get("reason", ""))
+    return {
+        "contract": EXPERIMENTAL_SHELL_CONTRACT,
+        "status": "BUILT_NOT_A_GAME",
+        "path": final.name,
+        "sha256": hashlib.sha256(final.read_bytes()).hexdigest(),
+        "sizeBytes": final.stat().st_size,
+        "package": EXPERIMENTAL_SHELL_PACKAGE,
+        "signedWith": "local debug keystore generated for this run",
+        "artifacts": sorted((artifacts or {}).keys()),
+        "validation": validation,
+        "completeGameConversion": False,
+        "message": (
+            "An explicitly labelled experimental shell APK was aligned and signed. It packages the "
+            "isolated translated artifacts and compatibility-registry source for inspection only; "
+            "it contains no translated game and is not a complete-game conversion."
+        ),
+    }
+
+
+def validate_experimental_shell(apk: Path, tools: Toolchain | None = None) -> dict:
+    """Statically validate the honest experimental-shell contract."""
+    if not apk.is_file():
+        return {"status": "INVALID", "reason": "APK file is missing"}
+    try:
+        package = zipfile.ZipFile(apk)
+    except zipfile.BadZipFile:
+        return {"status": "INVALID", "reason": "not a valid zip archive"}
+    with package:
+        names = set(package.namelist())
+        if "classes.dex" not in names:
+            return {"status": "INVALID", "reason": "missing classes.dex launcher bytecode"}
+        if "AndroidManifest.xml" not in names:
+            return {"status": "INVALID", "reason": "missing AndroidManifest.xml"}
+        if "assets/conversion-metadata.json" not in names:
+            return {"status": "INVALID", "reason": "missing conversion metadata"}
+        try:
+            metadata = json.loads(package.read("assets/conversion-metadata.json"))
+        except (ValueError, UnicodeDecodeError):
+            return {"status": "INVALID", "reason": "conversion metadata is not valid JSON"}
+        if metadata.get("contract") != EXPERIMENTAL_SHELL_CONTRACT:
+            return {
+                "status": "INVALID",
+                "reason": "metadata does not declare the experimental-shell-v1 contract",
+            }
+        if metadata.get("honestLabeling") is not True or metadata.get("containsGameCode"):
+            return {"status": "INVALID", "reason": "metadata lacks the honest-labelling disclosure"}
+        if EXPERIMENTAL_SHELL_NOTICE not in metadata.get("disclosure", ""):
+            return {"status": "INVALID", "reason": "metadata disclosure text is missing"}
+        try:
+            dex_classes(package.read("classes.dex"))
+        except Exception as exc:  # noqa: BLE001 - any malformed DEX fails validation closed
+            return {"status": "INVALID", "reason": f"classes.dex failed integrity checks: {exc}"}
+    result = {"status": "VALID", "contract": EXPERIMENTAL_SHELL_CONTRACT, "signatureVerified": False}
+    if tools is not None:
+        try:
+            run([tools.tool("apksigner"), "verify", apk])
+            result["signatureVerified"] = True
+        except RuntimeError as exc:
+            return {"status": "INVALID", "reason": f"apksigner rejected the signature: {exc}"}
+    return result
 
 def _validate_complete_game_metadata(metadata: dict, expected_package: str, target_abi: str) -> dict:
     """Fail closed unless the APK declares full reachable-code/API/resource coverage."""

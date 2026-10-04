@@ -58,6 +58,7 @@ class SliceReconstruction:
     stats: dict = field(default_factory=dict)
     sections: list = field(default_factory=list)
     exports: list = field(default_factory=list)
+    imports: list = field(default_factory=list)
     strings: list = field(default_factory=list)
     error: str | None = None
 
@@ -75,6 +76,10 @@ class SliceReconstruction:
             "sections": self.sections,
             "exportCount": len(self.exports),
             "exports": self.exports[:40],
+            # Observed Darwin import symbols; consumed by the compatibility
+            # registry generator. Bounded so reconstruction.json stays small.
+            "importCount": len(self.imports),
+            "imports": self.imports[:4096],
             "strings": self.strings[:200],
             "error": self.error,
         }
@@ -125,6 +130,7 @@ def reconstruct_slice(path: Path, slice_info: dict, budget: "Budget") -> SliceRe
         item.exports = sorted(
             {str(entry.get("name")) for entry in image.exports if entry.get("name")}
         )
+        item.imports = list(image.imports)
         seen: set[str] = set()
         for function in item.listing:
             for value in function.strings:

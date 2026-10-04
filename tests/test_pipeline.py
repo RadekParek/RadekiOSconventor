@@ -295,3 +295,58 @@ class PipelineTests(unittest.TestCase):
             "iOS lifecycle/input/sensors",
         ):
             self.assertEqual(caps[name], "BLOCKED")
+
+
+class ExperimentalShellPipelineTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def run_fixture(self, **kwargs):
+        source = ipa(self.root / "input.ipa", macho(imports=["_CFAbsoluteTimeGetCurrent", "_glDrawArrays"]))
+        return Pipeline(self.root / "job").run(source, True, **kwargs)
+
+    def test_analyze_never_attempts_shell(self):
+        report = self.run_fixture(analyze_only=True)
+        self.assertEqual(report["experimentalShell"]["status"], "NOT_ATTEMPTED")
+        self.assertEqual(report["state"], "PARTIAL")
+
+    def test_convert_generates_registry_and_skips_shell_without_toolchain(self):
+        with patch.object(
+            pipeline_module.Toolchain, "discover", side_effect=RuntimeError("no sdk")
+        ):
+            report = self.run_fixture(analyze_only=False)
+        self.assertEqual(report["state"], "BLOCKED")
+        registry = report["compatRegistry"]
+        self.assertEqual(registry["verifiedImplementations"], 1)
+        self.assertEqual(registry["stubbedHandlers"], 1)
+        self.assertEqual(registry["handlerResolutionCoveragePercent"], 100.0)
+        self.assertTrue((self.root / "job" / "ioscompat" / "libioscompat.cpp").is_file())
+        self.assertEqual(report["experimentalShell"]["status"], "SKIPPED_NO_ANDROID_TOOLCHAIN")
+        self.assertEqual(report["conversionProgress"]["status"], "NOT_BUILT")
+
+    def test_convert_reports_built_shell_honestly(self):
+        built = {
+            "status": "BUILT_NOT_A_GAME",
+            "contract": "experimental-shell-v1",
+            "path": "experimental-shell.apk",
+            "completeGameConversion": False,
+        }
+        with patch.object(pipeline_module.Toolchain, "discover", return_value=object()):
+            with patch.object(pipeline_module, "build_experimental_shell", return_value=built):
+                report = self.run_fixture(analyze_only=False)
+        self.assertEqual(report["state"], "BLOCKED")
+        self.assertEqual(report["experimentalShell"]["status"], "BUILT_NOT_A_GAME")
+        self.assertIn("experimental shell", report["conversionProgress"]["message"])
+        self.assertNotIn("No APK was produced", report["conversionProgress"]["message"])
+
+    def test_convert_records_failed_shell_build_without_claiming_success(self):
+        with patch.object(pipeline_module.Toolchain, "discover", return_value=object()):
+            with patch.object(
+                pipeline_module, "build_experimental_shell", side_effect=RuntimeError("aapt2 failed")
+            ):
+                report = self.run_fixture(analyze_only=False)
+        self.assertEqual(report["experimentalShell"]["status"], "FAILED_TO_BUILD")
+        self.assertIn("aapt2 failed", report["experimentalShell"]["message"])
+        self.assertEqual(report["conversionProgress"]["status"], "NOT_BUILT")
