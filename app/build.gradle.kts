@@ -64,6 +64,16 @@ val embedPlaceholderTemplate by tasks.registering {
 android.sourceSets.getByName("main").assets.srcDir(generatedPlaceholderAssets)
 tasks.named("preBuild").configure { dependsOn(embedPlaceholderTemplate) }
 
+// Surface full assertion messages and test stdout in the CI console; the default
+// logging prints only the exception class and source line, which hides values.
+tasks.withType<Test> {
+    testLogging {
+        events("failed")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        showStandardStreams = true
+    }
+}
+
 dependencies {
     implementation("com.android.tools.build:apksig:8.7.3")
     testImplementation("junit:junit:4.13.2")
