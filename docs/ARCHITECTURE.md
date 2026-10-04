@@ -6,13 +6,17 @@
   public NDK exports on the current device, dynamically registers explicit compat stub handlers for
   otherwise-unmapped symbols, and clearly separates all of those checks from implementation;
   `SafeZip` handles untrusted extraction; `Plist` handles
-  XML/binary parsing; `NativeBridge` calls C++ through JNI (including the compat-registry bridge);
-  `PlaceholderApkBuilder` customizes, signs and verifies a bundled source-free Android shell;
-  `AndroidApiMapper` separately checks compiled time-shim exports; `ResultProvider` has strict
-  paths for complete-game host APKs and explicitly non-playable placeholder APKs.
-- `placeholder-template/`: minimal Android activity and fallback icon. The converter build extracts
-  only its manifest, resource table, DEX and fallback icon as assets (not the signed template APK);
-  per-import metadata/icon branding is applied only after the user invokes **Force convert to .apk**.
+  XML/binary parsing; `NativeBridge` calls C++ through JNI (including the compat-registry bridge
+  and the bounded-conversion prover `translateTrivial`); `ConvertedApkBuilder` converts IPAs proven
+  to be one closed-integer routine into a signed APK whose translated entry runs through JNI;
+  `PlaceholderApkBuilder` customizes, signs and verifies a bundled source-free Android preview shell
+  for everything else; `AndroidApiMapper` separately checks compiled time-shim exports;
+  `ResultProvider` has strict paths for complete-game host APKs and explicitly non-playable preview APKs.
+- `placeholder-template/`: minimal Android activity and fallback icon for the preview shell, and
+  `converted-template/`: the JNI launcher (`dev.radek.generated.MainActivity`) for bounded
+  conversions. The converter build extracts only each template's manifest, resource table, DEX and
+  fallback icon as assets (not the signed template APKs); per-import metadata/icon branding is
+  applied only after the user invokes **Force convert to .apk**.
 - `native/src/macho.cpp`: host/Android shared C++ Mach-O analyzer. It never executes the input.
   JSON describes source structure, not conversion success.
 - `native/include/runtime.hpp`: experimental portable runtime and storage primitives with host tests.
@@ -61,25 +65,30 @@
 
 The importer's analysis path is:
 
-`IMPORTED → ANALYZING → PARTIAL | BLOCKED | FAILED`
+`IMPORTED → ANALYZING → (CONVERTING → PACKAGING → VALIDATING → READY) | PARTIAL | BLOCKED | FAILED`
+
+The CONVERTING/PACKAGING/VALIDATING stages run only for IPAs inside the bounded complete-conversion
+subset; every other IPA resolves straight to `PARTIAL`, `BLOCKED` or `FAILED`.
 
 - `PARTIAL`: inspection completed and, if the proof succeeds, an isolated translated-entry library
-  and/or reachable time-shim source was emitted. Complete game conversion is not implemented.
+  and/or reachable time-shim source was emitted. General game conversion is not implemented.
 - `BLOCKED`: input protection, unsupported executable semantics or missing conversion capabilities
   prevent a game APK. A restricted integer-entry library may still be emitted, but is not a game.
 - `FAILED`: malformed input, analysis/tool failure or interrupted work.
-- `READY`: reserved for a future complete native game conversion whose APK passes independent
-  static validation. No current IPA-to-game path can enter `READY`.
+- `READY`: entered only when the bounded complete-conversion gate proves the executable is exactly
+  one closed-integer routine and a signed `complete-game-v1` APK was built and statically validated.
 
-The app's **Force convert to .apk** action does not override these states or claim game translation.
-It separately builds a signed placeholder launcher carrying the app name and recovered icon where
-available; its screen says that no game code was translated and that the game will not run. The
-placeholder has its own filename, metadata, progress and provider validation. A host result remains
-shareable/installable only after the `complete-game-v1` contract passes attachment checks; the CLI
-currently emits no such result. The CLI `convert` path may additionally emit
-`experimental-shell.apk` (`experimental-shell-v1`): a signed shell whose launcher and metadata
-disclose that no game code is translated. It is reported in `experimentalShell` separately from
-`conversionProgress`, which stays `NOT_BUILT`.
+The app's **Force convert to .apk** action routes on the on-device proof and never overrides these
+states: proven IPAs are converted into a signed APK whose translated entry runs through JNI;
+everything else gets a separately named, signed preview shell carrying the app name and recovered
+icon where available, whose screen says that no game code was translated and that the game will not
+run. The preview shell has its own filename, metadata, progress and provider validation. A host
+result remains shareable/installable only after the `complete-game-v1` contract passes attachment
+checks; the CLI produces such a result only for the proven bounded subset (see `radek/gamepack.py`).
+The CLI `convert` path may additionally emit `experimental-shell.apk` (`experimental-shell-v1`): a
+signed shell whose launcher and metadata disclose that no game code is translated. It is reported
+in `experimentalShell` separately from `conversionProgress`, which stays `NOT_BUILT` for anything
+outside the bounded subset.
 
 ## Adding real support
 

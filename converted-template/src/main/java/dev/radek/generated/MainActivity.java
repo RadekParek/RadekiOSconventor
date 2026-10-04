@@ -14,25 +14,43 @@ import android.widget.TextView;
 
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 
-/** Minimal, source-free launcher included only in explicitly forced placeholder APKs. */
-public final class GeneratedPlaceholderActivity extends Activity {
+/**
+ * Launcher of a bounded complete-game conversion built on-device.
+ * It shows the message recovered from the IPA and runs the translated
+ * native entry through libconverted.so.
+ */
+public final class MainActivity extends Activity {
+    private static boolean nativeReady = false;
+
+    static {
+        try {
+            System.loadLibrary("converted");
+            nativeReady = true;
+        } catch (Throwable ignored) {
+            // The launcher still shows the recovered message below.
+        }
+    }
+
+    private static native int runNative();
+
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
-    private JSONObject readInfo() {
-        try (InputStream input = getAssets().open("placeholder-info.json")) {
-            java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
-            byte[] buffer = new byte[1024];
+    private JSONObject readMetadata() {
+        try (InputStream input = getAssets().open("conversion.json")) {
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            byte[] buffer = new byte[4096];
             int total = 0;
             while (true) {
                 int count = input.read(buffer);
                 if (count < 0) break;
                 total += count;
-                if (total > 8192) return new JSONObject();
+                if (total > 1048576) return new JSONObject();
                 output.write(buffer, 0, count);
             }
             return new JSONObject(new String(output.toByteArray(), StandardCharsets.UTF_8));
@@ -49,13 +67,13 @@ public final class GeneratedPlaceholderActivity extends Activity {
         }
     }
 
-    private TextView label(String value, int size, int color, boolean bold) {
+    private TextView label(String value, float size, int color, boolean bold) {
         TextView view = new TextView(this);
         view.setText(value);
         view.setTextSize(size);
         view.setTextColor(color);
-        if (bold) view.setTypeface(null, android.graphics.Typeface.BOLD);
         view.setGravity(Gravity.CENTER);
+        if (bold) view.setTypeface(null, android.graphics.Typeface.BOLD);
         view.setPadding(dp(12), dp(8), dp(12), dp(8));
         return view;
     }
@@ -66,51 +84,53 @@ public final class GeneratedPlaceholderActivity extends Activity {
         getWindow().setStatusBarColor(Color.rgb(11, 16, 29));
         getWindow().setNavigationBarColor(Color.rgb(11, 16, 29));
 
-        JSONObject info = readInfo();
-        String gameName = info.optString("gameName", "Imported iOS app");
-        String bundleId = info.optString("bundleId", "");
-        String analysisSummary = info.optString("analysisSummary", "");
-        String iconSource = info.optString("iconSource", "TEMPLATE_FALLBACK");
+        JSONObject metadata = readMetadata();
+        String message = metadata.optString("launchMessage", "Converted by RadekiOSConventor");
+        String appName = metadata.optString("applicationName", "");
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setGravity(Gravity.CENTER_HORIZONTAL);
         root.setBackgroundColor(Color.rgb(11, 16, 29));
-        root.setPadding(dp(24), dp(36), dp(24), dp(36));
+        root.setPadding(dp(24), dp(48), dp(24), dp(48));
 
         Bitmap iconBitmap = readIcon();
         if (iconBitmap != null) {
             ImageView icon = new ImageView(this);
             icon.setImageBitmap(iconBitmap);
             icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            icon.setContentDescription(gameName + " icon");
-            root.addView(icon, new LinearLayout.LayoutParams(dp(128), dp(128)));
+            root.addView(icon, new LinearLayout.LayoutParams(dp(96), dp(96)));
         }
-        root.addView(label(gameName, 25, Color.WHITE, true),
+
+        root.addView(label(message, 26, Color.WHITE, true),
                 new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        if (!bundleId.isEmpty()) {
-            root.addView(label(bundleId, 13, Color.rgb(160, 178, 199), false),
-                    new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        }
-        root.addView(label("Installable preview shell APK", 18, Color.rgb(92, 227, 181), true),
-                new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        String iconNote = "RECOVERED_IPA_ICON".equals(iconSource)
-                ? "Original IPA icon recovered."
-                : ("GENERATED_APP_NAME_ICON".equals(iconSource) ? "Generated name-based icon; original icon unavailable." : "Fallback icon; original icon unavailable.");
-        root.addView(label(iconNote, 12, Color.rgb(160, 178, 199), false),
-                new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        root.addView(label(
-                "This APK contains the app name, icon, and static-analysis summary only. The iOS executable and game assets were not translated or included, so the game will not run.",
-                15, Color.rgb(210, 219, 230), false),
-                new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        if (!analysisSummary.isEmpty()) {
-            root.addView(label(analysisSummary, 12, Color.rgb(160, 178, 199), false),
+        if (!appName.isEmpty()) {
+            root.addView(label(appName, 14, Color.rgb(160, 178, 199), false),
                     new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
 
+        String nativeLine;
+        if (nativeReady) {
+            try {
+                nativeLine = "Translated iOS entry executed on Android, returned: " + runNative();
+            } catch (Throwable error) {
+                nativeLine = "Translated native entry did not run: " + error;
+            }
+        } else {
+            nativeLine = "Translated native library could not be loaded on this device.";
+        }
+        root.addView(label(nativeLine, 13, Color.rgb(92, 227, 181), false),
+                new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(label(
+                "Bounded complete conversion of one statically proven entry routine. "
+                        + "Generated by RadekiOSConventor from an authorized IPA.",
+                12, Color.rgb(160, 178, 199), false),
+                new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
         setContentView(root);
         try {
-            setTaskDescription(new ActivityManager.TaskDescription(gameName, iconBitmap, Color.rgb(11, 16, 29)));
+            setTaskDescription(new ActivityManager.TaskDescription(appName.isEmpty() ? "Converted IPA" : appName,
+                    iconBitmap, Color.rgb(11, 16, 29)));
         } catch (Exception ignored) {
             // The launcher's package icon remains available even when recents icon metadata is unsupported.
         }

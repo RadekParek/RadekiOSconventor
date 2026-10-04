@@ -14,6 +14,7 @@ subprocess.run(
         compiler,
         *flags,
         str(root / "native/src/macho.cpp"),
+        str(root / "native/src/trivial.cpp"),
         str(root / "native/src/main.cpp"),
         "-o",
         str(out / "radek-macho"),
@@ -24,6 +25,19 @@ subprocess.run(
     [compiler, *flags, str(root / "native/tests/runtime.cpp"), "-o", str(out / "runtime-tests")], check=True
 )
 subprocess.run([str(out / "runtime-tests")], check=True)
+subprocess.run(
+    [
+        compiler,
+        *flags,
+        str(root / "native/src/macho.cpp"),
+        str(root / "native/src/trivial.cpp"),
+        str(root / "native/tests/trivial.cpp"),
+        "-o",
+        str(out / "trivial-tests"),
+    ],
+    check=True,
+)
+subprocess.run([str(out / "trivial-tests")], check=True)
 api_source = root / "native/src/apple_time_compat.cpp"
 registry_source = root / "native/src/ioscompat_registry.cpp"
 subprocess.run(

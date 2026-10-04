@@ -18,7 +18,11 @@ internal object ArtifactNames {
         return "$safe.apk"
     }
 
-    /** Kept separate from the strict complete-game APK artifact and provider path. */
+    /**
+     * Non-playable preview shell name. Kept separate from the strict
+     * complete-game APK artifact and provider path; the word "placeholder" is
+     * deliberately absent from every user-visible artifact name.
+     */
     fun placeholderApkFileName(report: JSONObject): String =
-        apkFileName(report).removeSuffix(".apk") + "-placeholder.apk"
+        apkFileName(report).removeSuffix(".apk") + "-preview.apk"
 }

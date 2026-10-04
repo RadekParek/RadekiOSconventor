@@ -1,14 +1,16 @@
 # Support matrix and conversion contract
 
 “Supported” refers only to the operation listed. Inspection or candidate analysis is not evidence
-that an iOS app can be converted. The host now emits a real standalone Android library for one
-proven integer entry function and contains four concrete time API shims, but no complete
-iOS-to-Android game translator. The Android importer can build a separately identified installable
-placeholder, but not a playable or complete-game APK.
+that an iOS app can be converted. The host emits a real standalone Android library for one proven
+integer entry function, contains four concrete time API shims, and converts IPAs whose whole
+executable is proven to be exactly that one routine into signed `complete-game-v1` APKs (bounded
+subset only — no general iOS-to-Android game translator exists). The Android importer converts the
+same proven subset on-device and otherwise builds a separately identified, explicitly non-playable
+preview shell.
 
 | Area | Status | Contract / limitation |
 |---|---|---|
-| IPA archive, plist, icon inspection | PARTIAL | Bounded, authorized, offline inspection; source retained in Android private storage until entry deletion. No original IPA is embedded in any APK |
+| IPA archive, plist, icon inspection | PARTIAL | Bounded, authorized, offline inspection; source retained in Android private storage until entry deletion. The IPA archive itself is never embedded; bounded conversions package the bundle's static resources verbatim with a hashed inventory |
 | Icons (host inspection) | PARTIAL | Info.plist names, scale/device variants, compiled `Assets.car` raster renditions, then ranked loose images; unsupported formats are reported, not fabricated |
 | Icons (Android library) | PARTIAL | Plist/scale variants, supported compiled `Assets.car` raster renditions, then ranked PNG/JPEG resources. Force uses the recovered icon for the placeholder where available and records generated/fallback icon use otherwise |
 | Mach-O thin/FAT/FAT64 | SUPPORTED | CPU/subtype, endian headers, bounded load-command/section/symbol parsing |
@@ -26,11 +28,12 @@ placeholder, but not a playable or complete-game APK.
 | Actual iOS-to-Android API replacements | PARTIAL (four time APIs) | Bionic-backed shims implement `CFAbsoluteTimeGetCurrent`, `CACurrentMediaTime`, `mach_absolute_time`, and `mach_timebase_info`; host tests execute their behavior. Imports reached through resolved internal calls from the selected entry can generate shim source, but no Mach-O callsite is rewritten and no shim is linked into a game/APK |
 | Objective-C binary ABI / Swift | BLOCKED | The experimental portable runtime is not Apple's ABI/runtime and is not linked into game outputs |
 | UIKit, Foundation, graphics, audio, input, lifecycle | BLOCKED | No complete compatibility providers or game lifecycle/input translations exist |
-| Resources | PARTIAL | Icons and bundle resources can be inventoried/read for analysis. The placeholder includes app metadata, icon and a static-analysis summary only; no game assets are translated or packaged |
+| Resources | PARTIAL | Icons and bundle resources can be inventoried/read for analysis. Preview shells include app metadata, icon and a static-analysis summary only; bounded conversions package static bundle resources verbatim under `assets/bundle/` with a hashed inventory; no gameplay assets are translated |
 | Importer APK | SUPPORTED | Gradle builds the Android library/import/analyzer app for ARM64 devices |
-| Complete-game APK packaging | DISABLED | The former closed-integer launcher wrapper was a partial test artifact, not a complete game. `build_apk` refuses to emit it; the host CLI has no complete-game producer |
-| Android placeholder APK | SUPPORTED (explicitly non-playable) | User-triggered on-device builder signs a branded shell with the IPA app name and available icon. No iOS executable or translated game code is included; separate metadata, filename and provider checks prevent it from satisfying the complete-game host contract |
-| Host APK attachment | CONTRACT-ONLY | The app accepts only `complete-game-v1` evidence with source/ABI/API/resource/lifecycle checks. No current repository converter produces this contract |
+| Complete-game APK packaging | BOUNDED SUBSET | `radek/gamepack.py` builds signed `complete-game-v1` APKs only for IPAs whose whole executable is statically proven to be one closed-integer routine with zero imports/metadata; anything else fails closed (`build_apk` still refuses the former partial launcher wrapper) |
+| Android preview shell APK | SUPPORTED (explicitly non-playable) | User-triggered on-device builder signs a branded shell with the IPA app name and available icon. No iOS executable or translated game code is included; separate metadata, filename and provider checks prevent it from satisfying the complete-game host contract |
+| Android bounded conversion APK | SUPPORTED (runtime NOT_TESTED) | For IPAs proven on-device to be one closed-integer routine, the builder translates the entry into `libconverted.so` (JNI) and signs a launcher APK under the same `complete-game-v1` contract |
+| Host APK attachment | CONTRACT-ONLY | The app accepts only `complete-game-v1` evidence with source/ABI/API/resource/lifecycle checks; the host CLI and on-device converter produce it for the bounded subset only |
 | APK static validation | SUPPORTED | The validator checks the importer APK; game APK validation additionally requires the complete-game contract, generated API implementation evidence, provenance and ABI checks |
 | Android runtime/device validation | NOT TESTED | Static checks cannot prove execution or gameplay; reports say `NOT_TESTED` |
 
@@ -106,6 +109,8 @@ The `complete-game-v1` attachment gate rejects the old `closed-integer-entry-v1`
 host evidence for full reachable-function translation, complete reachable API accounting and
 linked implementation artifacts, complete resource/lifecycle claims, ABI/package/source identity,
 original icon hash when recovered, APK signature/package parsing, and exclusion of the original IPA
-and Apple executable assets. This metadata is not a substitute for behavioral testing. The current
-host pipeline has no producer for this contract, so no game APK can be attached from repository
-outputs today.
+and Apple executable assets. This metadata is not a substitute for behavioral testing. The host
+pipeline produces this contract only for the proven bounded subset — an executable statically proven
+to be exactly one closed-integer routine with no imports, dependencies, fixups or runtime metadata
+(`radek/gamepack.py`, exercised in CI by `tests/data/hello-test.ipa`). Everything else stays
+`NOT_BUILT`, and on-device the same contract is produced by the bounded converter for proven IPAs.

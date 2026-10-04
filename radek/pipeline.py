@@ -5,9 +5,15 @@ import json
 import tempfile
 import time
 from pathlib import Path
-from .apk import Toolchain, build_experimental_shell
+from .apk import Toolchain, artifact_filename, build_experimental_shell
 from .archive import extract_ipa, discover_app, read_plist, metadata
 from .analysis import analyze, dependency_graph, prove_leaf, capabilities
+from .gamepack import (
+    assess_complete_conversion,
+    build_complete_game,
+    complete_game_metadata,
+    validate_complete_game,
+)
 from .api_translation import generate as generate_api_replacements
 from .c_backend import emit as emit_c
 from .compat_layer import generate as generate_compat_registry
@@ -153,6 +159,130 @@ class Pipeline:
             "Built, aligned and signed the labelled experimental shell APK (not a game conversion)",
         )
         return result
+
+    def _attempt_complete_conversion(self, work, ipa, program, selected, assessment) -> dict | None:
+        """Convert a proven bounded-subset IPA into a complete-game-v1 APK.
+
+        Returns the finished report on success, or None when no Android
+        toolchain is available (the run then falls through to the honest
+        BLOCKED state). Build or validation failures raise and become FAILED:
+        an eligible IPA is never silently downgraded to a fake success.
+        """
+        self.transition(
+            "CONVERTING",
+            "IPA verified inside the bounded complete-conversion subset: one proven entry routine "
+            "covers all reachable code and no APIs, resources or lifecycle remain unhandled",
+        )
+        self.report["conversionProgress"] = {
+            "percent": 30,
+            "stage": "CONVERTING",
+            "status": "RUNNING",
+            "message": "All reachable code is proven; generating the Android launcher and native entry.",
+        }
+        try:
+            tools = Toolchain.discover()
+        except RuntimeError as exc:
+            self.report["completeConversion"] = {
+                "status": "ELIGIBLE_NO_ANDROID_TOOLCHAIN",
+                "completeGameConversion": False,
+                "message": (
+                    "This IPA passed every bounded complete-conversion check, but no Android SDK "
+                    f"build-tools were available to assemble the APK ({exc}). Nothing was claimed "
+                    "as built."
+                ),
+            }
+            return None
+        source_sha256 = self.report["application"]["sha256"]
+        metadata = complete_game_metadata(
+            self.report["application"],
+            source_sha256,
+            program.target_abi,
+            program.machine_code,
+            assessment["resourceInventory"],
+            assessment["launchMessage"],
+        )
+        self.report["conversionProgress"] = {
+            "percent": 55,
+            "stage": "PACKAGING",
+            "status": "RUNNING",
+            "message": "Compiling the Android launcher, packaging resources and the translated entry.",
+        }
+        self.transition("PACKAGING", "Assembling, aligning and signing the bounded complete-game APK")
+        final_path = self.output / artifact_filename(ipa.name)
+        build_result = build_complete_game(
+            work,
+            final_path,
+            tools,
+            metadata,
+            program.machine_code,
+            program.output_architecture,
+            assessment["resourcePayloads"],
+            log=self.log,
+        )
+        self.report["conversionProgress"] = {
+            "percent": 85,
+            "stage": "VALIDATING",
+            "status": "RUNNING",
+            "message": "Running the strict complete-game static validation over the signed APK.",
+        }
+        self.transition("VALIDATING", "Validating the signed complete-game APK")
+        validation = validate_complete_game(
+            final_path, tools, metadata, expected_abi=program.target_abi, log=self.log
+        )
+        if validation.get("status") != "PASSED":
+            raise RuntimeError("bounded complete-game APK failed its own static validation")
+        self.report["completeConversion"] = {
+            "status": "COMPLETE",
+            "contract": "complete-game-v1",
+            "completeGameConversion": True,
+            "artifact": final_path.name,
+            "package": metadata["package"],
+            "targetAbi": program.target_abi,
+            "sha256": build_result["sha256"],
+            "sizeBytes": build_result["sizeBytes"],
+            "launchMessage": metadata["launchMessage"],
+            "reachableSourceFunctions": 1,
+            "translatedReachableFunctions": 1,
+            "untranslatedReachableFunctions": 0,
+            "validation": validation,
+            "message": (
+                "Every statically reachable instruction of this IPA was translated and packaged into "
+                "a signed, installable Android APK that passed the complete-game-v1 static checks. "
+                "This is the bounded one-routine subset, not a general game converter; device "
+                "execution and gameplay remain untested."
+            ),
+        }
+        self.report["nativeCodeArtifact"]["linkedIntoGame"] = True
+        self.report["nativeCodeArtifact"]["apkProduced"] = True
+        self.report["leafTranslationAssessment"]["nativeCodeLinkedIntoGame"] = True
+        self.report["leafTranslationAssessment"]["apkProduced"] = True
+        port = self.report["portProgress"]
+        port["status"] = "COMPLETE_CONVERSION_BUILT"
+        port["completeGameConversion"] = True
+        port["basis"] = (
+            f"{program.source_size} source instruction bytes (100% of this slice's executable __text "
+            f"bytes) were translated and linked into {final_path.name}. This is the bounded "
+            "one-function subset; general games remain unsupported."
+        )
+        self.report["conversionProgress"] = {
+            "percent": 100,
+            "stage": "VALIDATED",
+            "status": "READY",
+            "message": (
+                f"Signed complete-game APK '{final_path.name}' passed static validation. Device "
+                "execution and gameplay were not tested."
+            ),
+        }
+        self.report["experimentalShell"] = {
+            "status": "SKIPPED_COMPLETE_CONVERSION_BUILT",
+            "completeGameConversion": False,
+            "message": "The inspection shell was not built because a complete conversion succeeded.",
+        }
+        self.transition(
+            "READY",
+            "Bounded complete conversion finished: the signed APK passed every complete-game-v1 check.",
+        )
+        return self.report
 
     def save(self, force: bool = False):
         # Progress can arrive faster than the report needs to be rewritten; every
@@ -425,6 +555,27 @@ class Pipeline:
                         "or APK progress."
                     ),
                 }
+                # The bounded complete-game backend converts an IPA only when every
+                # precondition is statically proven; otherwise it stays honestly blocked.
+                assessment = None
+                if not analyze_only:
+                    assessment = assess_complete_conversion(
+                        app,
+                        info["CFBundleExecutable"],
+                        executable.read_bytes(),
+                        mach,
+                        graph,
+                        reconstruction,
+                        selected,
+                        program,
+                        self.report.get("icon", {}).get("status", "UNAVAILABLE"),
+                    )
+                if assessment and assessment["eligible"]:
+                    complete = self._attempt_complete_conversion(
+                        work, ipa, program, selected, assessment
+                    )
+                    if complete is not None:
+                        return self.report
                 self.report["conversionProgress"] = {
                     "percent": 0,
                     "stage": "NOT_BUILT",
@@ -434,9 +585,20 @@ class Pipeline:
                         "were not linked to a game or Android launcher."
                     ),
                 }
+                if assessment and not assessment["eligible"]:
+                    self.report["completeConversion"] = {
+                        "status": "INELIGIBLE",
+                        "completeGameConversion": False,
+                        "reasons": assessment["reasons"],
+                        "message": (
+                            "The bounded complete-game backend verified that this IPA is outside its "
+                            "convertible subset; no complete APK was claimed."
+                        ),
+                    }
                 blocker = (
-                    "No complete iOS-to-Android game converter is implemented: the restricted leaf "
-                    "assessment does not translate the game's full reachable code, APIs, lifecycle, or assets."
+                    "No complete iOS-to-Android game converter is implemented for this input: the "
+                    "restricted leaf assessment does not translate the game's full reachable code, APIs, "
+                    "lifecycle, or assets."
                 )
                 self.report.setdefault("blockers", []).append(blocker)
                 if not analyze_only:

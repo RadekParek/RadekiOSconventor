@@ -23,46 +23,51 @@ android {
     buildTypes { release { isMinifyEnabled = false } }
 }
 
-val placeholderTemplateApkDirectory = project(":placeholder-template").layout.buildDirectory.dir("outputs/apk/debug")
-val generatedPlaceholderAssets = layout.buildDirectory.dir("generated/assets/placeholder-template")
-val embedPlaceholderTemplate by tasks.registering {
-    dependsOn(":placeholder-template:assembleDebug")
-    inputs.dir(placeholderTemplateApkDirectory)
-    outputs.dir(generatedPlaceholderAssets)
-    doLast {
-        val apks = placeholderTemplateApkDirectory.get().asFile.listFiles()
-            .orEmpty().filter { it.isFile && it.extension.equals("apk", ignoreCase = true) }
-        require(apks.size == 1) { "expected one placeholder template APK, found ${apks.size}" }
-        val assetRoot = generatedPlaceholderAssets.get().dir("placeholder-template").asFile
-        assetRoot.deleteRecursively()
-        require(assetRoot.mkdirs()) { "cannot create generated placeholder assets" }
-        val entries = mapOf(
-            "AndroidManifest.xml" to "AndroidManifest.xml",
-            "resources.arsc" to "resources.arsc",
-            "classes.dex" to "classes.dex",
-        )
-        ZipFile(apks.single()).use { template ->
-            entries.forEach { (entryName, assetName) ->
-                val entry = template.getEntry(entryName) ?: error("placeholder template missing $entryName")
-                require(entry.size in 1..(32L * 1024 * 1024)) { "placeholder template entry too large: $entryName" }
-                val destination = File(assetRoot, assetName)
-                template.getInputStream(entry).use { input -> destination.outputStream().use { output -> input.copyTo(output) } }
+fun registerTemplateEmbedTask(module: String, assetDirectory: String, iconFileName: String): TaskProvider<*> {
+    val templateApkDirectory = project(module).layout.buildDirectory.dir("outputs/apk/debug")
+    val generatedAssets = layout.buildDirectory.dir("generated/assets/$assetDirectory")
+    return tasks.register("embed${assetDirectory.replace("-", "").replaceFirstChar { it.uppercase() }}") {
+        dependsOn("$module:assembleDebug")
+        inputs.dir(templateApkDirectory)
+        outputs.dir(generatedAssets)
+        doLast {
+            val apks = templateApkDirectory.get().asFile.listFiles()
+                .orEmpty().filter { it.isFile && it.extension.equals("apk", ignoreCase = true) }
+            require(apks.size == 1) { "expected one $assetDirectory template APK, found ${apks.size}" }
+            val assetRoot = generatedAssets.get().dir(assetDirectory).asFile
+            assetRoot.deleteRecursively()
+            require(assetRoot.mkdirs()) { "cannot create generated $assetDirectory assets" }
+            val entries = mapOf(
+                "AndroidManifest.xml" to "AndroidManifest.xml",
+                "resources.arsc" to "resources.arsc",
+                "classes.dex" to "classes.dex",
+            )
+            ZipFile(apks.single()).use { template ->
+                entries.forEach { (entryName, assetName) ->
+                    val entry = template.getEntry(entryName) ?: error("$assetDirectory template missing $entryName")
+                    require(entry.size in 1..(32L * 1024 * 1024)) { "$assetDirectory template entry too large: $entryName" }
+                    val destination = File(assetRoot, assetName)
+                    template.getInputStream(entry).use { input -> destination.outputStream().use { output -> input.copyTo(output) } }
+                }
+                val iconEntries = template.entries().asSequence().filter {
+                    it.name.startsWith("res/") && it.name.substringAfterLast('/') == iconFileName
+                }.toList()
+                require(iconEntries.size == 1) { "expected one $assetDirectory template launcher icon, found ${iconEntries.size}" }
+                val iconEntry = iconEntries.single()
+                require(iconEntry.size in 1..(32L * 1024 * 1024)) { "$assetDirectory template icon too large" }
+                val iconDestination = File(assetRoot, "fallback-icon.png")
+                template.getInputStream(iconEntry).use { input -> iconDestination.outputStream().use { output -> input.copyTo(output) } }
+                File(assetRoot, "icon-entry-path.txt").writeText(iconEntry.name)
             }
-            val iconEntries = template.entries().asSequence().filter {
-                it.name.startsWith("res/") && it.name.substringAfterLast('/') == "generated_placeholder_icon.png"
-            }.toList()
-            require(iconEntries.size == 1) { "expected one placeholder template launcher icon, found ${iconEntries.size}" }
-            val iconEntry = iconEntries.single()
-            require(iconEntry.size in 1..(32L * 1024 * 1024)) { "placeholder template icon too large" }
-            val iconDestination = File(assetRoot, "fallback-icon.png")
-            template.getInputStream(iconEntry).use { input -> iconDestination.outputStream().use { output -> input.copyTo(output) } }
-            File(assetRoot, "icon-entry-path.txt").writeText(iconEntry.name)
         }
+    }.also { task ->
+        android.sourceSets.getByName("main").assets.srcDir(generatedAssets)
+        tasks.named("preBuild").configure { dependsOn(task) }
     }
 }
 
-android.sourceSets.getByName("main").assets.srcDir(generatedPlaceholderAssets)
-tasks.named("preBuild").configure { dependsOn(embedPlaceholderTemplate) }
+val embedPlaceholderTemplate = registerTemplateEmbedTask(":placeholder-template", "placeholder-template", "generated_placeholder_icon.png")
+val embedConvertedTemplate = registerTemplateEmbedTask(":converted-template", "converted-template", "generated_converted_icon.png")
 
 // Surface full assertion messages and test stdout in the CI console; the default
 // logging prints only the exception class and source line, which hides values.

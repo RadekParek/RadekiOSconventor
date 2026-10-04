@@ -25,6 +25,27 @@ class PlaceholderTemplateAssetTest {
         assertTrue(patchedManifest.isNotEmpty())
     }
 
+    @Test fun convertedTemplateBundlesAPatchableManifestResourceTableAndLauncherDex() {
+        val assets = RuntimeEnvironment.getApplication().assets
+        val manifest = assets.open("converted-template/AndroidManifest.xml").use { it.readBytes() }
+        val resources = assets.open("converted-template/resources.arsc").use { it.readBytes() }
+        val dex = assets.open("converted-template/classes.dex").use { it.readBytes() }
+        val iconPath = assets.open("converted-template/icon-entry-path.txt").use { it.readBytes() }
+            .toString(Charsets.UTF_8)
+
+        val packageName = "dev.radek.converted.p0123456789abcdef0123"
+        val patchedManifest = BinaryXmlManifest.customize(manifest, packageName, "Hello Test")
+        val patchedResources = ResourceTablePackagePatcher.customize(resources, packageName)
+        assertEquals(patchedManifest.size.toLong(), u32(patchedManifest, 4))
+        assertEquals(resources.size, patchedResources.size)
+
+        // The launcher DEX must define the contract entry class, and the icon
+        // entry path must point at the generated converted icon resource.
+        assertTrue(dex.size > 0x70 && dex[0] == 'd'.code.toByte() && dex[1] == 'e'.code.toByte())
+        assertTrue(String(dex, Charsets.ISO_8859_1).contains("Ldev/radek/generated/MainActivity;"))
+        assertTrue(iconPath.startsWith("res/") && iconPath.endsWith("generated_converted_icon.png"))
+    }
+
     private fun u32(data: ByteArray, offset: Int): Long =
         (data[offset].toLong() and 0xff) or
             ((data[offset + 1].toLong() and 0xff) shl 8) or

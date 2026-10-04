@@ -14,9 +14,11 @@ Extraction occurs under newly created private workspaces; links/special files, t
 paths, case collisions and encrypted archives are rejected. Partial extraction is removed on failure.
 On Android, an authorized input is retained in app-private storage until the library entry is deleted;
 the authorization dialog discloses this. Import does not automatically build an APK. A separate user
-action builds only a minimal, signed placeholder from the bundled source-free template; the original
-IPA and executable are never copied into it, and no gameplay code is translated or run by the
-converter.
+action builds either (for IPAs statically proven to be one closed-integer routine) a signed APK whose
+translated entry runs through JNI, with the bundle's static resources packaged verbatim under
+`assets/bundle/`, or a minimal, signed preview shell from the bundled source-free template; the
+original IPA archive is never embedded, the preview shell contains none of the executable, and no
+code outside the proven routine is ever translated or run by the converter.
 
 The host pipeline's closed-integer leaf assessment is not a complete game conversion. The former
 launcher wrapper has been disabled, and `build_apk` refuses to package that subset. No no-op iOS API
@@ -32,8 +34,8 @@ installer performs its own signature/package verification before installation.
 
 The Android app has no INTERNET permission and does not upload IPAs. `ResultProvider` is read-only
 and URI-granted. Complete-game host APKs are served only under the existing IPA-basename and
-`complete-game-v1` checks; placeholders use a different filename and are accepted only when their
-explicit non-game metadata, source hash and output digest match. The placeholder signer is generated
+`complete-game-v1` checks; preview shells use a different filename and are accepted only when their
+explicit non-game metadata, source hash and output digest match. The on-device signer is generated
 per converter installation and stored in app-private no-backup storage; this development signer is
 not a security endorsement of source code. Recovered icon/metadata resources may be malformed or
 malicious; bounded decoding and copying do not establish trust. Bundle data remains opaque unless a

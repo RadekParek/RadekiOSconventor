@@ -19,12 +19,15 @@ def macho(
     extras=(),
     blobs=None,
     section_name="__text",
+    cstring=None,
 ):
     wide = cpu == 0x100000C
     if code is None:
         code = (
             struct.pack("<II", 0x52800540, 0xD65F03C0) if wide else struct.pack("<II", 0xE3A0002A, 0xE12FFF1E)
         )
+    if cstring is not None and not wide:
+        raise ValueError("cstring fixture support is implemented for wide (ARM64) Mach-O only")
     strings = b"\x00_main\x00"
     symbols = struct.pack(
         "<IBBHQ" if wide else "<IBBHI",
@@ -38,10 +41,17 @@ def macho(
         index = len(strings)
         strings += name.encode() + b"\x00"
         symbols += struct.pack("<IBBHQ" if wide else "<IBBHI", index, 1, 0, 0x100, 0)
-    symoff = 0x1000 + ((len(code) + 7) // 8 * 8)
+    cursor = 0x1000 + len(code)
+    cstring_offset = None
+    if cstring is not None:
+        cstring_offset = (cursor + 7) // 8 * 8
+        cursor = cstring_offset + len(cstring)
+    symoff = (cursor + 7) // 8 * 8
     stroff = symoff + len(symbols)
     data = bytearray(stroff + len(strings))
     data[0x1000 : 0x1000 + len(code)] = code
+    if cstring is not None:
+        data[cstring_offset : cstring_offset + len(cstring)] = cstring
     data[symoff:stroff] = symbols
     data[stroff:] = strings
     if reloc:
@@ -70,11 +80,42 @@ def macho(
             0,
             0,
         )
+        section_count = 1
+        extra_sections = b""
+        if cstring is not None:
+            section_count += 1
+            extra_sections = struct.pack(
+                "<16s16sQQIIIIIIII",
+                b"__cstring".ljust(16, b"\x00"),
+                segment_name,
+                0x100000000 + cstring_offset,
+                len(cstring),
+                cstring_offset,
+                0,
+                0,
+                0,
+                0x2,  # S_CSTRING_LITERALS
+                0,
+                0,
+                0,
+            )
         segment = (
             struct.pack(
-                "<II16sQQQQIIII", 0x19, 152, segment_name, 0x100000000, 0x10000, 0, len(data), 5, 5, 1, 0
+                "<II16sQQQQIIII",
+                0x19,
+                72 + 80 * section_count,
+                segment_name,
+                0x100000000,
+                0x10000,
+                0,
+                len(data),
+                5,
+                5,
+                section_count,
+                0,
             )
             + section
+            + extra_sections
         )
     else:
         section = struct.pack(
@@ -153,17 +194,18 @@ def _write(z: zipfile.ZipFile, name: str, data: bytes | str) -> None:
     z.writestr(info, data)
 
 
-def ipa(path: Path, executable=None, binary=True, extra=None, icon=True):
+def ipa(path: Path, executable=None, binary=True, extra=None, icon=True, display_name=None, bundle_id=None):
     info = {
         "CFBundleExecutable": "Fixture",
-        "CFBundleIdentifier": "org.example.synthetic",
-        "CFBundleName": "Native Fixture",
-        "CFBundleDisplayName": "Native Fixture",
+        "CFBundleIdentifier": bundle_id or "org.example.synthetic",
+        "CFBundleName": display_name or "Native Fixture",
+        "CFBundleDisplayName": display_name or "Native Fixture",
         "CFBundleVersion": "1",
         "CFBundleShortVersionString": "1.0",
         "MinimumOSVersion": "8.0",
-        "CFBundleIcons": {"CFBundlePrimaryIcon": {"CFBundleIconFiles": ["AppIcon"]}},
     }
+    if icon:
+        info["CFBundleIcons"] = {"CFBundlePrimaryIcon": {"CFBundleIconFiles": ["AppIcon"]}}
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as z:
         _write(
             z,

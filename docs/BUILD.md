@@ -40,12 +40,15 @@ API candidates, current-device time-shim export checks, blockers, the raw JSON r
 
 The analysis progress bar measures input copying, extraction and analysis only. It is not code
 translation, APK build progress, runtime validation or playability. Runnable game code remains at
-zero unless a complete host conversion is attached under the strict contract. The red **Force convert
-to .apk** action builds a separately named, installable placeholder from a bundled Android shell;
-it uses the IPA app name and recovered icon where available, but contains no translated game code or
-gameplay. Its launch screen makes that limitation explicit. The runtime packager reads either UTF-8
-or UTF-16 Android binary-XML string pools, then checks its exact ZIP entry set, uncompressed/aligned
-manifest, DEX, resource table and icon payloads before signing and verifying the APK.
+zero unless the bounded conversion proof applies or a complete host conversion is attached under the
+strict contract. The red **Force convert to .apk** action routes on that proof: proven IPAs become a
+signed APK whose translated entry routine runs through JNI and displays the message recovered from
+the IPA; everything else becomes a separately named, installable preview shell from the bundled
+Android template that uses the IPA app name and recovered icon where available but contains no
+translated game code or gameplay — its launch screen makes that limitation explicit. The runtime
+packager reads either UTF-8 or UTF-16 Android binary-XML string pools, then checks its exact ZIP
+entry set, uncompressed/aligned manifest, DEX, resource table and icon payloads before signing and
+verifying the APK.
 
 A host APK attachment must match the IPA's SHA-256/package identity and safe IPA-derived basename,
 carry `complete-game-v1` metadata, account for every reachable function and API implementation,
@@ -74,10 +77,11 @@ supported time imports, the host also emits the selected Bionic-backed implement
 `api-replacements/`. The source is compiled and
 behavior-tested on the host, but is not linked to the translated entry or any APK. The report records
 one function's source instruction bytes divided by the selected slice's executable `__text` bytes as
-partial machine-code progress; `conversionProgress` remains `NOT_BUILT`. If `convert` is invoked on
-an input that passes only this restricted proof, it returns `BLOCKED`, retains any isolated native
-artifact, and produces no game APK. The experiment does not translate all game code, APIs, resources,
-or lifecycle.
+partial machine-code progress; `conversionProgress` remains `NOT_BUILT` unless the stricter bounded
+complete-conversion gate (whole `__text` equals the proven routine, zero imports/metadata) applies
+and a signed APK is built. If `convert` is invoked on an input that passes only this restricted
+proof, it returns `BLOCKED`, retains any isolated native artifact, and produces no game APK. The
+experiment does not translate all game code, APIs, resources, or lifecycle.
 
 ARM selection for the analysis is deterministic: automatic selection prefers ARM64 in a FAT IPA
 containing both ARM32 and ARM64; supported ARM32-only inputs target 32-bit Android ARMv7 (`armeabi-v7a`).
@@ -115,14 +119,15 @@ separate device tests are supplied.
 
 Gradle signs the **importer app** using its normal Android debug build configuration. No signing
 key is embedded in the repository. When Force is used, the app creates and retains an installation-
-local signer in no-backup private storage and signs only the generated placeholder shell; it does not
-sign translated game code or treat the placeholder as a game APK. CI publishes no imported-IPA
-placeholder APK.
+local signer in no-backup private storage and signs the generated preview shell and, for proven
+IPAs, the bounded conversion APK; signing is an install requirement, not a gameplay endorsement.
+CI publishes no imported-IPA preview APK.
 
 `.github/workflows/build.yml` runs native/Python/Android tests, builds and validates the importer,
-and uploads only `RadekiOSConventor-debug.apk` plus validation/test reports. CI does not publish a
-synthetic, placeholder, or restricted native-entry game APK. No iOS executable is run by tests, and
-there is no device/emulator runtime smoke test at present.
+converts `tests/data/hello-test.ipa` end to end, validates the resulting bounded conversion APK,
+and uploads `RadekiOSConventor-debug.apk` plus validation/test reports and diagnostic conversion
+artifacts. CI does not publish a synthetic or unproven game APK. No iOS executable is run by tests,
+and there is no device/emulator runtime smoke test at present.
 
 ## Optional source formatting
 

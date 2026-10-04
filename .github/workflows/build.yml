@@ -91,6 +91,39 @@ jobs:
           EOF
       - name: Validate the labelled experimental shell APK
         run: python3 -m radek validate-shell .local/sample-conversion/experimental-shell.apk
+      - name: Convert IPA (hello-test must fully convert end to end)
+        run: |
+          set -e
+          test -f tests/data/hello-test.ipa
+          python3 -m radek convert tests/data/hello-test.ipa --authorized --output .local/hello-conversion
+          python3 - <<'EOF'
+          import json, sys
+          report = json.load(open(".local/hello-conversion/report.json"))
+          conversion = report["conversionProgress"]
+          complete = report["completeConversion"]
+          checks = (
+              ("state is READY", report["state"] == "READY"),
+              ("complete-game progress 100", conversion["percent"] == 100),
+              ("complete-game status READY", conversion["status"] == "READY"),
+              ("complete conversion status COMPLETE", complete["status"] == "COMPLETE"),
+              ("contract complete-game-v1", complete["contract"] == "complete-game-v1"),
+              ("completeGameConversion true", complete["completeGameConversion"] is True),
+              ("artifact hello-test.apk", complete["artifact"] == "hello-test.apk"),
+          )
+          failed = [label for label, ok in checks if not ok]
+          if failed:
+              print("::error title=hello-test conversion failed::" + "; ".join(failed))
+              print(json.dumps({"conversionProgress": conversion, "completeConversion": complete}, indent=2))
+              sys.exit(1)
+          print("hello-test converted end-to-end:", complete["artifact"], "· package", complete["package"])
+          EOF
+      - name: Validate hello-test converted APK
+        run: |
+          set -e
+          PKG="dev.radek.converted.p$(python3 -c "import hashlib; print(hashlib.sha256(open('tests/data/hello-test.ipa','rb').read()).hexdigest()[:20])")"
+          python3 -m radek validate .local/hello-conversion/hello-test.apk \
+            --package "$PKG" \
+            --entry dev.radek.generated.MainActivity
       - name: Android unit tests, lint, JNI native build and APK
         run: python3 tools/ci_run.py ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
       - name: Validate converter application APK
@@ -111,12 +144,25 @@ jobs:
           cp .local/sample-conversion/report.json artifacts/sample-conversion/ || true
           cp .local/sample-conversion/experimental-shell.apk artifacts/sample-conversion/ || true
           cp -r .local/sample-conversion/ioscompat artifacts/sample-conversion/ || true
+      - name: Collect hello-test conversion artifacts
+        if: always() && hashFiles('.local/hello-conversion/**') != ''
+        run: |
+          mkdir -p artifacts/hello-conversion
+          cp .local/hello-conversion/report.json artifacts/hello-conversion/ || true
+          cp .local/hello-conversion/hello-test.apk artifacts/hello-conversion/ || true
       - name: Upload sample conversion artifacts
         if: always() && hashFiles('artifacts/sample-conversion/**') != ''
         uses: actions/upload-artifact@v6
         with:
           name: sample-conversion-artifacts
           path: artifacts/sample-conversion/
+          if-no-files-found: warn
+      - name: Upload hello-test conversion artifacts
+        if: always() && hashFiles('artifacts/hello-conversion/**') != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: hello-conversion-artifacts
+          path: artifacts/hello-conversion/
           if-no-files-found: warn
       - name: Upload test reports
         if: always() && hashFiles('app/build/reports/**', 'artifacts/validation.json') != ''

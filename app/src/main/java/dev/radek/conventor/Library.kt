@@ -12,6 +12,7 @@ import java.util.UUID
 object NativeBridge {
     init { System.loadLibrary("radek") }
     external fun analyze(bytes: ByteArray): String
+    external fun translateTrivial(bytes: ByteArray): String
     external fun findAndroidLibrary(symbol: String): String?
     external fun findImplementedApiReplacement(sourceSymbol: String): String?
 
@@ -28,10 +29,47 @@ enum class ConversionState { IMPORTED, ANALYZING, CONVERTING, PACKAGING, VALIDAT
 /** Persistent private library. Android imports/analyzes; compilation uses the host CLI. */
 class Library(private val context: Context) {
     val root = File(context.filesDir, "library").apply { mkdirs() }
+
+    companion object {
+        // Parsed report cache: with hundreds of imported IPAs, re-reading and
+        // re-parsing every report.json on each screen render stalls the UI. The
+        // cache is keyed by directory name and invalidated by file modification
+        // time, so saved reports are picked up on the next render.
+        private val reportCache = HashMap<String, Pair<Long, JSONObject>>()
+
+        @Synchronized
+        private fun cachedReport(dir: File): JSONObject? {
+            val reportFile = File(dir, "report.json")
+            val lastModified = reportFile.lastModified()
+            val cached = reportCache[dir.name]
+            if (cached != null && cached.first == lastModified) return cached.second
+            return try {
+                val parsed = JSONObject(reportFile.readText())
+                reportCache[dir.name] = lastModified to parsed
+                parsed
+            } catch (_: Exception) {
+                reportCache.remove(dir.name)
+                null
+            }
+        }
+
+        @Synchronized
+        private fun pruneCache(keep: Set<String>) {
+            if (reportCache.size > keep.size) reportCache.keys.retainAll(keep)
+        }
+    }
+
     private fun formatBytes(value: Long) = "%.1f MiB".format(java.util.Locale.ROOT, value / 1048576.0)
-    fun entries(): List<Pair<File, JSONObject>> = root.listFiles().orEmpty().filter { it.isDirectory }.mapNotNull { dir ->
-        try { dir to JSONObject(File(dir, "report.json").readText()) } catch (_: Exception) { null }
-    }.sortedByDescending { it.first.name }
+    fun entries(): List<Pair<File, JSONObject>> {
+        val dirs = root.listFiles().orEmpty().filter { it.isDirectory }
+        val seen = HashSet<String>(dirs.size)
+        val result = dirs.mapNotNull { dir ->
+            seen += dir.name
+            cachedReport(dir)?.let { dir to it }
+        }.sortedByDescending { it.first.name }
+        pruneCache(seen)
+        return result
+    }
 
     fun save(dir: File, report: JSONObject) {
         val temporary = File(dir, "report.json.tmp")
@@ -65,9 +103,18 @@ class Library(private val context: Context) {
                 ?.let { placeholder ->
                     placeholder.put("status", "FAILED")
                         .put("percent", 0)
-                        .put("message", "Placeholder build was interrupted before it finished; retry Force to rebuild it.")
+                        .put("message", "Preview shell build was interrupted before it finished; retry Force to rebuild it.")
                     changed = true
                 }
+            report.optJSONObject("convertedBuildProgress")
+                ?.takeIf { it.optString("status") == "CONVERTING" || it.optString("status") == "PACKAGING" || it.optString("status") == "SIGNING" || it.optString("status") == "VERIFYING" }
+                ?.let { converted ->
+                    converted.put("status", "FAILED")
+                        .put("percent", 0)
+                        .put("message", "Conversion was interrupted before it finished; retry Force convert to rebuild the APK.")
+                    changed = true
+                }
+            File(dir, "convert-workspace").deleteRecursively()
             if (changed) save(dir, report)
         }
     }
@@ -209,7 +256,30 @@ class Library(private val context: Context) {
             val binary = File(app, executable)
             require(binary.isFile && binary.length() <= 64 * 1024 * 1024) { "Missing executable or exceeds the on-device 64 MiB analysis limit; use the host analyzer for larger files" }
             log(ConversionState.ANALYZING, "Parsing Mach-O load commands, symbols, fixups and dependencies", 33)
-            val macho = JSONObject(NativeBridge.analyze(binary.readBytes()))
+            val binaryBytes = binary.readBytes()
+            val macho = JSONObject(NativeBridge.analyze(binaryBytes))
+            // Bounded on-device conversion proof: is the whole executable exactly
+            // one closed-integer routine with nothing left over? Fail closed.
+            val deviceTranslation = try {
+                JSONObject(NativeBridge.translateTrivial(binaryBytes))
+            } catch (_: Exception) {
+                JSONObject().put("status", "UNSUPPORTED").put("reason", "native prover unavailable")
+            }
+            // Keep the persisted proof small: only the longest few printable
+            // strings matter (they feed the launch message), never the whole
+            // __cstring section of a large binary.
+            deviceTranslation.optJSONArray("strings")?.let { strings ->
+                val kept = JSONArray()
+                for (index in 0 until minOf(strings.length(), 64)) {
+                    val value = strings.optString(index, "")
+                    if (value.length in 3..512) kept.put(value)
+                }
+                deviceTranslation.put("strings", kept)
+            }
+            val deviceProven = deviceTranslation.optString("status") == "PROVEN" &&
+                deviceTranslation.optInt("coveragePercent", 0) == 100 &&
+                deviceTranslation.optInt("functionCount", 0) == 1
+            report.put("deviceTranslation", deviceTranslation)
             updateProgress(38, "ANALYZING", "Main executable parsed; checking embedded Mach-O images", forceSave = true)
             report.put("machO", macho)
             updateProgress(53, "Mach-O analysis", "Primary executable analysis completed")
@@ -272,17 +342,28 @@ class Library(private val context: Context) {
                     "$verifiedApiReplacements concrete time-API implementation export(s) were verified in libioscompat.so; no IPA callsite was rewritten and none was linked into a game."
                 else
                     "The analyzer runtime contains a narrow time-API shim, but no matching import was verified on this device and no game API replacement was linked."))
-            report.put("portProgress", JSONObject()
-                .put("percent", 0)
-                .put("status", "NO_RUNNABLE_ANDROID_CODE_BUILT")
-                .put("basis", "On-device importer analyzed the IPA but emitted no Android executable code; this is actual output progress, not a stability prediction."))
+            if (deviceProven) {
+                report.put("portProgress", JSONObject()
+                    .put("percent", deviceTranslation.optInt("coveragePercent", 100))
+                    .put("status", "PROVEN_CONVERTIBLE_ON_DEVICE")
+                    .put("completeGameConversion", false)
+                    .put("translatedFunctions", 1)
+                    .put("translatedTextBytes", deviceTranslation.optInt("sourceBytes", 0))
+                    .put("basis", "The native prover verified that the whole executable __text is one closed-integer routine; Force convert turns that proof into a signed APK with the translated entry. Bytes are proven, not yet packaged."))
+            } else {
+                report.put("portProgress", JSONObject()
+                    .put("percent", 0)
+                    .put("status", "NO_RUNNABLE_ANDROID_CODE_BUILT")
+                    .put("basis", "On-device importer analyzed the IPA but emitted no Android executable code; this is actual output progress, not a stability prediction."))
+            }
             log(ConversionState.ANALYZING,
                 "Inventoried ${apiMapping.getInt("distinctImportSymbols")} API symbols; ${apiMapping.getInt("mappedNameCandidates")} direct NDK names (${apiMapping.getInt("runtimeVerifiedNdkCandidates")} runtime exports resolved), ${apiMapping.getInt("runtimeVerifiedApiReplacementCount")} concrete time-shim exports verified but not linked, and ${apiMapping.getInt("semanticRewriteCandidates")} semantic rewrite candidates.", 50)
             val reason = when {
                 encrypted -> "Protected/encrypted Mach-O. Conversion prohibited; no DRM or FairPlay bypass."
                 !hasCandidate -> "No supported ARM64/ARMv7/ARMv6 slice. ARM64e PAC reconstruction is blocked."
                 incompatible -> "Frameworks, imports, incomplete dyld bindings, metadata or embedded code require unsupported compatibility/linker implementations."
-                else -> "Analysis completed, but complete iOS-to-Android game-code translation, API replacement, and packaging are not implemented. No playable game APK can be produced from this analysis; Force can build a separate branded placeholder."
+                deviceProven -> "The executable is fully covered by the proven closed-integer subset. Force convert builds a real signed APK whose translated entry routine runs through JNI; general games remain unsupported."
+                else -> "Analysis completed, but complete iOS-to-Android game-code translation, API replacement, and packaging are not implemented for this input. Force can build a separate branded preview shell."
             }
             report.put("blockers", JSONArray().put(reason)).put("hostCommand", "python3 -m radek analyze input.ipa --authorized --output workspace/analysis")
             val terminalState = if (encrypted || incompatible || !hasCandidate) ConversionState.BLOCKED else ConversionState.PARTIAL
@@ -291,7 +372,10 @@ class Library(private val context: Context) {
                 .put("stage", "NOT_BUILT")
                 .put("status", "NOT_BUILT")
                 .put("message", reason)
-                .put("basis", "No game code is translated during IPA analysis. A user-triggered placeholder is tracked separately and is not counted as Android game-code progress."))
+                .put("basis", if (deviceProven)
+                    "Conversion itself is user-triggered: Force convert packages the proven entry into a signed APK and then reports 100% here."
+                else
+                    "No game code is translated during IPA analysis. A user-triggered preview shell is tracked separately and is not counted as Android game-code progress."))
             log(terminalState, reason, 100)
             save(dir, report)
         } catch (e: Exception) {

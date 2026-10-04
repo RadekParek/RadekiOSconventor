@@ -33,12 +33,58 @@ private object Jobs {
     fun update(value: Int, text: String) {
         percent = value.coerceIn(0, 100)
         message = text
-        main.post { listener?.invoke() }
+        main.post { runCatching { listener?.invoke() } }
     }
     fun update(text: String) = update(percent, text)
-    @Synchronized fun run(block: () -> Unit) {
-        check(!busy) { "A job is already running" }; busy = true
-        executor.execute { try { block() } catch (e: Exception) { update(percent, "Failed at $percent%: ${e.message}") } finally { busy = false; main.post { listener?.invoke() } } }
+
+    /** Runs [block] unless a job is already running; never throws on the caller's thread. */
+    @Synchronized fun tryRun(block: () -> Unit): Boolean {
+        if (busy) return false
+        busy = true
+        executor.execute {
+            try {
+                block()
+            } catch (e: Throwable) {
+                update(percent, "Failed at $percent%: ${e.message ?: e.javaClass.simpleName}")
+            } finally {
+                busy = false
+                main.post { runCatching { listener?.invoke() } }
+            }
+        }
+        return true
+    }
+}
+
+/** Downsampled, cached, off-main-thread icon loading for large libraries. */
+private object IconLoader {
+    private val executor = Executors.newFixedThreadPool(2)
+    private val main = Handler(Looper.getMainLooper())
+    private val cache = android.util.LruCache<String, android.graphics.Bitmap>(48)
+
+    fun load(file: File, targetPixels: Int, apply: (android.graphics.Bitmap?) -> Unit) {
+        if (!file.isFile) { apply(null); return }
+        val key = "${file.path}:${file.lastModified()}"
+        cache.get(key)?.let { apply(it); return }
+        executor.execute {
+            val bitmap = try {
+                val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                android.graphics.BitmapFactory.decodeFile(file.path, bounds)
+                if (bounds.outWidth <= 0 || bounds.outHeight <= 0) null else {
+                    var sample = 1
+                    while (bounds.outWidth / (sample * 2) >= targetPixels &&
+                        bounds.outHeight / (sample * 2) >= targetPixels && sample < 512
+                    ) sample *= 2
+                    android.graphics.BitmapFactory.decodeFile(
+                        file.path,
+                        android.graphics.BitmapFactory.Options().apply { inSampleSize = sample },
+                    )
+                }
+            } catch (_: Throwable) {
+                null
+            }
+            if (bitmap != null) runCatching { cache.put(key, bitmap) }
+            main.post { runCatching { apply(bitmap) } }
+        }
     }
 }
 
@@ -96,13 +142,15 @@ class MainActivity : Activity() {
         if (!Jobs.busy) library.recoverInterrupted()
         selected = state?.getString("selected")?.let { File(library.root, it) }
         Jobs.listener = {
-            progressLabel?.text = "${Jobs.percent}% · ${Jobs.message}"
-            progressBar?.progress = Jobs.percent
-            if (wasBusy && !Jobs.busy) {
-                wasBusy = false
-                val target = returnToDetailAfterJob
-                returnToDetailAfterJob = null
-                if (target != null && target.isDirectory) detail(target) else home()
+            runCatching {
+                progressLabel?.text = "${Jobs.percent}% · ${Jobs.message}"
+                progressBar?.progress = Jobs.percent
+                if (wasBusy && !Jobs.busy) {
+                    wasBusy = false
+                    val target = returnToDetailAfterJob
+                    returnToDetailAfterJob = null
+                    if (target != null && target.isDirectory && File(target, "report.json").isFile) detail(target) else home()
+                }
             }
         }
         if (selected != null && File(selected, "report.json").isFile) detail(selected!!) else home()
@@ -184,8 +232,11 @@ class MainActivity : Activity() {
         orientation = LinearLayout.VERTICAL; background = rounded(panel); setPadding(dp(18), dp(14), dp(18), dp(16))
         parent.addView(this, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(14) })
     }
+    // Rendering hundreds of library cards at once stalls the UI thread, so the
+    // home list is paginated; "Show more" reveals the next page.
+    private var visibleEntries = 60
     private fun statusColor(state: String) = when (state) {
-        "READY" -> accent
+        "READY", "ATTACHED", "GENERATED_ON_DEVICE" -> accent
         "FAILED", "BLOCKED" -> if (lightMode) Color.rgb(179, 38, 30) else Color.rgb(255, 157, 139)
         else -> if (lightMode) Color.rgb(145, 83, 0) else Color.rgb(245, 203, 116)
     }
@@ -196,8 +247,8 @@ class MainActivity : Activity() {
         text("IPA to Android", 30f, textColor, true)
         text("Import an IPA to automatically inspect its code and Android compatibility.", 15f, muted)
         val info = card()
-        text("Complete game conversion unavailable", 17f, textColor, true, info)
-        text("The on-device app analyzes the IPA but does not translate iOS code or replace iOS APIs. Analysis does not emit a game APK. For an imported app you own or may convert, Force can separately build a signed, installable placeholder branded with its name and recovered icon; it contains no translated game code and is not playable. Host APKs remain accepted only when they declare a complete game conversion and pass provenance and package checks.", 14f, muted, parent = info)
+        text("Bounded conversion, honest everywhere else", 17f, textColor, true, info)
+        text("The on-device app analyzes every IPA, and converts the proven subset: an executable whose whole code is one closed-integer routine is turned into a signed, installable APK whose translated entry runs through JNI. Anything outside that subset is not translated; Force then builds a signed, installable preview shell branded with the app name and recovered icon, clearly labelled as not playable. Host APKs are accepted only when they declare a complete game conversion and pass provenance and package checks.", 14f, muted, parent = info)
         val add = button("Choose IPA", true) { authorize() }; add.isEnabled = !Jobs.busy
         button("Settings", parent = body) { settingsScreen() }.isEnabled = !Jobs.busy
         if (Jobs.busy) {
@@ -211,15 +262,21 @@ class MainActivity : Activity() {
             val empty = card(); text("Your library starts here", 19f, textColor, true, empty)
             text("Select an .ipa you own or have permission to convert. Encrypted and FairPlay-protected binaries are never decrypted.", 14f, muted, parent = empty)
         }
-        entries.forEach { (dir, report) ->
+        entries.take(visibleEntries).forEach { (dir, report) ->
             val item = card(); val app = report.optJSONObject("application") ?: JSONObject()
             val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }; item.addView(row)
             val iconPath = File(dir, "icon.png")
-            val iconBitmap = if (iconPath.isFile) android.graphics.BitmapFactory.decodeFile(iconPath.path) else null
             val icon = ImageView(this).apply {
-                if (iconBitmap != null) setImageBitmap(iconBitmap) else setImageResource(dev.radek.conventor.R.drawable.ic_launcher)
-                contentDescription = if (iconBitmap != null) "Application icon"
-                else report.optJSONObject("icon")?.optString("reason")?.takeIf { it.isNotBlank() } ?: "Icon unavailable"
+                setImageResource(dev.radek.conventor.R.drawable.ic_launcher)
+                contentDescription = report.optJSONObject("icon")?.optString("reason")?.takeIf { it.isNotBlank() } ?: "Icon unavailable"
+            }
+            // Decode off the main thread, downsampled: decoding hundreds of
+            // full-size icons synchronously is what froze large libraries.
+            IconLoader.load(iconPath, dp(56)) { bitmap ->
+                if (bitmap != null) {
+                    icon.setImageBitmap(bitmap)
+                    icon.contentDescription = "Application icon"
+                }
             }
             row.addView(icon, LinearLayout.LayoutParams(dp(56), dp(56)).apply { rightMargin = dp(14) })
             val labels = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }; row.addView(labels, LinearLayout.LayoutParams(0, -2, 1f))
@@ -265,10 +322,17 @@ class MainActivity : Activity() {
                 text(summary, 11f, muted, parent = item)
             }
             report.optJSONObject("hostConversion")?.takeIf { it.optString("status") == "ATTACHED" }?.let { host ->
-                text("Complete-game host APK attached · ABI ${host.optString("targetAbi")} · ${host.optInt("nativeCodeBytes", 0)} generated native-code bytes · runtime not tested", 11f, accent, parent = item)
+                val origin = if (host.optString("origin") == "ON_DEVICE") "Complete-game conversion built on-device" else "Complete-game host APK attached"
+                text("$origin · ABI ${host.optString("targetAbi")} · ${host.optInt("nativeCodeBytes", 0)} generated native-code bytes · runtime not tested", 11f, accent, parent = item)
             }
             text("v${app.optString("version", "—")}  ·  ${architectures(report)}  ·  ${formatBytes(app.optLong("fileSize"))}", 12f, muted, parent = item)
             item.isClickable = true; item.setOnClickListener { detail(dir) }; item.contentDescription = "View ${app.optString("name")} details"
+        }
+        if (entries.size > visibleEntries) {
+            button("Show ${entries.size - visibleEntries} more application(s)") {
+                visibleEntries += 120
+                home()
+            }
         }
         text("v${packageManager.getPackageInfo(packageName, 0).versionName}  /  ARM64 Android  /  offline inspection", 11f, muted)
     }
@@ -355,14 +419,21 @@ class MainActivity : Activity() {
     }
     private fun authorize() {
         AlertDialog.Builder(this).setTitle("Authorized files only")
-            .setMessage("Confirm that you own this IPA or have permission to convert it. Protection mechanisms will not be bypassed. The source IPA is retained in app-private storage for analysis until you delete this library entry. Analysis does not translate the game; the separate Force action can create only a non-playable, installable placeholder with no translated game code. Complete-game host APKs still require the strict conversion contract.")
+            .setMessage("Confirm that you own this IPA or have permission to convert it. Protection mechanisms will not be bypassed. The source IPA is retained in app-private storage for analysis until you delete this library entry. Force convert builds a real signed APK when the executable passes the bounded conversion proof; otherwise it creates a non-playable, installable preview shell. Complete-game host APKs still require the strict conversion contract.")
             .setNegativeButton("Cancel", null).setPositiveButton("I have permission") { _, _ ->
                 startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type = "*/*"; addCategory(Intent.CATEGORY_OPENABLE) }, pickerIpa)
             }.show()
     }
     private fun detail(dir: File) {
         selected = dir; screen()
-        val report = JSONObject(File(dir, "report.json").readText()); val app = report.optJSONObject("application") ?: JSONObject()
+        val report = try {
+            JSONObject(File(dir, "report.json").readText())
+        } catch (_: Exception) {
+            Toast.makeText(this, "Library entry is unreadable; returning to the library", Toast.LENGTH_LONG).show()
+            home()
+            return
+        }
+        val app = report.optJSONObject("application") ?: JSONObject()
         button("← Game Library") { home() }
         val iconPath = File(dir, "icon.png")
         if (iconPath.isFile) {
@@ -445,7 +516,12 @@ class MainActivity : Activity() {
             val buildCard = card()
             text("Host APK validation/attachment · ${conversion.optInt("percent", 0)}% · ${conversion.optString("status", "NOT_BUILT")}", 16f, statusColor(conversion.optString("status")), true, buildCard)
             text(conversion.optString("message"), 12f, muted, parent = buildCard)
-            text("This is the complete-game APK path; it requires translated reachable code, API replacements, resources and lifecycle. The separate Force action can produce an installable placeholder only, with no translated gameplay.", 12f, muted, parent = buildCard)
+            text("This is the complete-game APK path; it requires translated reachable code, API replacements, resources and lifecycle. Force convert packages the proven bounded subset into a real signed APK; anything else gets an installable, clearly labelled preview shell only.", 12f, muted, parent = buildCard)
+        }
+        report.optJSONObject("deviceTranslation")?.takeIf { it.optString("status") == "PROVEN" && it.optInt("coveragePercent", 0) == 100 }?.let { proof ->
+            val proofCard = card()
+            text("Bounded conversion proof verified on-device", 16f, accent, true, proofCard)
+            text("${proof.optInt("sourceBytes", 0)} executable bytes form one proven closed-integer routine covering 100% of __text. Force convert turns this proof into a signed APK whose translated entry runs through JNI (returned value is displayed on launch).", 12f, muted, parent = proofCard)
         }
         text("Compatibility report", 22f, textColor, true)
         val blockers = report.optJSONArray("blockers")
@@ -462,7 +538,7 @@ class MainActivity : Activity() {
         button("View full machine-readable report") { showText("Conversion report", report.toString(2)) }
         button("View real conversion logs") { showText("Logs", File(dir, "conversion.jsonl").takeIf { it.isFile }?.readText() ?: "No logs") }
         text("APK conversion", 22f, textColor, true)
-        text("A complete iOS-to-Android game translator and framework/API replacements are not implemented. The host CLI can inspect and reconstruct code, but its restricted experimental native-entry output is not a complete game port and is not accepted as one. Force creates only a signed placeholder with the IPA app name and icon where available; the iOS executable and game code are not translated, so this placeholder will not run the game.", 14f, muted)
+        text("A general iOS-to-Android game translator and framework/API replacements are not implemented. What is implemented is the bounded subset: when the executable is statically proven to be exactly one closed-integer routine, Force convert packages its translated machine code into a signed, installable APK that runs the entry through JNI and shows the message recovered from the IPA. Anything outside the subset gets only a clearly labelled, non-playable preview shell with the IPA app name and icon.", 14f, muted)
         button("Copy host analysis command") {
             val abi = preferences.getString("target_abi", "auto") ?: "auto"
             val suffix = if (abi == "auto") "" else " --target-abi $abi"
@@ -486,7 +562,11 @@ class MainActivity : Activity() {
         }
         if (hostOutputFile != null) {
             val hostAbi = hostConversion?.optString("targetAbi").orEmpty()
-            text("Complete-game host APK attached · ABI $hostAbi. The host conversion contract passed static checks; on-device execution and actual gameplay have not been tested.", 13f, accent)
+            val hostOrigin = if (hostConversion?.optString("origin") == "ON_DEVICE")
+                "Complete-game conversion built on-device · ABI $hostAbi. The bounded conversion proof and package checks passed; on-device gameplay has not been tested."
+            else
+                "Complete-game host APK attached · ABI $hostAbi. The host conversion contract passed static checks; on-device execution and actual gameplay have not been tested."
+            text(hostOrigin, 13f, accent)
             text("Translated reachable functions: ${hostConversion?.optInt("translatedReachableFunctions", 0) ?: 0} · generated API replacements: ${hostConversion?.optInt("generatedApiReplacements", 0) ?: 0} · unresolved reachable functions: ${hostConversion?.optInt("untranslatedReachableFunctions", -1) ?: -1}.", 12f, muted)
             button("Install ${hostOutputFile.name}", true) { installArtifact(dir, hostOutputFile.name) }
             button("Share ${hostOutputFile.name}") { shareResultApk(dir, hostOutputFile.name) }
@@ -502,10 +582,13 @@ class MainActivity : Activity() {
             runCatching { PlaceholderArtifactContract.validate(report, dir, placeholderName) }.getOrNull()
         } else null
         if (placeholderConversion?.optString("status") == "GENERATED" && placeholderOutputFile == null) {
-            text("The placeholder APK is missing or its digest/metadata is invalid; it cannot be installed or shared.", 13f, statusColor("FAILED"))
+            text("The preview APK is missing or its digest/metadata is invalid; it cannot be installed or shared.", 13f, statusColor("FAILED"))
         }
         report.optJSONObject("placeholderBuildProgress")?.takeIf { it.optString("status") == "FAILED" }?.let { build ->
-            text("Placeholder build failed: ${build.optString("message")}", 13f, statusColor("FAILED"))
+            text("Preview shell build failed: ${build.optString("message")}", 13f, statusColor("FAILED"))
+        }
+        report.optJSONObject("convertedBuildProgress")?.takeIf { it.optString("status") == "FAILED" }?.let { build ->
+            text("Conversion build failed: ${build.optString("message")}", 13f, statusColor("FAILED"))
         }
         if (placeholderOutputFile != null) {
             val iconDescription = when (placeholderConversion?.optString("iconSource")) {
@@ -513,36 +596,62 @@ class MainActivity : Activity() {
                 "GENERATED_APP_NAME_ICON" -> "Generated name-based icon included; no original icon was recovered"
                 else -> "Fallback icon included; no original icon was recovered"
             }
-            text("Installable placeholder APK · $iconDescription", 13f, accent, true)
+            text("Installable preview APK · $iconDescription", 13f, accent, true)
             text("This launches a branded notice screen only. No iOS executable, translated game code, or playable gameplay is included.", 12f, muted)
             button("Install ${placeholderOutputFile.name}", true) { installArtifact(dir, placeholderOutputFile.name) }
             button("Share ${placeholderOutputFile.name}") { shareResultApk(dir, placeholderOutputFile.name) }
         }
         if (File(dir, "source.ipa").isFile && app.has("sha256") && hostOutputFile == null) {
-            text("Force builds a signed, installable placeholder APK only; it does not translate or run the game.", 12f, muted)
-            dangerButton(if (placeholderOutputFile != null) "Rebuild placeholder APK" else "Force convert to .apk") {
-                startPlaceholderBuild(dir)
+            val deviceConvertible = report.optJSONObject("deviceTranslation")?.let {
+                it.optString("status") == "PROVEN" && it.optInt("coveragePercent", 0) == 100 && it.optInt("functionCount", 0) == 1
+            } == true
+            if (deviceConvertible) {
+                text("Force builds a real signed APK: the whole executable is one proven closed-integer routine, so its translated entry is packaged as libconverted.so and runs through JNI when opened.", 12f, muted)
+                val rebuilt = report.optJSONObject("deviceConversion")?.optString("status") == "GENERATED_ON_DEVICE"
+                dangerButton(if (rebuilt) "Rebuild converted APK" else "Force convert to .apk") {
+                    startForceConvert(dir, true)
+                }
+            } else {
+                text("This IPA is outside the bounded conversion subset; Force builds a signed, installable preview APK only. It does not translate or run the game.", 12f, muted)
+                dangerButton(if (placeholderOutputFile != null) "Rebuild preview APK" else "Force convert to .apk") {
+                    startForceConvert(dir, false)
+                }
             }
         }
         button("Delete library entry") {
-            if (!Jobs.busy) AlertDialog.Builder(this).setTitle("Delete imported entry?").setMessage("Removes the retained IPA, analysis reports, recovered icon, any validated complete-game host APK and any generated placeholder APK from this device.")
+            if (!Jobs.busy) AlertDialog.Builder(this).setTitle("Delete imported entry?").setMessage("Removes the retained IPA, analysis reports, recovered icon, any converted APK, and any generated preview APK from this device.")
                 .setNegativeButton("Cancel", null).setPositiveButton("Delete") { _, _ -> dir.deleteRecursively(); home() }.show()
         }
     }
 
-    private fun startPlaceholderBuild(dir: File) {
-        if (Jobs.busy) return
-        if (!File(dir, "source.ipa").isFile) {
-            Toast.makeText(this, "Retained IPA not found; placeholder cannot be built", Toast.LENGTH_LONG).show()
+    private fun startForceConvert(dir: File, convertible: Boolean) {
+        if (Jobs.busy) {
+            Toast.makeText(this, "A job is already running", Toast.LENGTH_SHORT).show()
             return
         }
-        Jobs.begin("Building installable placeholder")
+        if (!File(dir, "source.ipa").isFile) {
+            Toast.makeText(this, "Retained IPA not found; nothing can be built", Toast.LENGTH_LONG).show()
+            return
+        }
+        Jobs.begin(if (convertible) "Converting proven IPA" else "Building installable preview shell")
         returnToDetailAfterJob = dir
         wasBusy = true
-        Jobs.run {
-            PlaceholderApkBuilder(applicationContext).build(dir) { percent, message ->
-                Jobs.update(percent, message)
+        val started = Jobs.tryRun {
+            if (convertible) {
+                ConvertedApkBuilder(applicationContext).build(dir) { percent, message ->
+                    Jobs.update(percent, message)
+                }
+            } else {
+                PlaceholderApkBuilder(applicationContext).build(dir) { percent, message ->
+                    Jobs.update(percent, message)
+                }
             }
+        }
+        if (!started) {
+            wasBusy = false
+            returnToDetailAfterJob = null
+            Toast.makeText(this, "A job is already running", Toast.LENGTH_SHORT).show()
+            return
         }
         home()
     }
@@ -576,20 +685,28 @@ class MainActivity : Activity() {
         if (Jobs.busy) return
         val context = applicationContext
         if (requestCode == pickerIpa) {
+            if (Jobs.busy) {
+                Toast.makeText(this, "A job is already running; wait for it to finish first", Toast.LENGTH_LONG).show()
+                return
+            }
             Jobs.begin("Analyzing · ${documentDisplayName(uri)}")
-            Jobs.update(0, "Starting IPA analysis; game code is not translated")
-            Jobs.run {
+            Jobs.update(0, "Starting IPA analysis; the bounded conversion proof runs automatically")
+            val started = Jobs.tryRun {
                 val library = Library(context)
                 val (dir, report) = library.import(uri) { percent, message -> Jobs.update(percent, message) }
                 returnToDetailAfterJob = dir
                 val state = report.optString("state", "FAILED")
                 Jobs.update(100, "$state · IPA analysis finished · APK ${report.optJSONObject("conversionProgress")?.optString("status", "NOT_BUILT") ?: "NOT_BUILT"}")
             }
-            wasBusy = true; home()
+            if (started) { wasBusy = true; home() }
         } else if (requestCode == pickerApk) {
             val dir = selected ?: return
-            Jobs.run { attachApk(context, uri, dir); Jobs.update("Host APK attached") }
-            wasBusy = true; home()
+            if (Jobs.busy) {
+                Toast.makeText(this, "A job is already running; wait for it to finish first", Toast.LENGTH_LONG).show()
+                return
+            }
+            val started = Jobs.tryRun { attachApk(context, uri, dir); Jobs.update("Host APK attached") }
+            if (started) { wasBusy = true; home() }
         }
     }
     private fun installArtifact(dir: File, name: String) {

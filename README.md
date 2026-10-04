@@ -2,7 +2,7 @@
 
 An **offline IPA inspection and bounded native-reconstruction workbench**, not an iOS emulator or a general game converter. It includes an Android importer/analyzer, a C++ Mach-O parser, and Python reconstruction tools.
 
-> **No playable or complete-game APKs are currently produced.** The host can now translate one statically proven closed-integer ARM entry routine (MOV-immediate, MOVK, register MOV, immediate ADD/SUB, RET) into a loadable, standalone Android ARM shared object. A small set of real Bionic-backed time API shims is also implemented, and generated as source only when reconstructed calls establish a path from the selected entry through resolved internal calls to one of those imports. Neither artifact is linked into a converted game or APK; general code, framework APIs, Android lifecycle and assets remain unsupported. Every observed Darwin import additionally receives a compatibility-registry entry: a verified implementation or an explicitly unimplemented stub handler — resolution coverage, never implementation coverage. On the `convert` path the host can package the isolated artifacts into a signed, explicitly labelled **experimental shell** APK (`experimental-shell-v1`) that states on screen that no game code is translated; it is not a game APK. The Android app can separately build an explicitly labelled, signed, installable placeholder, but it contains no translated game code and cannot run the IPA's game.
+> **One bounded subset converts for real; everything else stays honestly unbuilt.** When an IPA's whole executable is statically proven to be exactly one closed-integer ARM entry routine (MOV-immediate, MOVK, register MOV, immediate ADD/SUB, RET) with no imports, dependencies, fixups or runtime metadata, both the host CLI and the on-device app convert it end to end into a signed, installable APK (`complete-game-v1`): the translated entry is packaged as `libconverted.so` and runs through JNI when the launcher opens, showing the message recovered from the IPA. See `tests/data/hello-test.ipa`, which converts to an APK that displays `hello test succesfull`. Outside that proven subset nothing is translated: the host can still lower the entry routine into a standalone shared object and report compatibility registries, and on the `convert` path it packages those artifacts into a signed, explicitly labelled **experimental shell** APK (`experimental-shell-v1`) that states on screen that no game code is translated. The Android app can separately build an explicitly labelled, signed, installable preview shell for unconvertible IPAs; it contains no translated game code and cannot run the IPA's game. Device execution and gameplay of bounded conversions are never claimed as tested.
 
 ## Offline reconstruction
 
@@ -39,7 +39,8 @@ zipalign/apksigner) under the `experimental-shell-v1` contract. The shell launch
 disclosure that no game code is translated, and its metadata repeats it; the validator rejects a
 shell that drops the disclosure or claims game code. The shell never satisfies
 `complete-game-v1`, and its build status is reported separately from `conversionProgress`, which
-stays 0 / `NOT_BUILT` for complete games.
+stays 0 / `NOT_BUILT` unless the IPA passed the bounded complete-conversion gate and a signed
+`complete-game-v1` APK was actually built and statically validated.
 
 These files contain one isolated function only. The shared object has no JNI entry, imports, game
 resources, lifecycle, or callsites into the original game. The reported `portProgress.percent` is
@@ -51,23 +52,29 @@ pointer slots when statically readable.
 
 ## APK output policy
 
-- CI builds **only the RadekiOSConventor importer/analyzer APK** (`RadekiOSConventor-debug.apk`).
+- CI builds **only the RadekiOSConventor importer/analyzer APK** (`RadekiOSConventor-debug.apk`),
+  plus the hello-test bounded conversion used to exercise the complete-game pipeline.
 - Importing an IPA runs analysis only and does not automatically create an APK. The red **Force
-  convert to .apk** action creates a separately named, signed and installable launcher placeholder
-  branded with the IPA app name and recovered icon where available. It contains no iOS executable,
-  translated game code or gameplay, and says so when launched. Placeholder creation does not count
+  convert to .apk** action routes by the on-device proof: if the executable is proven to be exactly
+  one closed-integer routine, it builds a real signed APK whose translated entry runs through JNI;
+  otherwise it builds a separately named, signed and installable preview shell branded with the IPA
+  app name and recovered icon where available. The preview shell contains no iOS executable,
+  translated game code or gameplay, and says so when launched. Preview-shell creation does not count
   as code-translation or complete-game progress.
 - A host APK can be attached only if its metadata declares the `complete-game-v1` contract and
   passes source-identity, complete reachable-code/API/resource, ABI, packaging and provenance
-  checks. Placeholder APK metadata and provider paths are separate; a placeholder can never satisfy
-  the host APK contract. The current host CLI has **no producer** for that contract.
+  checks. Preview-shell APK metadata and provider paths are separate; a preview shell can never
+  satisfy the host APK contract. The host CLI **is** a producer for that contract for the proven
+  bounded subset only (see `radek/gamepack.py`); IPAs outside the subset stay `NOT_BUILT`.
 - The `experimental-shell-v1` APK is a third, distinct category: a signed, honestly labelled
   inspection shell for the isolated translated artifacts and compatibility-registry source. It is
   produced only on the `convert` path, is validated with `python3 -m radek validate-shell`, and can
   never be attached as a complete-game host APK.
-- The original IPA is retained only in private analysis storage until the library entry is deleted;
-  it is never packaged into an APK. A recovered icon is copied into the placeholder; if no original
-  icon is available, a generated/fallback icon is used and reported accurately.
+- The original IPA archive itself is retained only in private analysis storage until the library
+  entry is deleted and is never embedded whole into an APK. For bounded conversions the bundle's
+  static resource files are packaged verbatim under `assets/bundle/` with a hashed inventory; for
+  preview shells only the app name and a recovered icon are copied in. If no original icon is
+  available, a generated/fallback icon is used and reported accurately.
 
 The host's ARM assessment prefers `arm64-v8a` when an IPA contains both ARM32 and ARM64. A
 supported ARM32-only input is assessed for `armeabi-v7a`. These ABI choices describe analysis and
@@ -148,7 +155,9 @@ validation.
 Open **Actions → Build and validate Android APKs → Run workflow** and select the branch containing
 this implementation. Pushes and pull requests also run CI. After a successful run, download the
 **RadekiOSConventor-debug.apk** importer artifact. CI runs native, Python and Android importer tests,
-validates the importer APK, and includes no synthetic or placeholder game APK artifact.
+validates the importer APK, converts `tests/data/hello-test.ipa` end to end with the host CLI, and
+validates the resulting bounded complete-game APK (`complete-game-v1`) alongside the honestly
+blocked sample leaf.
 
 Only inspect or convert IPAs you own or are authorized to process. Encrypted/FairPlay-protected
 images are blocked; no protection bypass is provided.

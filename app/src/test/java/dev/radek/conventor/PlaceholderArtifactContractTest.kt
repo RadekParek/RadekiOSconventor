@@ -18,7 +18,7 @@ class PlaceholderArtifactContractTest {
         try {
             val report = reportFor(directory)
             val name = ArtifactNames.placeholderApkFileName(report)
-            assertEquals("Example-placeholder.apk", name)
+            assertEquals("Example-preview.apk", name)
             assertEquals(name, PlaceholderArtifactContract.validate(report, directory, name).name)
             assertThrows(IllegalArgumentException::class.java) {
                 PlaceholderArtifactContract.validate(report, directory, ArtifactNames.apkFileName(report))

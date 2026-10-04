@@ -21,9 +21,15 @@ class ArtifactNamesTest {
         assertEquals("bad_game.apk", ArtifactNames.apkFileName(report))
     }
 
-    @Test fun placeholderArtifactHasAnExplicitlySeparateFilename() {
+    @Test fun previewArtifactHasAnExplicitlySeparateFilenameWithoutPlaceholderWording() {
         val report = JSONObject().put("source", JSONObject().put("originalName", "../My Game.ipa"))
-        assertEquals("My Game-placeholder.apk", ArtifactNames.placeholderApkFileName(report))
+        assertEquals("My Game-preview.apk", ArtifactNames.placeholderApkFileName(report))
         assertNotEquals(ArtifactNames.apkFileName(report), ArtifactNames.placeholderApkFileName(report))
+        for (name in listOf(ArtifactNames.apkFileName(report), ArtifactNames.placeholderApkFileName(report))) {
+            org.junit.Assert.assertFalse(
+                "user-visible artifact names must not say placeholder: $name",
+                name.lowercase().contains("placeholder"),
+            )
+        }
     }
 }
