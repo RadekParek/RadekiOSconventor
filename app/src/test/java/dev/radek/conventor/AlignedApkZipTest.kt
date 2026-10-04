@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.RandomAccessFile
 import java.nio.file.Files
 import java.util.zip.ZipEntry

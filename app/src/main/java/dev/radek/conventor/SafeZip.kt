@@ -85,9 +85,9 @@ object SafeZip {
      * the archive plus everything it expands to.
      */
     fun requireStorage(destination: File, requiredBytes: Long) {
-        var directory = destination
-        while (!directory.isDirectory && directory.parentFile != null) directory = directory.parentFile
-        val usable = try { directory.usableSpace } catch (_: Exception) { Long.MAX_VALUE }
+        var directory: File? = destination
+        while (directory != null && !directory.isDirectory) directory = directory.parentFile
+        val usable = try { directory?.usableSpace ?: Long.MAX_VALUE } catch (_: Exception) { Long.MAX_VALUE }
         require(usable >= requiredBytes + MIN_FREE_HEADROOM) {
             "not enough free storage: ${formatMib(requiredBytes)} MiB needed, ${formatMib(maxOf(0L, usable))} MiB free"
         }
