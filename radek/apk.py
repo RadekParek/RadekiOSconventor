@@ -145,17 +145,17 @@ import android.os.Bundle;
 import android.widget.TextView;
 
 /** Shows the honest status of this package: artifacts only, no game. */
-public final class ExperimentalShellActivity extends Activity {{
+public final class ExperimentalShellActivity extends Activity {
     @Override
-    protected void onCreate(Bundle savedInstanceState) {{
+    protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         TextView text = new TextView(this);
         text.setPadding(48, 96, 48, 48);
         text.setTextSize(16f);
         text.setText(getString(R.string.shell_notice));
         setContentView(text);
-    }}
-}}
+    }
+}
 """
 
 

@@ -367,6 +367,10 @@ class ExperimentalShellTests(unittest.TestCase):
         self.assertIn("no game code is translated", EXPERIMENTAL_SHELL_NOTICE.lower())
         self.assertIn("shell_notice", activity)
         self.assertIn("Radek Experimental Shell", strings)
+        # The launcher source is plain Java: no format-escaping leftovers.
+        self.assertNotIn("{{", activity)
+        self.assertIn("extends Activity {", activity)
+        self.assertEqual(activity.count("{"), activity.count("}"))
         # aapt2 rejects unescaped apostrophes; the notice contains one (IPA's).
         self.assertIn("\\'", strings)
         self.assertNotIn("IPA's", strings)
