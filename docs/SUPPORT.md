@@ -14,9 +14,12 @@ placeholder, but not a playable or complete-game APK.
 | Mach-O thin/FAT/FAT64 | SUPPORTED | CPU/subtype, endian headers, bounded load-command/section/symbol parsing |
 | Mach-O loader metadata | PARTIAL | Relocations, dynamic tables, binds/imports/addends, export trie, chained-fixup metadata, dependencies, LC_MAIN and signature-blob metadata. Incomplete bind tables and unsupported loader semantics block conversion |
 | ObjC/Swift/unwind/init metadata | PARTIAL | Host reconstruction recovers selected Objective-C/Swift metadata and reports limitations; it does not implement the Apple runtime ABI |
-| ARM64 reconstruction | PARTIAL | A restricted closed-integer entry leaf can be translated into `translated-entry.bin`, `translated-entry.c`, and a minimal ARM64 ET_DYN shared object. It is statically validated but not linked into a game or APK |
+| ARM64 reconstruction | PARTIAL | A restricted closed-integer entry leaf (MOV-immediate, MOVK, register MOV, immediate ADD/SUB, RET) can be translated into `translated-entry.bin`, `translated-entry.c`, and a minimal ARM64 ET_DYN shared object. It is statically validated but not linked into a game or APK |
 | ARM64e | BLOCKED | PAC/ABI adaptation is not proven |
-| ARMv6/ARMv7/v7s/Thumb/Thumb-2 | PARTIAL | Selected immediate arithmetic/return instruction subsets can be lowered to ARMv7 and emitted in the same isolated ET_DYN format. It is not linked into a game; no 32-bit game APK is emitted |
+| ARMv6/ARMv7/v7s/Thumb/Thumb-2 | PARTIAL | Selected immediate arithmetic, register-copy and return instruction subsets can be lowered to ARMv7 and emitted in the same isolated ET_DYN format. It is not linked into a game; no 32-bit game APK is emitted |
+| Compatibility registry source | PARTIAL | `ioscompat/libioscompat.cpp` gives every observed Darwin import a resolution target: verified time-shim implementations or explicitly unimplemented stub handlers. Stub counts are resolution coverage, never implementation coverage |
+| Dynamic stub hook registration | SUPPORTED (registration only) | `libioscompat.so` registry registers unmapped symbols at runtime and resolves them to counted stub trampolines. Registration is not implementation and rewrites no IPA callsites |
+| Experimental shell APK | SUPPORTED (explicitly non-game) | `convert` builds `experimental-shell.apk` (aapt2/javac/d8/zipalign/apksigner) around the isolated artifacts under `experimental-shell-v1`; launcher and metadata disclose that no game code is translated; it cannot satisfy `complete-game-v1` |
 | FAT ARM64 + ARM32 selection | SUPPORTED (selection only) | Automatic selection prefers ARM64. Explicit 32-bit target is accepted only when an ARM32 slice is present |
 | Supported ARM32-only target | SUPPORTED (selection only) | Selects `armeabi-v7a`; no complete converter currently emits an APK |
 | Offline source reconstruction | PARTIAL | Function discovery, CFGs, selected ARM disassembly, reference tracking and pseudocode with explicit uncertainty. Never presented as original source or executed |
@@ -34,8 +37,12 @@ placeholder, but not a playable or complete-game APK.
 ## Why symbol substitutions are not API implementations
 
 The app may report 100% **symbol classification/triage** when every observed import has been
-categorized as a name candidate, semantic-rewrite candidate, implemented-shim export, or unmapped.
-That is deliberately separate from direct NDK candidates and actual linked-implementation coverage.
+categorized as a name candidate, semantic-rewrite candidate, implemented-shim export, compat stub
+handler, or unmapped. That is deliberately separate from direct NDK candidates and actual
+linked-implementation coverage. The compat stub category means a symbol now resolves to an
+explicitly unimplemented handler that records invocations; it is a resolution target for future
+work, not an API implementation, and its count is never added to verified or generated-translation
+numbers.
 The four concrete time shims have host behavior tests; on Android, the mapper uses `dlopen`/`dlsym`/
 `dladdr` to verify their exports in `libioscompat.so`. This only proves the replacement function is
 available in the analyzer process: no IPA callsite is rewritten or linked, and other API behavior
@@ -73,6 +80,10 @@ classification is a useful explicit blocker, not a conversion result.
   these artifacts generated but not linked to the game.
 - `leaf-experiment.ll` — supplementary LLVM IR for the same single leaf; syntax-checked with
   `llvm-as` when available.
+- `ioscompat/` — generated compatibility-registry source, copied time-shim header and
+  `registry.json` with the per-symbol verified/stubbed classification.
+- `experimental-shell.apk` — only on the `convert` path and only when the Android toolchain is
+  available; labelled, signed inspection shell for the artifacts above (`experimental-shell-v1`).
 
 For a proven entry, `portProgress.percent` is the translated source-byte count divided by executable
 `__text` bytes in the selected Mach-O slice. It can be nonzero (or even 100% for a tiny synthetic

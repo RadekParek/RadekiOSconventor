@@ -42,6 +42,36 @@ jobs:
         run: python3 tools/ci_run.py bash tools/test_sanitized.sh
       - name: Host tests and placeholder/complete-game separation regressions
         run: python3 tools/ci_run.py python3 -m unittest discover -v
+      - name: Convert committed sample IPA with the host CLI
+        run: |
+          set -e
+          test -f tests/data/sample-leaf.ipa
+          set +e
+          python3 -m radek convert tests/data/sample-leaf.ipa --authorized --output .local/sample-conversion
+          code=$?
+          set -e
+          test "$code" -eq 3  # BLOCKED: honest state, complete-game conversion unsupported
+          test -f .local/sample-conversion/libtranslated-entry.so
+          test -f .local/sample-conversion/translated-entry.c
+          test -f .local/sample-conversion/ioscompat/libioscompat.cpp
+          test -f .local/sample-conversion/ioscompat/registry.json
+          python3 - <<'EOF'
+          import json
+          report = json.load(open(".local/sample-conversion/report.json"))
+          assert report["state"] == "BLOCKED", report["state"]
+          assert report["portProgress"]["percent"] > 0, report["portProgress"]
+          registry = report["compatRegistry"]
+          assert registry["verifiedImplementations"] == 1, registry
+          assert registry["stubbedHandlers"] == 2, registry
+          assert registry["unresolvedImports"] == 0, registry
+          shell = report["experimentalShell"]
+          assert shell["status"] == "BUILT_NOT_A_GAME", shell
+          assert shell["completeGameConversion"] is False, shell
+          assert report["conversionProgress"]["status"] == "NOT_BUILT", report["conversionProgress"]
+          print("sample conversion honest-status checks passed")
+          EOF
+      - name: Validate the labelled experimental shell APK
+        run: python3 -m radek validate-shell .local/sample-conversion/experimental-shell.apk
       - name: Android unit tests, lint, JNI native build and APK
         run: python3 tools/ci_run.py ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
       - name: Validate converter application APK
@@ -55,6 +85,20 @@ jobs:
           name: RadekiOSConventor-debug.apk
           path: artifacts/RadekiOSConventor-debug.apk
           if-no-files-found: error
+      - name: Collect sample conversion artifacts
+        if: always() && hashFiles('.local/sample-conversion/**') != ''
+        run: |
+          mkdir -p artifacts/sample-conversion
+          cp .local/sample-conversion/report.json artifacts/sample-conversion/ || true
+          cp .local/sample-conversion/experimental-shell.apk artifacts/sample-conversion/ || true
+          cp -r .local/sample-conversion/ioscompat artifacts/sample-conversion/ || true
+      - name: Upload sample conversion artifacts
+        if: always() && hashFiles('artifacts/sample-conversion/**') != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: sample-conversion-artifacts
+          path: artifacts/sample-conversion/
+          if-no-files-found: warn
       - name: Upload test reports
         if: always() && hashFiles('app/build/reports/**', 'artifacts/validation.json') != ''
         uses: actions/upload-artifact@v6

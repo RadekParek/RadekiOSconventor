@@ -25,7 +25,9 @@ The Android importer APK is `app/build/outputs/apk/debug/app-debug.apk`; CI copi
 
 The host's `radek validate` command needs Android build-tools 35.0.0 (`aapt2`, `zipalign`, and
 `apksigner`) to validate an already-built importer or future complete-game APK. It does not build a
-game APK.
+game APK. With the same toolchain installed, `radek convert` additionally assembles the labelled
+`experimental-shell.apk` around isolated translated artifacts, and `radek validate-shell` checks
+its `experimental-shell-v1` contract (disclosure, DEX, metadata, signature).
 
 ## Import and inspect on Android
 

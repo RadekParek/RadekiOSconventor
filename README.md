@@ -2,7 +2,7 @@
 
 An **offline IPA inspection and bounded native-reconstruction workbench**, not an iOS emulator or a general game converter. It includes an Android importer/analyzer, a C++ Mach-O parser, and Python reconstruction tools.
 
-> **No playable or complete-game APKs are currently produced.** The host can now translate one statically proven closed-integer ARM entry routine into a loadable, standalone Android ARM shared object. A small set of real Bionic-backed time API shims is also implemented, and generated as source only when reconstructed calls establish a path from the selected entry through resolved internal calls to one of those imports. Neither artifact is linked into a converted game or APK; general code, framework APIs, Android lifecycle, assets and packaging remain unsupported. The Android app can separately build an explicitly labelled, signed, installable placeholder, but it contains no translated game code and cannot run the IPA's game.
+> **No playable or complete-game APKs are currently produced.** The host can now translate one statically proven closed-integer ARM entry routine (MOV-immediate, MOVK, register MOV, immediate ADD/SUB, RET) into a loadable, standalone Android ARM shared object. A small set of real Bionic-backed time API shims is also implemented, and generated as source only when reconstructed calls establish a path from the selected entry through resolved internal calls to one of those imports. Neither artifact is linked into a converted game or APK; general code, framework APIs, Android lifecycle and assets remain unsupported. Every observed Darwin import additionally receives a compatibility-registry entry: a verified implementation or an explicitly unimplemented stub handler — resolution coverage, never implementation coverage. On the `convert` path the host can package the isolated artifacts into a signed, explicitly labelled **experimental shell** APK (`experimental-shell-v1`) that states on screen that no game code is translated; it is not a game APK. The Android app can separately build an explicitly labelled, signed, installable placeholder, but it contains no translated game code and cannot run the IPA's game.
 
 ## Offline reconstruction
 
@@ -18,6 +18,12 @@ Authorized imports are analyzed before compatibility is assessed:
   conservatively, which such calls lie on resolved internal call paths from the selected entry.
 
 Results are written as `reconstruction.json` and `reconstruction.md` beside `report.json`.
+Analysis also writes an `ioscompat/` directory containing the generated compatibility-registry
+source (`libioscompat.cpp`), the copied time-shim header and a `registry.json` classification of
+every observed Darwin import as `verified` (tested implementation) or `stubbed-unimplemented`
+(explicit resolution handler). Stubs record invocations and return a documented safe default;
+they are resolution targets for a future linker, not API implementations, and the report counts
+them separately from verified shims.
 When (and only when) the entry routine passes the closed-integer proof, the host writes:
 
 - `translated-entry.bin`: lowered ARM64/ARMv7 function bytes;
@@ -25,17 +31,23 @@ When (and only when) the entry routine passes the closed-integer proof, the host
   `radek_translated_entry`, statically checked for ABI, export size/hash, and undefined symbols;
 - `translated-entry.c`: a portable C rendering of the same proof-carrying integer operations,
   executable in host tests to compare return-value semantics;
-- `leaf-experiment.ll`: supplementary textual LLVM IR for the same MOV-immediate/MOVK/immediate-
-  ADD/SUB/RET leaf.
+- `leaf-experiment.ll`: supplementary textual LLVM IR for the same proven leaf.
+
+On the `convert` path only, when those artifacts exist, the host additionally assembles,
+zipaligns and signs `experimental-shell.apk` using the Android toolchain (aapt2/javac/d8/
+zipalign/apksigner) under the `experimental-shell-v1` contract. The shell launcher displays the
+disclosure that no game code is translated, and its metadata repeats it; the validator rejects a
+shell that drops the disclosure or claims game code. The shell never satisfies
+`complete-game-v1`, and its build status is reported separately from `conversionProgress`, which
+stays 0 / `NOT_BUILT` for complete games.
 
 These files contain one isolated function only. The shared object has no JNI entry, imports, game
-resources, lifecycle, or callsites into the original game; it is not packaged into an APK. The
-reported `portProgress.percent` is source instruction-byte coverage of the selected slice's
-executable `__text` sections, not a whole-app or playability percentage. `conversionProgress` stays
-at 0 / `NOT_BUILT` until a complete game APK exists. Reconstruction is an engineering artifact,
-not original source; uncertain instructions and control flow are marked, and imported code is never
-executed. Objective-C `__objc_msgrefs` selector references are followed through their
-`__objc_selrefs` pointer slots when statically readable.
+resources, lifecycle, or callsites into the original game. The reported `portProgress.percent` is
+source instruction-byte coverage of the selected slice's executable `__text` sections, not a
+whole-app or playability percentage. Reconstruction is an engineering artifact, not original
+source; uncertain instructions and control flow are marked, and imported code is never executed.
+Objective-C `__objc_msgrefs` selector references are followed through their `__objc_selrefs`
+pointer slots when statically readable.
 
 ## APK output policy
 
@@ -49,6 +61,10 @@ executed. Objective-C `__objc_msgrefs` selector references are followed through 
   passes source-identity, complete reachable-code/API/resource, ABI, packaging and provenance
   checks. Placeholder APK metadata and provider paths are separate; a placeholder can never satisfy
   the host APK contract. The current host CLI has **no producer** for that contract.
+- The `experimental-shell-v1` APK is a third, distinct category: a signed, honestly labelled
+  inspection shell for the isolated translated artifacts and compatibility-registry source. It is
+  produced only on the `convert` path, is validated with `python3 -m radek validate-shell`, and can
+  never be attached as a complete-game host APK.
 - The original IPA is retained only in private analysis storage until the library entry is deleted;
   it is never packaged into an APK. A recovered icon is copied into the placeholder; if no original
   icon is available, a generated/fallback icon is used and reported accurately.
@@ -65,11 +81,19 @@ Darwin/Android ABI compatibility or link the imported code. Separately, `libiosc
 four tested C ABI shims: `_CFAbsoluteTimeGetCurrent`, `_CACurrentMediaTime`, `_mach_absolute_time`,
 and `_mach_timebase_info`. The host emits their C++ implementation source only when a reconstructed
 call graph establishes a path from the selected entry to one of those imports; the generated shim
-source is not linked into the entry library or a game APK. On-device `dlsym` checks can verify that the compiled shim exports
-are present, but do not rewrite IPA callsites. Symbol-triage percentages describe categorization,
-not translation coverage. UIKit, the general Foundation/CoreFoundation object ABI, Swift,
-Objective-C dispatch, graphics, audio, input, game lifecycle and general resource APIs remain
-unsupported when required.
+source is not linked into the entry library or a game APK. On-device `dlsym` checks can verify that
+the compiled shim exports are present, but do not rewrite IPA callsites.
+
+`libioscompat.so` also carries a dynamic symbol-resolution registry: the four verified shims plus a
+pool of individually counted stub trampolines. Symbols that would otherwise stay unmapped can be
+registered at runtime (`radek_compat_register_stub` / `NativeBridge.compatRegisterStub`) and then
+resolve to an explicit stub handler instead of nothing. The on-device triage reports those as
+`compat stub handler(s) registered (unimplemented)` — a resolution category that is never counted
+toward verified implementations or generated translations. The host likewise generates a per-IPA
+registry source in which every observed import is classified exactly as `verified` or
+`stubbed-unimplemented`. Symbol-triage percentages describe categorization, not translation
+coverage. UIKit, the general Foundation/CoreFoundation object ABI, Swift, Objective-C dispatch,
+graphics, audio, input, game lifecycle and general resource APIs remain unsupported when required.
 
 ## Build and test
 
@@ -85,8 +109,19 @@ python3 -m unittest discover -v
 Java 17, Python 3.10+, C++17, Android platform 35, build-tools 35.0.0, NDK 27.2.12479018,
 CMake 3.22.1; the Gradle wrapper is included. No Python packages are required.
 
-For a synthetic Mach-O input, the host CLI can produce and statically validate the isolated
-translated function artifacts while still refusing an incomplete game APK:
+A small synthetic sample IPA (`tests/data/sample-leaf.ipa`, regenerable with
+`python3 tools/make_sample_ipa.py`) is committed for end-to-end checks: its entry routine lies
+entirely inside the proven subset, so analysis reaches PARTIAL with nonzero translated-byte
+coverage and a complete compatibility registry. Run it through both paths:
+
+```sh
+python3 -m radek analyze tests/data/sample-leaf.ipa --authorized --output .local/analysis
+python3 -m radek convert tests/data/sample-leaf.ipa --authorized --output .local/conversion
+# .local/conversion holds libtranslated-entry.so, ioscompat/ registry source, and — when an
+# Android toolchain is installed — experimental-shell.apk. State is BLOCKED: no game APK.
+```
+
+For other synthetic Mach-O inputs, `tools/make_fixture.py` produces variants:
 
 ```sh
 python3 tools/make_fixture.py --arch arm64 --output .local/fixture.ipa
@@ -104,8 +139,9 @@ python3 -m radek analyze authorized.ipa --authorized --output workspace/analysis
 A new output directory is required. Reports and logs persist; temporary extraction workspaces are
 removed. `analyze` returns `PARTIAL` after a successful inspection and may write the isolated code
 artifacts above. `convert` returns `BLOCKED` when only this subset can be translated; it retains the
-native artifact but refuses to wrap it as an incomplete game APK. `READY` is reserved for a future
-complete conversion that passes static APK validation.
+native artifact, may build the labelled experimental shell APK around it, but refuses to wrap it as
+an incomplete game APK. `READY` is reserved for a future complete conversion that passes static APK
+validation.
 
 ## GitHub APK builds
 
