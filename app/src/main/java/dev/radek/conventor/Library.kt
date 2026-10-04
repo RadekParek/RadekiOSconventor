@@ -14,6 +14,13 @@ object NativeBridge {
     external fun analyze(bytes: ByteArray): String
     external fun findAndroidLibrary(symbol: String): String?
     external fun findImplementedApiReplacement(sourceSymbol: String): String?
+
+    // Compatibility-registry bridge (libioscompat.so registry). "verified:..."
+    // means a tested implementation body; "stubbed:..." means an explicitly
+    // unimplemented resolution handler and nothing else.
+    external fun compatRegisterStub(symbol: String): Boolean
+    external fun compatClassify(symbol: String): String?
+    external fun compatSummary(): String
 }
 
 enum class ConversionState { IMPORTED, ANALYZING, CONVERTING, PACKAGING, VALIDATING, READY, PARTIAL, BLOCKED, FAILED }
@@ -242,6 +249,13 @@ class Library(private val context: Context) {
                 resolveNdkLibrary = { symbol -> NativeBridge.findAndroidLibrary(symbol) },
                 runtimeApiLevel = android.os.Build.VERSION.SDK_INT,
                 resolveApiReplacement = { symbol -> NativeBridge.findImplementedApiReplacement(symbol) },
+                resolveCompatHandler = { symbol ->
+                    // Dynamic runtime hook registration: a symbol that would stay
+                    // unmapped gets an explicit stub handler in libioscompat.so so
+                    // it resolves to something observable instead of nothing.
+                    NativeBridge.compatRegisterStub(symbol)
+                    NativeBridge.compatClassify(symbol)
+                },
             )
             report.put("apiMapping", apiMapping)
             val verifiedApiReplacements = apiMapping.optInt("runtimeVerifiedApiReplacementCount", 0)

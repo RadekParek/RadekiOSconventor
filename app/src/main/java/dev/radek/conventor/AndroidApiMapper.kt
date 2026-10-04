@@ -108,12 +108,17 @@ internal object AndroidApiMapper {
      * If supplied, the NDK resolver checks public platform exports on this device.
      * The compatibility resolver is separate: it verifies one of our concrete,
      * compiled time shims, but neither resolver rewrites or links the IPA.
+     * The compat-handler resolver performs dynamic runtime hook registration:
+     * symbols that would otherwise stay unmapped receive an explicit stub handler
+     * in libioscompat.so. A stub is a resolution target only; it is classified
+     * separately and never counted as a verified implementation.
      */
     fun analyze(
         nodes: JSONArray,
         resolveNdkLibrary: ((String) -> String?)? = null,
         runtimeApiLevel: Int? = null,
         resolveApiReplacement: ((String) -> String?)? = null,
+        resolveCompatHandler: ((String) -> String?)? = null,
     ): JSONObject {
         val symbols = linkedSetOf<String>()
         var truncated = false
@@ -144,6 +149,8 @@ internal object AndroidApiMapper {
         var implementedReplacementCandidates = 0
         var runtimeVerifiedApiReplacements = 0
         var semanticCandidates = 0
+        var compatStubHandlers = 0
+        var compatVerifiedHandlers = 0
         var unmappedSymbols = 0
         symbols.sorted().forEach { source ->
             // Mach-O C symbols conventionally carry one leading underscore. Remove
@@ -222,19 +229,63 @@ internal object AndroidApiMapper {
                     .put("translationStrategy", "source/object/lifecycle rewrite required")
                     .put("reason", "Android API family candidate only; Objective-C object layout, method semantics and lifecycle are not binary-compatible.")
                 else -> {
-                    unmappedSymbols++
-                    item
-                        .put("classification", "UNMAPPED")
-                        .put("reason", classifyUnsupported(source))
+                    val compatHandler = if (resolveCompatHandler == null) null else try {
+                        resolveCompatHandler.invoke(source)
+                    } catch (_: UnsatisfiedLinkError) {
+                        null
+                    } catch (_: RuntimeException) {
+                        null
+                    }
+                    when {
+                        compatHandler?.startsWith("stubbed:") == true -> {
+                            compatStubHandlers++
+                            val handler = compatHandler.removePrefix("stubbed:")
+                            item
+                                .put("classification", "COMPAT_STUB_HANDLER_REGISTERED")
+                                .put("targetLibrary", "libioscompat.so")
+                                .put("targetSymbol", handler)
+                                .put("implementationCodePresent", false)
+                                .put("translationStrategy", "explicit unimplemented resolution handler")
+                                .put(
+                                    "reason",
+                                    "A stub resolution handler for $source was registered in the " +
+                                        "libioscompat.so registry. The stub records invocations and " +
+                                        "returns a safe default; it does not implement the API and no " +
+                                        "IPA callsite was rewritten or linked.",
+                                )
+                        }
+                        compatHandler?.startsWith("verified:") == true -> {
+                            compatVerifiedHandlers++
+                            val handler = compatHandler.removePrefix("verified:")
+                            item
+                                .put("classification", "COMPAT_VERIFIED_HANDLER_RESOLVED")
+                                .put("targetLibrary", "libioscompat.so")
+                                .put("targetSymbol", handler)
+                                .put("implementationCodePresent", true)
+                                .put("translationStrategy", "tested implementation body in the compat registry")
+                                .put(
+                                    "reason",
+                                    "The compat registry resolved $source to a tested implementation " +
+                                        "body; no IPA callsite was rewritten or linked.",
+                                )
+                        }
+                        else -> {
+                            unmappedSymbols++
+                            item
+                                .put("classification", "UNMAPPED")
+                                .put("reason", classifyUnsupported(source))
+                        }
+                    }
                 }
             }
             result.put(item)
         }
         val total = symbols.size
+        val compatHandlers = compatStubHandlers + compatVerifiedHandlers
         val classificationComplete = !truncated && result.length() == total
         return JSONObject()
-            .put("schemaVersion", 5)
-            .put("measure", "Direct candidates are same-named Android NDK/system or shared C++ runtime symbols from the reviewed catalog or exact runtime export lookup. Runtime time-shim counts identify real exports in libioscompat.so, but none proves IPA callsite rewriting or game linking. Caller ABI compatibility, relocation and linking remain separate. Classification coverage is triage, not implementation coverage; no count represents playable Android code.")
+            .put("schemaVersion", 6)
+            .put("measure", "Direct candidates are same-named Android NDK/system or shared C++ runtime symbols from the reviewed catalog or exact runtime export lookup. Runtime time-shim counts identify real exports in libioscompat.so, but none proves IPA callsite rewriting or game linking. Caller ABI compatibility, relocation and linking remain separate. Classification coverage is triage, not implementation coverage; no count represents playable Android code. Registered compat stub handlers are explicit unimplemented resolution targets; only verified handlers identify tested implementation bodies.")
             .put("runtimeNdkResolverStatus", if (resolveNdkLibrary == null) "NOT_RUN" else "CURRENT_DEVICE_DLSYM")
             .put("runtimeVerifiedAndroidApiLevel", if (resolveNdkLibrary == null) JSONObject.NULL else (runtimeApiLevel ?: JSONObject.NULL))
             .put("runtimeVerifiedNdkCandidates", runtimeVerifiedCandidates)
@@ -250,6 +301,10 @@ internal object AndroidApiMapper {
             .put("candidateCoveragePercent", if (total == 0) 0 else directCandidates * 100 / total)
             .put("semanticRewriteCandidates", semanticCandidates)
             .put("semanticRewriteCoveragePercent", if (total == 0) 0 else semanticCandidates * 100 / total)
+            .put("compatStubHandlerCount", compatStubHandlers)
+            .put("compatVerifiedHandlerCount", compatVerifiedHandlers)
+            .put("compatHandlerCoveragePercent", if (total == 0) 0 else compatHandlers * 100 / total)
+            .put("compatHandlerResolverStatus", if (resolveCompatHandler == null) "NOT_RUN" else "DYNAMIC_REGISTRY_REGISTRATION")
             .put("unmappedSymbolCount", unmappedSymbols)
             .put("implementedTranslationCount", 0)
             .put("implementedTranslationCoveragePercent", 0)

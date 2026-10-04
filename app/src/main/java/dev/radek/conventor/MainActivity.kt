@@ -258,8 +258,10 @@ class MainActivity : Activity() {
                 val compatCount = mapping.optInt("runtimeVerifiedApiReplacementCount", 0)
                 val compatSummary = if (compatStatus == "CURRENT_DEVICE_COMPAT_DLSYM") "$compatCount implemented time-API shim(s) verified (not linked)" else "time-shim export check not run"
                 val generated = report.optJSONObject("hostConversion")?.optInt("generatedApiReplacements", 0) ?: 0
+                val stubs = mapping.optInt("compatStubHandlerCount", 0)
+                val stubSummary = if (stubs > 0) "$stubs compat stub handler(s) registered (unimplemented) · " else ""
                 val summary = if (total == 0) "API symbol triage: N/A (no imported symbols) · $compatSummary · generated replacements: $generated"
-                    else "Symbol triage: $triage% ($classified/$total) · direct NDK candidates: $coverage% ($mapped/$total) · $runtimeSummary · $compatSummary · $semantic semantic · $unmapped unmapped · generated replacements: $generated"
+                    else "Symbol triage: $triage% ($classified/$total) · direct NDK candidates: $coverage% ($mapped/$total) · $runtimeSummary · $compatSummary · $stubSummary$semantic semantic · $unmapped unmapped · generated replacements: $generated"
                 text(summary, 11f, muted, parent = item)
             }
             report.optJSONObject("hostConversion")?.takeIf { it.optString("status") == "ATTACHED" }?.let { host ->
@@ -405,8 +407,14 @@ class MainActivity : Activity() {
             val compatStatus = mapping.optString("runtimeApiReplacementResolverStatus", "NOT_RUN")
             val implemented = mapping.optInt("runtimeVerifiedApiReplacementCount", 0)
             val compatSummary = if (compatStatus == "CURRENT_DEVICE_COMPAT_DLSYM") " · $implemented implemented time-API shim(s) verified, not linked" else ""
+            val stubs = mapping.optInt("compatStubHandlerCount", 0)
+            val verifiedHandlers = mapping.optInt("compatVerifiedHandlerCount", 0)
+            val stubSummary = buildString {
+                if (stubs > 0) append(" · compat stub handlers (unimplemented): $stubs")
+                if (verifiedHandlers > 0) append(" · compat verified handlers: $verifiedHandlers")
+            }
             val summary = if (total == 0) "Android API candidates: N/A (no imports)$compatSummary"
-                else "Symbol triage: $triage% ($classified/$total) · direct NDK name candidates: $coverage% ($mapped/$total)$runtimeSummary$compatSummary · semantic rewrites: $semantic · unmapped: $unmapped"
+                else "Symbol triage: $triage% ($classified/$total) · direct NDK name candidates: $coverage% ($mapped/$total)$runtimeSummary$compatSummary$stubSummary · semantic rewrites: $semantic · unmapped: $unmapped"
             text(summary, 16f, textColor, true, mappingCard)
             val generated = report.optJSONObject("hostConversion")?.optInt("generatedApiReplacements", 0) ?: 0
             val triageNote = if (mapping.optString("classificationStatus") == "COMPLETE" && total > 0)
