@@ -36,7 +36,8 @@ class PlaceholderTemplateAssetTest {
             assets.open("placeholder-template/$name").use { String(it.readBytes(), Charsets.ISO_8859_1) }
         }
         assertTrue(dexText.contains("Preview shell started"))
-        assertTrue(dexText.contains("No translated iOS executable is included"))
+        assertTrue(dexText.contains("No statically recompiled game code is included in this preview."))
+        assertEquals(1, Regex("""No statically recompiled game code is included in this preview\.""").findAll(dexText).count())
         assertFalse(dexText.contains("RadekiOSConventor"))
     }
 

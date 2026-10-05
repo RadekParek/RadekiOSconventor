@@ -14,7 +14,7 @@ import java.security.MessageDigest
 /**
  * Builds a signed, installable bounded complete-game APK on the device.
  *
- * The IPA must already be proven by [NativeBridge.translateTrivial]: its whole
+ * The IPA must already be proven by [NativeBridge.recompileTrivial]: its whole
  * executable is one closed-integer ARM64 routine with no imports, dependencies,
  * __text relocations, fixups, or metadata. Everything outside that subset
  * throws and stays unbuilt; no conversion is ever claimed without the static proof.
@@ -102,7 +102,7 @@ internal class ConvertedApkBuilder(private val context: Context) {
             require(binary.isFile && binary.length() in 1..(256L * 1024 * 1024)) { "executable missing or exceeds the on-device 256 MiB limit" }
 
             setProgress(24, "CONVERTING", "Proving the executable is one closed-integer routine")
-            val proof = JSONObject(NativeBridge.translateTrivial(binary.readBytes()))
+            val proof = JSONObject(NativeBridge.recompileTrivial(binary.readBytes()))
             require(proof.optString("status") == "PROVEN") {
                 "IPA is outside the bounded converter subset: ${proof.optString("reason")}"
             }
@@ -111,7 +111,7 @@ internal class ConvertedApkBuilder(private val context: Context) {
             }
             val machineCode = Base64.decode(proof.getString("machineCode"), Base64.DEFAULT)
             require(machineCode.isNotEmpty() && machineCode.size == proof.optInt("sourceBytes")) {
-                "translated machine code does not match its proof"
+                "statically recompiled machine code does not match its proof"
             }
             val proofStrings = proof.optJSONArray("strings")
             var launchMessage = ""
@@ -257,15 +257,15 @@ internal class ConvertedApkBuilder(private val context: Context) {
                     .put("status", "COMPLETE")
                     .put("completeGameConversion", true)
                     .put("reachableSourceFunctions", 1)
-                    .put("translatedReachableFunctions", 1)
-                    .put("untranslatedReachableFunctions", 0)
+                    .put("recompiledReachableFunctions", 1)
+                    .put("notRecompiledReachableFunctions", 0)
                     .put("reachableApiCount", 0)
                     .put("linkedApiReplacements", 0)
                     .put("linkedRuntimeLibraries", JSONArray().put(CompatibilityRuntime.SONAME))
                     .put("compatibilityRuntimeLinked", true)
                     .put("generatedApiReplacements", 0)
                     .put("nativeApiPassthroughs", 0)
-                    .put("untranslatedReachableApiCount", 0)
+                    .put("unimplementedReachableApiCount", 0)
                     .put("apiCoverageComplete", true)
                     .put("apiReplacements", JSONArray())
                     .put("resourcesComplete", true)
@@ -387,8 +387,8 @@ internal class ConvertedApkBuilder(private val context: Context) {
                 .put("backend", BACKEND)
                 .put("machineCodeBytes", machineCode.size)
                 .put("machineCodeSha256", sha256(machineCode))
-                .put("translatedReachableFunctions", 1)
-                .put("untranslatedReachableFunctions", 0)
+                .put("recompiledReachableFunctions", 1)
+                .put("notRecompiledReachableFunctions", 0)
                 .put("linkedApiReplacements", 0)
                 .put("linkedRuntimeLibraries", JSONArray().put(CompatibilityRuntime.SONAME))
                 .put("compatibilityRuntimeLinked", true)
@@ -409,7 +409,7 @@ internal class ConvertedApkBuilder(private val context: Context) {
             report.put("deviceConversion", conversion)
             val verifiedApiReplacements = report.optJSONObject("apiMapping")
                 ?.optInt("runtimeVerifiedApiReplacementCount", 0)?.coerceAtLeast(0) ?: 0
-            report.put("apiTranslation", (report.optJSONObject("apiTranslation") ?: JSONObject())
+            report.put("apiImplementationGeneration", (report.optJSONObject("apiImplementationGeneration") ?: JSONObject())
                 .put("status", "RUNTIME_LIBRARY_LINKED_NO_CALLSITE_REWRITES")
                 .put("runtimeLibraryLinked", true)
                 .put("linkedRuntimeLibraries", JSONArray().put(CompatibilityRuntime.SONAME))
@@ -431,12 +431,12 @@ internal class ConvertedApkBuilder(private val context: Context) {
                 .put("targetAbi", "arm64-v8a")
                 .put("nativeCodeGenerated", true)
                 .put("nativeCodeBytes", machineCode.size)
-                .put("translatedReachableFunctions", 1)
+                .put("recompiledReachableFunctions", 1)
                 .put("linkedApiReplacements", 0)
                 .put("linkedRuntimeLibraries", JSONArray().put(CompatibilityRuntime.SONAME))
                 .put("compatibilityRuntimeLinked", true)
                 .put("generatedApiReplacements", 0)
-                .put("untranslatedReachableFunctions", 0)
+                .put("notRecompiledReachableFunctions", 0)
                 .put("sourceIconSha256", launcherIconSha)
                 .put("backend", BACKEND)
                 .put("contract", CONTRACT)
@@ -448,9 +448,9 @@ internal class ConvertedApkBuilder(private val context: Context) {
                 .put("percent", 100)
                 .put("status", "COMPLETE_CONVERSION_BUILT")
                 .put("completeGameConversion", true)
-                .put("translatedFunctions", 1)
-                .put("translatedTextBytes", machineCode.size)
-                .put("basis", "All executable __text bytes of the proven single-function IPA were translated and linked into ${resultFile.name}. This is the bounded subset, not general game conversion."))
+                .put("recompiledFunctions", 1)
+                .put("recompiledTextBytes", machineCode.size)
+                .put("basis", "All executable __text bytes of the proven single-function IPA were statically recompiled and linked into ${resultFile.name}. This is the bounded subset, not general game conversion."))
             report.put("conversionProgress", JSONObject()
                 .put("percent", 100)
                 .put("stage", "VALIDATED")

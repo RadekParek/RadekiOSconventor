@@ -67,7 +67,7 @@ internal class PlaceholderApkBuilder(private val context: Context) {
         }
         unsignedFile.delete(); signedFile.delete(); finalPending.delete()
         try {
-            setProgress(3, "BUILDING", "Preparing an installable preview shell. iOS game code is not translated.")
+            setProgress(3, "BUILDING", "Preparing an installable preview shell. iOS game code is not statically recompiled.")
             val identity = PlaceholderSigningIdentity.loadOrCreate(
                 File(context.noBackupFilesDir, "placeholder-apk-signing-identity.bin"),
             )
@@ -138,7 +138,7 @@ internal class PlaceholderApkBuilder(private val context: Context) {
             } else "device export check not run"
             val analysisSummary = "Static analysis only: $classifiedImportSymbols/$distinctImportSymbols symbols triaged ($classificationCoveragePercent%); " +
                 "$candidateCoveragePercent% ($directApiCandidates/$distinctImportSymbols) same-name NDK candidates; $apiLevelNote; $semanticApiCandidates semantic targets; " +
-                "$compatStubHandlers compat stubs (unimplemented); $unmappedApiSymbols unmapped. No game code or API implementation was translated."
+                "$compatStubHandlers compat stubs (unimplemented); $unmappedApiSymbols unmapped. No game code or API implementation was statically recompiled."
             // Static-analysis details stay machine-readable in the artifact but
             // are deliberately not displayed by the generated launcher.
             val analysisStats = analysisSummary
@@ -155,7 +155,7 @@ internal class PlaceholderApkBuilder(private val context: Context) {
                 .put("compatStubHandlers", compatStubHandlers)
                 .put("semanticApiCandidates", semanticApiCandidates)
                 .put("unmappedApiSymbols", unmappedApiSymbols)
-                .put("translatedGameFunctions", 0)
+                .put("recompiledGameFunctions", 0)
                 .put("apiReplacementImplementations", 0)
             val infoJson = JSONObject()
                 .put("gameName", appName)
@@ -256,7 +256,7 @@ internal class PlaceholderApkBuilder(private val context: Context) {
                 .put("status", "GENERATED")
                 .put("completeGameConversion", false)
                 .put("placeholderOnly", true)
-                .put("gameCodeTranslated", false)
+                .put("gameCodeRecompiled", false)
                 .put("gameCodeIncluded", false)
                 .put("gamePlayable", false)
                 .put("installableAndroidPackage", true)
@@ -277,20 +277,20 @@ internal class PlaceholderApkBuilder(private val context: Context) {
                 .put("signing", JSONObject()
                     .put("schemes", org.json.JSONArray().put("v1").put("v2").put("v3"))
                     .put("certificateSha256", certificateHash))
-                .put("translationStatus", "NONE")
-                .put("translatedGameFunctions", 0)
+                .put("recompilationStatus", "NONE")
+                .put("recompiledGameFunctions", 0)
                 .put("apiReplacementImplementations", 0)
                 .put("completedAt", java.time.Instant.now().toString())
             report.put("placeholderConversion", conversion)
             report.put("placeholderBuildProgress", JSONObject()
                 .put("percent", 100)
                 .put("status", "GENERATED")
-                .put("message", "Installable preview APK generated. It contains no translated game code and is not playable.")
+                .put("message", "Installable preview APK generated. It contains no statically recompiled game code and is not playable.")
                 .put("updatedAt", java.time.Instant.now().toString()))
             reportContext.save(dir, report)
             finalized = true
             backupFile.delete()
-            progress(100, "Installable preview ready; game code was not translated and the game will not run")
+            progress(100, "Installable preview ready; game code was not statically recompiled and the game will not run")
             return conversion
         } catch (error: Throwable) {
             if (!finalized) {

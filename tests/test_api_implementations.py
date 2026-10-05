@@ -8,14 +8,14 @@ import tempfile
 import time
 import unittest
 
-from radek.api_translation import _SUPPORTED, generate
+from radek.api_implementations import _SUPPORTED, generate
 
 
 class MachTimebaseInfo(ctypes.Structure):
     _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
 
 
-class ApiTranslationTests(unittest.TestCase):
+class ApiImplementationTests(unittest.TestCase):
     @staticmethod
     def reconstruction(used, callers=None):
         caller_names = callers or ["_main"]
@@ -260,7 +260,7 @@ class ApiTranslationTests(unittest.TestCase):
         macro, so any drift would make the host generator, the on-device
         registry and the JNI resolver disagree about what is implemented.
         """
-        from radek.api_translation import _FAMILY, _SUPPORTED
+        from radek.api_implementations import _FAMILY, _SUPPORTED
 
         header = (Path(__file__).resolve().parent.parent / "native/include/radek_ios_shims.h").read_text()
         start = header.index("#define RADEK_IOS_SHIM_TABLE(X)")

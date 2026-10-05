@@ -255,7 +255,7 @@ class MainActivity : Activity() {
         text("Import an IPA to automatically inspect its code and Android compatibility.", 15f, muted)
         val info = card()
         text("Bounded conversion, honest everywhere else", 17f, textColor, true, info)
-        text("The on-device app analyzes every IPA, and converts the proven subset automatically during import: an executable whose whole code is one closed-integer routine becomes a signed, installable APK whose translated entry runs through JNI — no extra tap needed. Anything outside that subset is not translated; Force then builds a signed, installable preview shell branded with the app name and recovered icon; it contains none of the IPA executable or game code. Host APKs are accepted only when they declare a complete game conversion and pass provenance and package checks.", 14f, muted, parent = info)
+        text("The on-device app analyzes every IPA, and converts the proven subset automatically during import: an executable whose whole code is one closed-integer routine becomes a signed, installable APK whose statically recompiled entry runs through JNI — no extra tap needed. Anything outside that subset is not statically recompiled; Force then builds a signed, installable preview shell branded with the app name and recovered icon; it contains none of the IPA executable or game code. Host APKs are accepted only when they declare a complete game conversion and pass provenance and package checks.", 14f, muted, parent = info)
         val add = button("Choose IPA", true) { authorize() }; add.isEnabled = !Jobs.busy
         button("Settings", parent = body) { settingsScreen() }.isEnabled = !Jobs.busy
         if (Jobs.busy) {
@@ -294,7 +294,7 @@ class MainActivity : Activity() {
             text(state, 11f, statusColor(state), true, item)
             report.optJSONObject("portProgress")?.let { port ->
                 val percent = port.optDouble("percent", port.optInt("percent", 0).toDouble())
-                text("Android code-byte translation: ${formatPortPercent(percent)}% · scope in the basis · not gameplay", 11f, statusColor("BLOCKED"), true, item)
+                text("Android code-byte static recompilation: ${formatPortPercent(percent)}% · scope in the basis · not gameplay", 11f, statusColor("BLOCKED"), true, item)
             }
             report.optJSONObject("analysisProgress")?.let { analysis ->
                 val value = analysis.optInt("percent", 0)
@@ -325,7 +325,7 @@ class MainActivity : Activity() {
                 else "device export check not run"
                 val compatStatus = mapping.optString("runtimeApiReplacementResolverStatus", "NOT_RUN")
                 val compatCount = mapping.optInt("runtimeVerifiedApiReplacementCount", 0)
-                val runtimeLinked = report.optJSONObject("apiTranslation")?.optBoolean("runtimeLibraryLinked", false) == true
+                val runtimeLinked = report.optJSONObject("apiImplementationGeneration")?.optBoolean("runtimeLibraryLinked", false) == true
                 val compatSummary = when {
                     runtimeLinked -> "libioscompat.so runtime linked; individual IPA callsites were not rewritten"
                     compatStatus == "CURRENT_DEVICE_COMPAT_DLSYM" -> "$compatCount compiled compatibility implementation(s) verified; APK linking has not run"
@@ -500,7 +500,7 @@ class MainActivity : Activity() {
             else ""
             val compatStatus = mapping.optString("runtimeApiReplacementResolverStatus", "NOT_RUN")
             val implemented = mapping.optInt("runtimeVerifiedApiReplacementCount", 0)
-            val runtimeLinked = report.optJSONObject("apiTranslation")?.optBoolean("runtimeLibraryLinked", false) == true
+            val runtimeLinked = report.optJSONObject("apiImplementationGeneration")?.optBoolean("runtimeLibraryLinked", false) == true
             val compatSummary = when {
                 runtimeLinked -> " · libioscompat.so runtime linked; no individual IPA callsites rewritten"
                 compatStatus == "CURRENT_DEVICE_COMPAT_DLSYM" -> " · $implemented compiled compatibility implementation(s) verified; APK linking has not run"
@@ -518,7 +518,7 @@ class MainActivity : Activity() {
             text(summary, 16f, textColor, true, mappingCard)
             val generated = report.optJSONObject("hostConversion")?.optInt("generatedApiReplacements", 0) ?: 0
             val triageNote = if (mapping.optString("classificationStatus") == "COMPLETE" && total > 0)
-                "All $classified observed import symbols were categorized; categorization is not translation."
+                "All $classified observed import symbols were categorized; categorization is not static recompilation."
             else "Import categorization is incomplete or there were no imported symbols."
             val mappingDisclosure = when {
                 generated > 0 -> "The on-device mapper generated no per-game code; an attached complete-game host conversion reports $generated generated API replacement(s). Runtime behavior is not device-tested. $triageNote"
@@ -531,7 +531,7 @@ class MainActivity : Activity() {
         report.optJSONObject("portProgress")?.let { port ->
             val portCard = card()
             val percent = port.optDouble("percent", port.optInt("percent", 0).toDouble())
-            text("Android code-byte translation progress: ${formatPortPercent(percent)}%", 16f, statusColor("BLOCKED"), true, portCard)
+            text("Android code-byte static recompilation progress: ${formatPortPercent(percent)}%", 16f, statusColor("BLOCKED"), true, portCard)
             text(port.optString("basis"), 13f, muted, parent = portCard)
         }
         report.optJSONObject("analysisProgress")?.let { analysis ->
@@ -546,12 +546,12 @@ class MainActivity : Activity() {
             val buildCard = card()
             text("Host APK validation/attachment · ${conversion.optInt("percent", 0)}% · ${conversion.optString("status", "NOT_BUILT")}", 16f, statusColor(conversion.optString("status")), true, buildCard)
             text(conversion.optString("message"), 12f, muted, parent = buildCard)
-            text("This is the complete-game APK path; it requires translated reachable code, API replacements, resources and lifecycle. Force convert packages the proven bounded subset into a real signed APK; anything else gets an installable preview shell that contains no translated game code.", 12f, muted, parent = buildCard)
+            text("This is the complete-game APK path; it requires statically recompiled reachable code, API replacements, resources and lifecycle. Force convert packages the proven bounded subset into a real signed APK; anything else gets an installable preview shell that contains no statically recompiled game code.", 12f, muted, parent = buildCard)
         }
-        report.optJSONObject("deviceTranslation")?.takeIf { it.optString("status") == "PROVEN" && it.optInt("coveragePercent", 0) == 100 }?.let { proof ->
+        report.optJSONObject("deviceRecompilation")?.takeIf { it.optString("status") == "PROVEN" && it.optInt("coveragePercent", 0) == 100 }?.let { proof ->
             val proofCard = card()
             text("Bounded conversion proof verified on-device", 16f, accent, true, proofCard)
-            text("${proof.optInt("sourceBytes", 0)} executable bytes form one proven closed-integer routine covering 100% of __text. Force convert turns this proof into a signed APK whose translated entry runs through JNI (returned value is displayed on launch).", 12f, muted, parent = proofCard)
+            text("${proof.optInt("sourceBytes", 0)} executable bytes form one proven closed-integer routine covering 100% of __text. Force convert turns this proof into a signed APK whose statically recompiled entry runs through JNI (returned value is displayed on launch).", 12f, muted, parent = proofCard)
         }
         text("Compatibility report", 22f, textColor, true)
         val blockers = report.optJSONArray("blockers")
@@ -568,7 +568,7 @@ class MainActivity : Activity() {
         button("View full machine-readable report") { showText("Conversion report", report.toString(2)) }
         button("View real conversion logs") { showText("Logs", File(dir, "conversion.jsonl").takeIf { it.isFile }?.readText() ?: "No logs") }
         text("APK conversion", 22f, textColor, true)
-        text("A general iOS-to-Android game translator and framework/API replacements are not implemented. What is implemented is the bounded subset: when the executable is statically proven to be exactly one closed-integer routine, Force convert packages its translated machine code into a signed, installable APK that runs the entry through JNI and shows the message recovered from the IPA. Anything outside the subset gets only a preview shell with the IPA app name and icon; it contains none of the executable and cannot run the game.", 14f, muted)
+        text("A general iOS-to-Android game static recompilation backend and framework/API replacements are not implemented. What is implemented is the bounded subset: when the executable is statically proven to be exactly one closed-integer routine, Force convert packages its statically recompiled machine code into a signed, installable APK that runs the entry through JNI and shows the message recovered from the IPA. Anything outside the subset gets only a preview shell with the IPA app name and icon; it contains none of the executable and cannot run the game.", 14f, muted)
         button("Copy host analysis command") {
             val abi = preferences.getString("target_abi", "auto") ?: "auto"
             val suffix = if (abi == "auto") "" else " --target-abi $abi"
@@ -597,7 +597,7 @@ class MainActivity : Activity() {
             else
                 "Complete-game host APK attached · ABI $hostAbi. The host conversion contract passed static checks; on-device execution and actual gameplay have not been tested."
             text(hostOrigin, 13f, accent)
-            text("Translated reachable functions: ${hostConversion?.optInt("translatedReachableFunctions", 0) ?: 0} · generated API replacements: ${hostConversion?.optInt("generatedApiReplacements", 0) ?: 0} · unresolved reachable functions: ${hostConversion?.optInt("untranslatedReachableFunctions", -1) ?: -1}.", 12f, muted)
+            text("Statically recompiled reachable functions: ${hostConversion?.optInt("recompiledReachableFunctions", 0) ?: 0} · generated API replacements: ${hostConversion?.optInt("generatedApiReplacements", 0) ?: 0} · unresolved reachable functions: ${hostConversion?.optInt("notRecompiledReachableFunctions", -1) ?: -1}.", 12f, muted)
             button("Install ${hostOutputFile.name}", true) { installArtifact(dir, hostOutputFile.name) }
             button("Share ${hostOutputFile.name}") { shareResultApk(dir, hostOutputFile.name) }
             if (app.has("sha256")) button("Open installed converted program") {
@@ -629,22 +629,22 @@ class MainActivity : Activity() {
                 else -> "Fallback icon included; no original icon was recovered"
             }
             text("Installable preview APK · $iconDescription", 13f, accent, true)
-            text("This is a branded shell built from the IPA name and icon only. No iOS executable, translated game code, or playable gameplay is included.", 12f, muted)
+            text("This is a branded shell built from the IPA name and icon only. No iOS executable, statically recompiled game code, or playable gameplay is included.", 12f, muted)
             button("Install ${placeholderOutputFile.name}", true) { installArtifact(dir, placeholderOutputFile.name) }
             button("Share ${placeholderOutputFile.name}") { shareResultApk(dir, placeholderOutputFile.name) }
         }
         if (File(dir, "source.ipa").isFile && app.has("sha256") && hostOutputFile == null) {
-            val deviceConvertible = report.optJSONObject("deviceTranslation")?.let {
+            val deviceConvertible = report.optJSONObject("deviceRecompilation")?.let {
                 it.optString("status") == "PROVEN" && it.optInt("coveragePercent", 0) == 100 && it.optInt("functionCount", 0) == 1
             } == true
             if (deviceConvertible) {
-                text("Force builds a real signed APK: the whole executable is one proven closed-integer routine, so its translated entry is packaged as libconverted.so and runs through JNI when opened.", 12f, muted)
+                text("Force builds a real signed APK: the whole executable is one proven closed-integer routine, so its statically recompiled entry is packaged as libconverted.so and runs through JNI when opened.", 12f, muted)
                 val rebuilt = report.optJSONObject("deviceConversion")?.optString("status") == "GENERATED_ON_DEVICE"
                 dangerButton(if (rebuilt) "Rebuild converted APK" else "Force convert to .apk") {
                     startForceConvert(dir, true)
                 }
             } else {
-                text("This IPA is outside the bounded conversion subset; Force builds a signed, installable preview APK only. It does not translate or run the game.", 12f, muted)
+                text("This IPA is outside the bounded conversion subset; Force builds a signed, installable preview APK only. It does not statically recompile or run the game.", 12f, muted)
                 dangerButton(if (placeholderOutputFile != null) "Rebuild preview APK" else "Force convert to .apk") {
                     startForceConvert(dir, false)
                 }
@@ -873,9 +873,9 @@ class MainActivity : Activity() {
                 var targetAbi = ""
                 var generatedBytes = 0
                 var conversionBackend = ""
-                var translatedFunctions = 0
+                var recompiledFunctions = 0
                 var generatedApiReplacements = 0
-                var untranslatedFunctions = 0
+                var notRecompiledFunctions = 0
                 var recoveredIconHash = ""
                 val sourceIcon = File(dir, "icon.png")
                 if (sourceIcon.isFile) {
@@ -908,13 +908,13 @@ class MainActivity : Activity() {
                     val game = metadata.optJSONObject("gameConversion") ?: error("complete-game evidence missing")
                     require(game.opt("status") == "COMPLETE" && game.opt("completeGameConversion") == true) { "host did not certify a complete game conversion" }
                     val reachableFunctions = exactInt(game, "reachableSourceFunctions")
-                    translatedFunctions = exactInt(game, "translatedReachableFunctions")
-                    untranslatedFunctions = exactInt(game, "untranslatedReachableFunctions")
-                    require(reachableFunctions > 0 && translatedFunctions == reachableFunctions && untranslatedFunctions == 0) { "not all reachable game functions were translated" }
+                    recompiledFunctions = exactInt(game, "recompiledReachableFunctions")
+                    notRecompiledFunctions = exactInt(game, "notRecompiledReachableFunctions")
+                    require(reachableFunctions > 0 && recompiledFunctions == reachableFunctions && notRecompiledFunctions == 0) { "not all reachable game functions were statically recompiled" }
                     val reachableApis = exactInt(game, "reachableApiCount")
                     generatedApiReplacements = exactInt(game, "generatedApiReplacements")
                     val nativeApiPassthroughs = exactInt(game, "nativeApiPassthroughs")
-                    require(game.opt("apiCoverageComplete") == true && exactInt(game, "untranslatedReachableApiCount") == 0) { "reachable iOS APIs are not fully implemented or replaced" }
+                    require(game.opt("apiCoverageComplete") == true && exactInt(game, "unimplementedReachableApiCount") == 0) { "reachable iOS APIs are not fully implemented or replaced" }
                     require(reachableApis >= 0 && generatedApiReplacements >= 0 && nativeApiPassthroughs >= 0 && reachableApis == generatedApiReplacements + nativeApiPassthroughs) { "API replacement accounting is incomplete" }
                     val replacements = game.optJSONArray("apiReplacements") ?: error("API replacement evidence missing")
                     require(replacements.length() == generatedApiReplacements) { "generated API replacement count mismatch" }
@@ -1011,9 +1011,9 @@ class MainActivity : Activity() {
                     .put("targetAbi", targetAbi)
                     .put("nativeCodeGenerated", true)
                     .put("nativeCodeBytes", generatedBytes)
-                    .put("translatedReachableFunctions", translatedFunctions)
+                    .put("recompiledReachableFunctions", recompiledFunctions)
                     .put("generatedApiReplacements", generatedApiReplacements)
-                    .put("untranslatedReachableFunctions", untranslatedFunctions)
+                    .put("notRecompiledReachableFunctions", notRecompiledFunctions)
                     .put("sourceIconSha256", recoveredIconHash)
                     .put("backend", conversionBackend)
                     .put("contract", "complete-game-v1")
@@ -1024,7 +1024,7 @@ class MainActivity : Activity() {
                 report.put("portProgress", JSONObject()
                     .put("percent", 100)
                     .put("status", "COMPLETE_CONVERSION_ATTACHED")
-                    .put("basis", "Host metadata reports all reachable code and required APIs translated; runtime execution and gameplay are not tested."))
+                    .put("basis", "Host metadata reports all reachable code and required APIs statically recompiled; runtime execution and gameplay are not tested."))
                 report.put("conversionProgress", JSONObject()
                     .put("percent", 100)
                     .put("stage", "HOST_APK_VALIDATED")

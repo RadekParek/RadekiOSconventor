@@ -3,7 +3,7 @@
 These implementations are host-tested in ``native/src``. This module copies
 only implementations whose callers are statically reachable from the selected
 Mach-O entry through reconstructed internal calls. It does not rewrite call
-sites, prove dynamic Objective-C dispatch, link the source into the translated
+sites, prove dynamic Objective-C dispatch, link the source into the statically recompiled
 entry library, or claim complete APK/game coverage.
 """
 
@@ -18,7 +18,7 @@ from pathlib import Path
 # The "time" entries are implemented in native/src/apple_time_compat.cpp; the
 # "cf" and "libc" entries come from native/src/radek_ios_shims.cpp and mirror the
 # RADEK_IOS_SHIM_TABLE macro in native/include/radek_ios_shims.h.
-# tests/test_api_translation.py asserts this table stays identical to that macro,
+# tests/test_api_implementations.py asserts this table stays identical to that macro,
 # so the host generator, the on-device registry and the JNI resolver cannot drift.
 _SUPPORTED = {
     "_CFAbsoluteTimeGetCurrent": (
@@ -143,7 +143,7 @@ _SUPPORTED = {
 }
 
 
-# Which translation unit and helper machinery each shim needs.
+# Which source unit and helper machinery each shim needs.
 #   time -> native/src/apple_time_compat.cpp
 #   cf   -> native/src/radek_ios_shims.cpp + the shared CoreFoundation runtime
 #   libc -> native/src/radek_ios_shims.cpp
@@ -361,7 +361,7 @@ def generate(reconstruction: dict, output: Path) -> dict:
             "generatedApiReplacements": 0,
             "linkedApiReplacements": 0,
             "totalReachableApiCount": 0,
-            "untranslatedReachableApiCount": 0,
+            "unimplementedReachableApiCount": 0,
             "codeGenerated": False,
             "completeGameConversion": False,
             "message": (
@@ -415,7 +415,7 @@ def generate(reconstruction: dict, output: Path) -> dict:
         "generatedApiReplacements": len(replacements),
         "linkedApiReplacements": 0,
         "totalReachableApiCount": len(selected),
-        "untranslatedReachableApiCount": 0,
+        "unimplementedReachableApiCount": 0,
         "codeGenerated": True,
         "sourcePath": "api-replacements/api-replacements.cpp",
         "headerPath": "api-replacements/apple_time_compat.h",
@@ -431,7 +431,7 @@ def generate(reconstruction: dict, output: Path) -> dict:
         "completeGameConversion": False,
         "message": (
             f"Generated {len(replacements)} compiled compatibility implementation(s) from entry-reachable "
-            "imports. The sources are not linked into the translated entry library or an APK."
+            "imports. The sources are not linked into the statically recompiled entry library or an APK."
         ),
         "replacements": replacements,
     }

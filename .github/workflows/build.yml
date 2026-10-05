@@ -38,6 +38,15 @@ jobs:
         uses: gradle/actions/setup-gradle@v5
       - name: Build native analyzer and run C++ runtime tests
         run: python3 tools/build_native.py
+      - name: Configure and run CMake compat-runtime-v1 host tests
+        run: |
+          cmake -S native -B .local/native-cmake -DRADEK_BUILD_COMPAT_RUNTIME=ON -DRADEK_FETCH_UNICORN=OFF
+          cmake --build .local/native-cmake --parallel 2
+          ctest --test-dir .local/native-cmake --output-on-failure
+      - name: Validate compat-runtime-v1 smoke database
+        run: |
+          python3 -m unittest discover -s compat-runtime-v1/tests -v
+          python3 compat-runtime-v1/tools/smoke_db.py validate
       - name: AddressSanitizer and UndefinedBehaviorSanitizer tests
         run: python3 tools/ci_run.py bash tools/test_sanitized.sh
       - name: Host tests and placeholder/complete-game separation regressions
@@ -53,8 +62,8 @@ jobs:
           echo "convert exit code: $code (3 = BLOCKED, the expected honest state)"
           # Surface the report before asserting so any failure is diagnosable.
           test "$code" -eq 3  # BLOCKED: honest state, complete-game conversion unsupported
-          test -f .local/sample-conversion/libtranslated-entry.so
-          test -f .local/sample-conversion/translated-entry.c
+          test -f .local/sample-conversion/librecompiled-entry.so
+          test -f .local/sample-conversion/recompiled-entry.c
           test -f .local/sample-conversion/ioscompat/libioscompat.cpp
           test -f .local/sample-conversion/ioscompat/registry.json
           python3 - <<'EOF'
@@ -70,7 +79,7 @@ jobs:
           print(json.dumps(diagnostic, indent=2))
           checks = (
               ("state is BLOCKED", report["state"] == "BLOCKED"),
-              ("translated-byte progress > 0", report["portProgress"]["percent"] > 0),
+              ("statically recompiled-byte progress > 0", report["portProgress"]["percent"] > 0),
               ("1 verified shim", report["compatRegistry"]["verifiedImplementations"] == 1),
               ("2 stubbed handlers", report["compatRegistry"]["stubbedHandlers"] == 2),
               ("0 unresolved imports", report["compatRegistry"]["unresolvedImports"] == 0),
@@ -124,7 +133,7 @@ jobs:
           python3 -m radek validate .local/hello-conversion/hello-test.apk \
             --package "$PKG" \
             --entry dev.radek.generated.MainActivity
-      - name: Convert IPA (simple.ipa exercises a longer translated routine)
+      - name: Convert IPA (simple.ipa exercises a longer statically recompiled routine)
         run: |
           set -e
           test -f tests/data/simple.ipa
@@ -140,9 +149,9 @@ jobs:
               ("complete conversion status COMPLETE", complete["status"] == "COMPLETE"),
               ("completeGameConversion true", complete["completeGameConversion"] is True),
               ("artifact simple.apk", complete["artifact"] == "simple.apk"),
-              ("translated reachable function count is 1", complete["translatedReachableFunctions"] == 1),
-              ("untranslated reachable function count is 0", complete["untranslatedReachableFunctions"] == 0),
-              ("translated native entry exists", pathlib.Path(".local/simple-conversion/libtranslated-entry.so").is_file()),
+              ("statically recompiled reachable function count is 1", complete["recompiledReachableFunctions"] == 1),
+              ("not statically recompiled reachable function count is 0", complete["notRecompiledReachableFunctions"] == 0),
+              ("statically recompiled native entry exists", pathlib.Path(".local/simple-conversion/librecompiled-entry.so").is_file()),
           )
           failed = [label for label, ok in checks if not ok]
           if failed:
@@ -158,8 +167,8 @@ jobs:
           python3 -m radek validate .local/simple-conversion/simple.apk \
             --package "$PKG" \
             --entry dev.radek.generated.MainActivity
-      - name: Android unit tests, lint, JNI native build and APK
-        run: python3 tools/ci_run.py ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+      - name: Android unit tests, converter APK, and compat-runtime-v1 Android library
+        run: python3 tools/ci_run.py ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :compat-runtime-v1:lintDebug :compat-runtime-v1:assembleDebug
       - name: Validate converter application APK
         run: |
           mkdir -p artifacts

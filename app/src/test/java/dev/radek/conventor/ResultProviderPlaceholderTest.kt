@@ -84,7 +84,7 @@ class ResultProviderPlaceholderTest {
             .put("placeholderOnly", true)
             .put("completeGameConversion", false)
             .put("gameCodeIncluded", false)
-            .put("gameCodeTranslated", false)
+            .put("gameCodeRecompiled", false)
             .put("gamePlayable", false)
             .put("installableAndroidPackage", true)
             .put("artifact", fileName)

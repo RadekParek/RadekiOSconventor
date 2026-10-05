@@ -183,12 +183,12 @@ class NoPlaceholderPackagingTests(unittest.TestCase):
                 "status": "COMPLETE",
                 "completeGameConversion": True,
                 "reachableSourceFunctions": 1,
-                "translatedReachableFunctions": 1,
-                "untranslatedReachableFunctions": 0,
+                "recompiledReachableFunctions": 1,
+                "notRecompiledReachableFunctions": 0,
                 "reachableApiCount": 0,
                 "generatedApiReplacements": 0,
                 "nativeApiPassthroughs": 0,
-                "untranslatedReachableApiCount": 0,
+                "unimplementedReachableApiCount": 0,
                 "apiCoverageComplete": True,
                 "apiReplacements": [],
                 "resourcesComplete": True,
@@ -201,7 +201,7 @@ class NoPlaceholderPackagingTests(unittest.TestCase):
             root = Path(directory)
             work = root / "package-work"
             output = root / "game.apk"
-            with self.assertRaisesRegex(InputError, "no complete iOS-to-Android game translator"):
+            with self.assertRaisesRegex(InputError, "no complete iOS-to-Android game static recompilation backend"):
                 build_apk(
                     work,
                     output,
@@ -238,12 +238,12 @@ class NoPlaceholderPackagingTests(unittest.TestCase):
                 "status": "COMPLETE",
                 "completeGameConversion": True,
                 "reachableSourceFunctions": 1,
-                "translatedReachableFunctions": 1,
-                "untranslatedReachableFunctions": 0,
+                "recompiledReachableFunctions": 1,
+                "notRecompiledReachableFunctions": 0,
                 "reachableApiCount": 1,
                 "generatedApiReplacements": 0,
                 "nativeApiPassthroughs": 0,
-                "untranslatedReachableApiCount": 0,
+                "unimplementedReachableApiCount": 0,
                 "apiCoverageComplete": True,
                 "apiReplacements": [],
                 "resourcesComplete": True,
@@ -269,9 +269,9 @@ class NoPlaceholderPackagingTests(unittest.TestCase):
         with self.assertRaisesRegex(InputError, "source hash"):
             _validate_complete_game_metadata(metadata, metadata["package"], "arm64-v8a")
 
-    def test_metadata_rejects_boolean_untranslated_api_count(self):
+    def test_metadata_rejects_boolean_unimplemented_api_count(self):
         metadata = self._complete_game_metadata()
-        metadata["gameConversion"]["untranslatedReachableApiCount"] = False
+        metadata["gameConversion"]["unimplementedReachableApiCount"] = False
         with self.assertRaisesRegex(InputError, "API replacement accounting"):
             _validate_complete_game_metadata(metadata, metadata["package"], "arm64-v8a")
 
@@ -364,16 +364,15 @@ class ExperimentalShellTests(unittest.TestCase):
             activity = (root / "src" / "ExperimentalShellActivity.java").read_text()
         self.assertIn(EXPERIMENTAL_SHELL_PACKAGE, manifest)
         self.assertIn("shell_notice", strings)
-        self.assertIn("no game code is translated", EXPERIMENTAL_SHELL_NOTICE.lower())
+        self.assertEqual(EXPERIMENTAL_SHELL_NOTICE, "This inspection shell contains isolated analysis artifacts, not a runnable game.")
+        self.assertEqual(EXPERIMENTAL_SHELL_NOTICE.count("."), 1)
         self.assertIn("shell_notice", activity)
         self.assertIn("Radek Experimental Shell", strings)
         # The launcher source is plain Java: no format-escaping leftovers.
         self.assertNotIn("{{", activity)
         self.assertIn("extends Activity {", activity)
         self.assertEqual(activity.count("{"), activity.count("}"))
-        # aapt2 rejects unescaped apostrophes; the notice contains one (IPA's).
-        self.assertIn("\\'", strings)
-        self.assertNotIn("IPA's", strings)
+        self.assertEqual(strings.count(EXPERIMENTAL_SHELL_NOTICE), 1)
 
     def test_valid_shell_zip_passes_sdk_free_checks(self):
         from radek.apk import validate_experimental_shell
@@ -503,7 +502,7 @@ class ExperimentalShellBuildSimulationTests(unittest.TestCase):
                     root / "out",
                     tools,
                     {"targetAbi": "arm64-v8a"},
-                    {"libtranslated-entry.so": ("native-code", b"\x7fELF-test")},
+                    {"librecompiled-entry.so": ("native-code", b"\x7fELF-test")},
                 )
         self.assertEqual(result["status"], "BUILT_NOT_A_GAME")
         self.assertEqual(result["contract"], "experimental-shell-v1")

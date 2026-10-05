@@ -368,7 +368,7 @@ def _usage_detail(component: str, usage: dict) -> dict | None:
             "status": "SUPPORTED",
             "detail": (
                 f"linked ({names or 'no framework'}) but no reachable API use was found in the "
-                "reconstructed code; nothing to emulate for this import"
+                "reconstructed code; no code execution is needed for this import"
             ),
         }
     parts = [
@@ -416,7 +416,7 @@ def capabilities(reconstruction: dict | None = None) -> list[dict]:
             "status": "PARTIAL",
             "detail": (
                 "bundle paths retained; PNG (including Apple CgBI) and compiled Assets.car icons are "
-                "decoded; shader/asset translation unsupported"
+                "decoded; shader/asset rewriting unsupported"
             ),
         },
         {

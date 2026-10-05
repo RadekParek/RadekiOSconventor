@@ -20,7 +20,7 @@ import java.nio.charset.StandardCharsets;
 
 /**
  * Launcher of a bounded complete-game conversion built on-device.
- * It shows the message recovered from the IPA and runs the translated
+ * It shows the message recovered from the IPA and runs the statically recompiled
  * native entry through libconverted.so.
  */
 public final class MainActivity extends Activity {

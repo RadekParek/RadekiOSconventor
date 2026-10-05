@@ -29,12 +29,12 @@ class AndroidApiMapperTest {
         assertEquals(1, mapping.getInt("mappedNameCandidates"))
         assertEquals(33, mapping.getInt("candidateCoveragePercent"))
         assertEquals(1, mapping.getInt("semanticRewriteCandidates"))
-        assertEquals(0, mapping.getInt("generatedTranslationCount"))
+        assertEquals(0, mapping.getInt("generatedApiImplementationCount"))
         assertEquals(3, mapping.getInt("classifiedImportSymbols"))
         assertEquals(100, mapping.getInt("classificationCoveragePercent"))
         assertEquals("COMPLETE", mapping.getString("classificationStatus"))
         assertEquals(1, mapping.getInt("unmappedSymbolCount"))
-        assertEquals(0, mapping.getInt("implementedTranslationCoveragePercent"))
+        assertEquals(0, mapping.getInt("linkedImplementationCoveragePercent"))
         val symbols = mapping.getJSONArray("symbols")
         val decoded = (0 until symbols.length()).map { symbols.getJSONObject(it) }
         val malloc = decoded.single { it.getString("sourceSymbol") == "_malloc" }
@@ -109,7 +109,7 @@ class AndroidApiMapperTest {
         assertEquals("CURRENT_DEVICE_DLSYM", mapping.getString("runtimeNdkResolverStatus"))
         assertEquals(35, mapping.getInt("runtimeVerifiedAndroidApiLevel"))
         assertEquals(100, mapping.getInt("classificationCoveragePercent"))
-        assertEquals(0, mapping.getInt("implementedTranslationCoveragePercent"))
+        assertEquals(0, mapping.getInt("linkedImplementationCoveragePercent"))
         val resolved = mapping.getJSONArray("symbols").getJSONObject(0)
         assertEquals("liblog.so", resolved.getString("targetLibrary"))
         assertTrue(resolved.getBoolean("verifiedOnDevice"))
@@ -204,8 +204,8 @@ class AndroidApiMapperTest {
         assertEquals(2, mapping.getInt("implementedApiReplacementCount"))
         assertEquals(2, mapping.getInt("runtimeVerifiedApiReplacementCount"))
         assertEquals("CURRENT_DEVICE_COMPAT_DLSYM", mapping.getString("runtimeApiReplacementResolverStatus"))
-        assertEquals(0, mapping.getInt("generatedTranslationCount"))
-        assertEquals(0, mapping.getInt("implementedTranslationCount"))
+        assertEquals(0, mapping.getInt("generatedApiImplementationCount"))
+        assertEquals(0, mapping.getInt("linkedImplementationCount"))
         val items = mapping.getJSONArray("symbols")
         val time = items.getJSONObject(0)
         assertEquals("IMPLEMENTED_API_REPLACEMENT_AVAILABLE", time.getString("classification"))
@@ -294,8 +294,8 @@ class AndroidApiMapperTest {
         assertEquals(0, mapping.getInt("candidateCoveragePercent"))
         assertEquals(0, mapping.getInt("distinctImportSymbols"))
         assertEquals(0, mapping.getInt("classificationCoveragePercent"))
-        assertEquals(0, mapping.getInt("generatedTranslationCount"))
-        assertEquals(0, mapping.getInt("implementedTranslationCoveragePercent"))
+        assertEquals(0, mapping.getInt("generatedApiImplementationCount"))
+        assertEquals(0, mapping.getInt("linkedImplementationCoveragePercent"))
     }
 
     @Test fun compatStubHandlersAreRegisteredAndNeverCountedAsVerifiedImplementations() {
@@ -340,9 +340,9 @@ class AndroidApiMapperTest {
         )
         assertEquals("unmapped after registration", 0, mapping.getInt("unmappedSymbolCount"))
         // Stubs are triage/resolution coverage, never implementation coverage.
-        assertEquals(0, mapping.getInt("implementedTranslationCount"))
-        assertEquals(0, mapping.getInt("implementedTranslationCoveragePercent"))
-        assertEquals(0, mapping.getInt("generatedTranslationCount"))
+        assertEquals(0, mapping.getInt("linkedImplementationCount"))
+        assertEquals(0, mapping.getInt("linkedImplementationCoveragePercent"))
+        assertEquals(0, mapping.getInt("generatedApiImplementationCount"))
         val items = (0 until mapping.getJSONArray("symbols").length())
             .map { mapping.getJSONArray("symbols").getJSONObject(it) }
         val stub = items.single { it.getString("sourceSymbol") == "_alDeleteSources" }

@@ -208,7 +208,7 @@ size_t proveArm64IntegerLeaf(const uint8_t *code, size_t size, std::string *reas
     return fail("entry point does not terminate within 4096 verified instructions");
 }
 
-Json translateTrivial(const std::vector<uint8_t> &data) {
+Json recompileTrivial(const std::vector<uint8_t> &data) {
     Json result = Json::object();
     result["status"] = std::string("UNSUPPORTED");
     result["reason"] = std::string("no ARM64 slice was found (on-device conversion targets arm64-v8a)");

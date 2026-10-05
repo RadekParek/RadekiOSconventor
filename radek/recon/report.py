@@ -26,8 +26,8 @@ def markdown(reconstruction: dict, application: dict | None = None) -> str:
     lines.append("# IPA reconstruction report")
     lines.append("")
     lines.append(
-        "Static reconstruction produced by `radek`. No imported code was executed, "
-        "interpreted or emulated. This is not the original source code: names, types and "
+        "Static reconstruction produced by `radek`. No imported code was executed by the analyzer. "
+        "This is not the original source code: names, types and "
         "control flow are recovered where metadata allows and marked uncertain elsewhere."
     )
     lines.append("")

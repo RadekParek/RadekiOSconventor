@@ -14,7 +14,12 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         ndk { abiFilters += "arm64-v8a" }
-        externalNativeBuild { cmake { cppFlags += listOf("-std=c++17", "-Wall", "-Wextra") } }
+        externalNativeBuild {
+            cmake {
+                cppFlags += listOf("-std=c++17", "-Wall", "-Wextra")
+                arguments += listOf("-DRADEK_BUILD_COMPAT_RUNTIME=OFF")
+            }
+        }
     }
     externalNativeBuild { cmake { path = file("../native/CMakeLists.txt"); version = "3.22.1" } }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }

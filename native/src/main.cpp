@@ -20,7 +20,7 @@ int main(int argc, char **argv) {
         const bool trivial = argc == 3 && std::strcmp(argv[2], "trivial") == 0;
         if (argc == 3 && !trivial)
             throw std::runtime_error("unknown mode (expected: trivial)");
-        std::cout << (trivial ? radek::translateTrivial(b) : radek::analyze(b)).dump() << '\n';
+        std::cout << (trivial ? radek::recompileTrivial(b) : radek::analyze(b)).dump() << '\n';
         return 0;
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';

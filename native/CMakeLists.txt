@@ -59,3 +59,69 @@ else()
     target_link_libraries(cad-display-link-tests PRIVATE Threads::Threads)
     add_test(NAME cad-display-link COMMAND cad-display-link-tests)
 endif()
+
+option(RADEK_BUILD_COMPAT_RUNTIME "Build and test compat-runtime-v1" OFF)
+option(RADEK_FETCH_UNICORN "Fetch the pinned Unicorn ARM32 backend" OFF)
+if(RADEK_BUILD_COMPAT_RUNTIME)
+    find_package(Threads REQUIRED)
+
+    set(COMPAT_RUNTIME_SOURCES
+        src/compat_runtime/guest_memory.cpp
+        src/compat_runtime/shim_registry.cpp
+        src/compat_runtime/macho_loader.cpp
+        src/compat_runtime/runner.cpp
+        src/compat_runtime/cpu.cpp
+        src/compat_runtime/objc_runtime.cpp
+    )
+    if(RADEK_FETCH_UNICORN)
+        include(FetchContent)
+        set(BUILD_SHARED_LIBS ON CACHE BOOL "Build Unicorn as a shared library" FORCE)
+        set(UNICORN_BUILD_TESTS OFF CACHE BOOL "Do not build upstream Unicorn tests" FORCE)
+        set(UNICORN_INSTALL OFF CACHE BOOL "Do not install the fetched Unicorn dependency" FORCE)
+        set(UNICORN_LEGACY_STATIC_ARCHIVE OFF CACHE BOOL "Do not build the legacy static archive" FORCE)
+        set(UNICORN_LOGGING OFF CACHE BOOL "Disable Unicorn internal logging" FORCE)
+        set(UNICORN_ARCH "arm" CACHE STRING "Build the ARM32 execution backend only" FORCE)
+        FetchContent_Declare(
+            unicorn
+            GIT_REPOSITORY https://github.com/unicorn-engine/unicorn.git
+            GIT_TAG 8028ec436f2d9376525352dd38ed9ed6b9f6be10
+            GIT_SHALLOW FALSE
+        )
+        FetchContent_MakeAvailable(unicorn)
+        set_target_properties(unicorn unicorn-common PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        if(ANDROID)
+            target_link_options(unicorn PRIVATE "-Wl,-z,max-page-size=16384")
+        endif()
+        list(APPEND COMPAT_RUNTIME_SOURCES src/compat_runtime/unicorn_backend.cpp)
+    endif()
+
+    add_library(compat_runtime_core STATIC ${COMPAT_RUNTIME_SOURCES})
+    set_target_properties(compat_runtime_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(compat_runtime_core PUBLIC include)
+    target_compile_options(compat_runtime_core PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(compat_runtime_core PUBLIC Threads::Threads)
+    if(RADEK_FETCH_UNICORN)
+        target_compile_definitions(compat_runtime_core PRIVATE RADEK_HAVE_UNICORN=1)
+        target_link_libraries(compat_runtime_core PRIVATE unicorn)
+    endif()
+
+    if(ANDROID)
+        add_library(compat_runtime_v1 SHARED src/compat_runtime/jni.cpp)
+        target_include_directories(compat_runtime_v1 PRIVATE include)
+        target_compile_options(compat_runtime_v1 PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(compat_runtime_v1 PRIVATE compat_runtime_core)
+        target_link_options(compat_runtime_v1 PRIVATE "-Wl,-z,max-page-size=16384")
+    else()
+        add_executable(compat-runtime-tests tests/compat_runtime.cpp)
+        target_include_directories(compat-runtime-tests PRIVATE include)
+        target_compile_options(compat-runtime-tests PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(compat-runtime-tests PRIVATE compat_runtime_core)
+        add_test(NAME compat-runtime COMMAND compat-runtime-tests)
+
+        add_executable(compat-runtime-objc-tests tests/compat_runtime_objc.cpp)
+        target_include_directories(compat-runtime-objc-tests PRIVATE include)
+        target_compile_options(compat-runtime-objc-tests PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(compat-runtime-objc-tests PRIVATE compat_runtime_core)
+        add_test(NAME compat-runtime-objc COMMAND compat-runtime-objc-tests)
+    endif()
+endif()

@@ -8,7 +8,7 @@ from .apk import Toolchain, validate_apk, validate_experimental_shell
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Authorized IPA inspection and fail-closed game-conversion assessment (no emulation)"
+        description="Authorized IPA inspection and fail-closed static-recompilation assessment"
     )
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("analyze", "convert"):

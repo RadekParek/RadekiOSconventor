@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "runtimeContract": "compat-runtime-v1",
+  "statusVocabulary": [
+    "not runnable",
+    "crashes at <symbol>",
+    "menu",
+    "playable"
+  ],
+  "apps": [],
+  "shimBacklog": [
+    {
+      "rank": 1,
+      "familyId": "objc-runtime-core",
+      "family": "Objective-C runtime startup, class/selector lookup, message dispatch, and memory management",
+      "candidateImports": [
+        "_objc_msgSend",
+        "_objc_getClass",
+        "_sel_registerName",
+        "_objc_retain",
+        "_objc_release",
+        "_objc_autoreleasePoolPush",
+        "_objc_autoreleasePoolPop"
+      ],
+      "priorityBasis": "Provisional startup dependency; must be reprioritized from the first authorized IPA import report.",
+      "gamesUnblocked": [],
+      "gamesUnblockedMeasured": false
+    },
+    {
+      "rank": 2,
+      "familyId": "foundation-core",
+      "family": "CoreFoundation/Foundation strings, collections, data, and bundle services",
+      "candidateImports": [
+        "_CFStringCreateWithCString",
+        "_CFRetain",
+        "_CFRelease",
+        "_CFArrayCreate",
+        "_CFDictionaryCreate",
+        "_CFBundleGetMainBundle",
+        "_CFBundleCopyExecutableURL"
+      ],
+      "priorityBasis": "Provisional app-startup and asset-loading dependency; validate against observed imports before implementation.",
+      "gamesUnblocked": [],
+      "gamesUnblockedMeasured": false
+    },
+    {
+      "rank": 3,
+      "familyId": "uikit-rendering-input",
+      "family": "UIApplication lifecycle, CoreGraphics/CoreAnimation rendering, and touch/input delivery",
+      "candidateImports": [
+        "_UIApplicationMain",
+        "_CGContextDrawImage",
+        "_CGImageCreateWithPNGDataProvider",
+        "_OBJC_CLASS_$_UIApplication",
+        "_OBJC_CLASS_$_CADisplayLink"
+      ],
+      "priorityBasis": "Provisional first-menu/play loop dependency; validate from an actual title's import and smoke traces.",
+      "gamesUnblocked": [],
+      "gamesUnblockedMeasured": false
+    }
+  ],
+  "measurementNote": "No real app IPA has been supplied or smoke-tested in this session. Candidate import names and ranks are hypotheses, not observed blockers; gamesUnblocked remains empty and unmeasured until evidence-backed runs are recorded."
+}

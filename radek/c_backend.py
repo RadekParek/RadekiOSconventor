@@ -15,7 +15,7 @@ from .ir import Op, Program, Unsupported
 _SYMBOL = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-def emit(program: Program, function_name: str = "radek_translated_entry") -> str:
+def emit(program: Program, function_name: str = "radek_recompiled_entry") -> str:
     """Emit one standalone ``uint32_t(void)`` C function from a proven leaf."""
     if not _SYMBOL.fullmatch(function_name):
         raise Unsupported("invalid C function name")

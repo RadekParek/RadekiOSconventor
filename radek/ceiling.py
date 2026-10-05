@@ -16,7 +16,7 @@ records one gate per stage:
 
 Only the first blocked gate is a ceiling. Later gates are deliberately reported
 as ``NOT_REACHED`` instead of being estimated, so this file can never imply
-translation progress that was not earned. Stub handlers, name candidates and
+static recompilation progress that was not earned. Stub handlers, name candidates and
 symbol triage are never counted as passed stages.
 """
 
@@ -38,10 +38,10 @@ GATES: tuple[tuple[str, str], ...] = (
     ("SLICE_FORMAT", "CPU, subtype, endianness, file type and alignment are convertible"),
     ("LOADER_METADATA", "Load commands, bind table, fixups and runtime metadata are understood"),
     ("ENTRY_ROUTINE", "Entry is a provable closed-integer routine covering its __text section"),
-    ("REACHABLE_CODE", "Reachable code is translated, not only the entry leaf"),
+    ("REACHABLE_CODE", "Reachable code is statically recompiled, not only the entry leaf"),
     ("API_LINKING", "Every reachable import has a linked implementation"),
     ("RESOURCES", "Bundle resources are carried into the APK"),
-    ("LIFECYCLE", "Launcher/lifecycle replacement exists for the translated code"),
+    ("LIFECYCLE", "Launcher/lifecycle replacement exists for the statically recompiled code"),
     ("APK_PACKAGING", "A signed, installable APK was built and statically validated"),
 )
 
@@ -310,40 +310,40 @@ def assess(
         stats = (selected or {}).get("disassembly") or {}
     functions = int(stats.get("functions", 0))
     text_bytes = int(stats.get("textBytes", 0))
-    translated = 0
+    recompiled_bytes = 0
     if convertible is not None:
         for segment in convertible.get("segments", []):
             for section in segment.get("sections", []):
                 if section.get("name") == "__text" and int(segment.get("initialProtection", 0)) & 4:
-                    translated = int(section.get("size", 0))
-    percent = round(100.0 * translated / text_bytes, 6) if text_bytes else 0.0
+                    recompiled_bytes = int(section.get("size", 0))
+    percent = round(100.0 * recompiled_bytes / text_bytes, 6) if text_bytes else 0.0
     single_function = functions == 1
-    fully_translated = convertible is not None and single_function
+    fully_recompiled = convertible is not None and single_function
     coverage_failed = best_depth == _SLICE_GATE_ORDER.index("REACHABLE_CODE")
-    if fully_translated:
+    if fully_recompiled:
         reachable_detail = (
-            f"the single reachable function is translated in full ({translated} of {text_bytes} __text byte(s))"
+            f"the single reachable function is statically recompiled in full ({recompiled_bytes} of {text_bytes} __text byte(s))"
         )
     elif coverage_failed:
         reachable_detail = best_detail
     elif convertible is None:
         reachable_detail = (
-            f"{functions} reachable function(s) were recovered; a general function translator does not exist"
+            f"{functions} reachable function(s) were recovered; general reachable-function static recompilation is not implemented"
         )
     else:
         reachable_detail = (
-            f"{functions} reachable function(s) were recovered; {translated} of {text_bytes} __text byte(s) "
-            "have a translated backend (a general function translator does not exist)"
+            f"{functions} reachable function(s) were recovered; {recompiled_bytes} of {text_bytes} __text byte(s) "
+            "have a statically recompiled backend (general reachable-function static recompilation is not implemented)"
         )
     record(
         "REACHABLE_CODE",
-        fully_translated,
+        fully_recompiled,
         reachable_detail,
         {
             "reachableFunctions": functions,
-            "translatedBytes": translated,
+            "recompiledBytes": recompiled_bytes,
             "totalTextBytes": text_bytes,
-            "translatedPercent": percent,
+            "recompiledPercent": percent,
         },
     )
 
@@ -403,7 +403,7 @@ def assess(
         "LIFECYCLE",
         resources_ok,
         (
-            "the bounded launcher drives the single translated routine through JNI"
+            "the bounded launcher drives the single statically recompiled routine through JNI"
             if resources_ok
             else "no replacement exists for UIKit/UIApplicationMain or an app lifecycle of the original game"
         ),
@@ -454,7 +454,7 @@ def assess(
         "boundedEntryArtifact": {
             "available": entry_leaf,
             "detail": (
-                "the standalone entry-leaf artifact (translated-entry.bin / libtranslated-entry.so) can be "
+                "the standalone entry-leaf artifact (recompiled-entry.bin / librecompiled-entry.so) can be "
                 "produced for the proven routine; it is one function, not a game, and is not linked into an APK"
                 if entry_leaf
                 else "no standalone entry-leaf artifact is produced for this input"

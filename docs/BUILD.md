@@ -26,7 +26,7 @@ The Android importer APK is `app/build/outputs/apk/debug/app-debug.apk`; CI copi
 The host's `radek validate` command needs Android build-tools 35.0.0 (`aapt2`, `zipalign`, and
 `apksigner`) to validate an already-built importer or future complete-game APK. It does not build a
 game APK. With the same toolchain installed, `radek convert` additionally assembles the labelled
-`experimental-shell.apk` around isolated translated artifacts, and `radek validate-shell` checks
+`experimental-shell.apk` around isolated statically recompiled artifacts, and `radek validate-shell` checks
 its `experimental-shell-v1` contract (disclosure, DEX, metadata, signature).
 
 ## Import and inspect on Android
@@ -41,12 +41,12 @@ API candidates, current-device compatibility-export checks, blockers, the raw JS
 The analysis progress bar measures input copying and extraction; when the bounded conversion proof
 applies, the same import job continues into the packaging stages and builds the signed APK
 automatically. Runnable game code remains at zero unless that proof applies or a complete host
-conversion is attached under the strict contract. Proven IPAs become a signed APK whose translated
+conversion is attached under the strict contract. Proven IPAs become a signed APK whose statically recompiled
 entry routine runs through JNI and displays the message recovered from the IPA, with no extra user
 action. Everything else can be turned, via the red **Force convert to .apk** action, into a
 separately named, installable preview shell from the bundled Android template that uses the IPA app
-name and recovered icon where available but contains no translated game code or gameplay. Its
-launcher visibly states that the preview started and no translated executable is included, without
+name and recovered icon where available but contains no statically recompiled game code or gameplay. Its
+launcher visibly states that the preview started and no statically recompiled executable is included, without
 converter branding or static-analysis details. The detailed record stays in machine-readable
 metadata and the app's library entry. The runtime
 packager reads either UTF-8 or UTF-16 Android binary-XML string pools, patches or inserts
@@ -76,21 +76,21 @@ python3 -m radek analyze authorized.ipa --authorized --output workspace/analysis
 The workspace must not already exist. Reports and logs persist; extracted workspaces are removed.
 The host reconstructs code metadata and may prove one narrow closed-integer entry leaf. When that
 proof succeeds, it writes a raw Android instruction blob, portable C, a minimal loadable ARM shared
-object exporting `radek_translated_entry`, and supplementary `leaf-experiment.ll`. It statically
+object exporting `radek_recompiled_entry`, and supplementary `leaf-experiment.ll`. It statically
 checks the ELF architecture, symbol size/hash, and lack of undefined symbols; C is compiled and run
 against representative IR cases in the unit tests. No Android device load test is performed.
 
 If resolved reconstructed internal calls establish a path from the selected entry to a supported
 compiled compatibility import, the host also emits its selected implementation source under
 `api-replacements/`. These sources are behavior-tested on the host, but are not linked to the
-translated host entry. The on-device bounded
+statically recompiled host entry. The on-device bounded
 APK builder packages its prebuilt ARM64 `libioscompat.so` and declares `DT_NEEDED`; it still rewrites
 no individual imports because the accepted executable has none. Reports distinguish partial
 source instruction-byte progress from complete-game progress. Only when the whole executable
 `__text` equals the proven routine, and imports, dependencies, fixups, relocations and runtime
 metadata are absent, does `convert` attempt complete-game packaging. A successful signed and
 statically validated APK reaches `READY`; unsupported inputs or missing build tools never receive
-that status. This bounded path does not translate arbitrary game code, APIs, resources or lifecycle.
+that status. This bounded path does not statically recompile arbitrary game code, APIs, resources or lifecycle.
 
 ARM selection for the analysis is deterministic: automatic selection prefers ARM64 in a FAT IPA
 containing both ARM32 and ARM64; supported ARM32-only inputs target 32-bit Android ARMv7 (`armeabi-v7a`).
@@ -140,7 +140,7 @@ CI publishes no imported-IPA preview APK.
 converts both `tests/data/hello-test.ipa` and the longer `tests/data/simple.ipa` end to end, validates
 the resulting bounded conversion APKs, and uploads `RadekiOSConventor-debug.apk` plus validation,
 test and diagnostic conversion artifacts. CI does not publish a synthetic or unproven game APK. No
-iOS executable is run by tests, and there is no device/emulator runtime smoke test at present.
+iOS executable is run by tests, and there is no device runtime smoke test at present.
 
 ## Optional source formatting
 

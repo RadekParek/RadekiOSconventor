@@ -1,9 +1,9 @@
-"""APK validation utilities; game-APK packaging stays disabled without a full translator.
+"""APK validation utilities; game-APK packaging stays disabled without a full static recompilation backend.
 
 A separate, honestly labelled *experimental shell* APK can be built from the
-isolated translated artifacts and the generated compatibility-registry source.
+isolated statically recompiled artifacts and the generated compatibility-registry source.
 It carries the ``experimental-shell-v1`` contract, states on screen and in
-metadata that no game code is translated, and can never satisfy the
+metadata that no game code is statically recompiled, and can never satisfy the
 ``complete-game-v1`` attachment checks.
 """
 
@@ -25,8 +25,7 @@ BUILD_TOOLS = "35.0.0"
 EXPERIMENTAL_SHELL_CONTRACT = "experimental-shell-v1"
 EXPERIMENTAL_SHELL_PACKAGE = "dev.radek.experimental.shell"
 EXPERIMENTAL_SHELL_NOTICE = (
-    "Experimental conversion shell. This APK packages isolated analysis artifacts only. "
-    "No game code is translated, no iOS APIs are implemented, and the IPA's game does not run."
+    "This inspection shell contains isolated analysis artifacts, not a runnable game."
 )
 
 
@@ -93,7 +92,7 @@ def build_apk(
 ) -> dict:
     """Refuse the former integer-entry wrapper, which was not a game conversion."""
     raise InputError(
-        "APK packaging is disabled: no complete iOS-to-Android game translator and API replacement backend is implemented"
+        "APK packaging is disabled: no complete iOS-to-Android game static recompilation backend and API replacement backend is implemented"
     )
 
 
@@ -105,7 +104,7 @@ def elf_info(data: bytes) -> dict:
 
 
 # --- Honestly labelled experimental shell APK -------------------------------
-# The shell packages the isolated translated artifacts and the generated
+# The shell packages the isolated statically recompiled artifacts and the generated
 # compatibility-registry source so they can be inspected on-device. It states
 # what it is in its launcher text and metadata, and it is explicitly not a
 # game conversion.
@@ -229,7 +228,7 @@ def build_experimental_shell(
 ) -> dict:
     """Assemble, align and sign the honest experimental shell APK.
 
-    ``artifacts`` maps an APK entry name to ``(kind, payload)``: translated
+    ``artifacts`` maps an APK entry name to ``(kind, payload)``: statically recompiled
     code or compatibility-registry sources produced by this run. Every step
     uses the real Android toolchain (aapt2, javac, d8, zipalign, apksigner).
     """
@@ -357,8 +356,8 @@ def build_experimental_shell(
         "completeGameConversion": False,
         "message": (
             "An explicitly labelled experimental shell APK was aligned and signed. It packages the "
-            "isolated translated artifacts and compatibility-registry source for inspection only; "
-            "it contains no translated game and is not a complete-game conversion."
+            "isolated statically recompiled artifacts and compatibility-registry source for inspection only; "
+            "it contains no statically recompiled game and is not a complete-game conversion."
         ),
     }
 
@@ -438,31 +437,31 @@ def _validate_complete_game_metadata(metadata: dict, expected_package: str, targ
     if game.get("status") != "COMPLETE" or game.get("completeGameConversion") is not True:
         raise InputError("host did not attest a complete game conversion")
     reachable = game.get("reachableSourceFunctions")
-    translated = game.get("translatedReachableFunctions")
-    untranslated = game.get("untranslatedReachableFunctions")
+    recompiled_count = game.get("recompiledReachableFunctions")
+    not_recompiled_count = game.get("notRecompiledReachableFunctions")
     if (
         not isinstance(reachable, int)
         or isinstance(reachable, bool)
         or reachable <= 0
-        or not isinstance(translated, int)
-        or isinstance(translated, bool)
-        or translated != reachable
-        or not isinstance(untranslated, int)
-        or isinstance(untranslated, bool)
-        or untranslated != 0
+        or not isinstance(recompiled_count, int)
+        or isinstance(recompiled_count, bool)
+        or recompiled_count != reachable
+        or not isinstance(not_recompiled_count, int)
+        or isinstance(not_recompiled_count, bool)
+        or not_recompiled_count != 0
     ):
-        raise InputError("not all reachable game functions were translated")
+        raise InputError("not all reachable game functions were statically recompiled")
 
     reachable_apis = game.get("reachableApiCount")
     generated_replacements = game.get("generatedApiReplacements")
     native_passthroughs = game.get("nativeApiPassthroughs")
-    untranslated_apis = game.get("untranslatedReachableApiCount")
+    unimplemented_apis = game.get("unimplementedReachableApiCount")
     replacements = game.get("apiReplacements")
     if (
         game.get("apiCoverageComplete") is not True
-        or not isinstance(untranslated_apis, int)
-        or isinstance(untranslated_apis, bool)
-        or untranslated_apis != 0
+        or not isinstance(unimplemented_apis, int)
+        or isinstance(unimplemented_apis, bool)
+        or unimplemented_apis != 0
         or not isinstance(reachable_apis, int)
         or isinstance(reachable_apis, bool)
         or not isinstance(generated_replacements, int)

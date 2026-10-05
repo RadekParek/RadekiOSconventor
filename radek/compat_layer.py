@@ -14,7 +14,7 @@ resolution target in the generated ``libioscompat`` source:
 
 The module therefore makes symbol *resolution* total while keeping the
 verified/stubbed distinction exact. Stub presence is resolution coverage, not
-translation coverage, and is reported separately from verified counts.
+static recompilation coverage, and is reported separately from verified counts.
 """
 
 from __future__ import annotations
@@ -23,9 +23,9 @@ import hashlib
 import json
 from pathlib import Path
 
-from .api_translation import _FAMILY as _SHIM_FAMILY
-from .api_translation import _SUPPORTED as _VERIFIED_SHIMS
-from .api_translation import selection_defines
+from .api_implementations import _FAMILY as _SHIM_FAMILY
+from .api_implementations import _SUPPORTED as _VERIFIED_SHIMS
+from .api_implementations import selection_defines
 
 CONTRACT = "ioscompat-registry-v1"
 MAX_GENERATED_ENTRIES = 4096
@@ -362,6 +362,6 @@ def generate(reconstruction: dict, output: Path) -> dict:
             f"source: {len(verified)} verified implementation(s) and {len(stubbed)} explicitly "
             "unimplemented stub handler(s). A stub records invocations and returns a safe default; "
             "it does not implement the API, rewrites no IPA callsites, and its presence is "
-            "resolution coverage, not translation coverage."
+            "resolution coverage, not static recompilation coverage."
         ),
     }

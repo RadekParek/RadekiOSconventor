@@ -1,4 +1,4 @@
-"""Minimal self-contained Android ET_DYN writer for translated leaf code.
+"""Minimal self-contained Android ET_DYN writer for statically recompiled leaf code.
 
 The output has a single exported function and no imports, relocations, assets, or
 Android activity. It is a native-code artifact, not a playable APK. Keeping the
@@ -26,14 +26,14 @@ def _align(value: int, alignment: int) -> int:
     return (value + alignment - 1) & ~(alignment - 1)
 
 
-def build_shared_object(machine_code: bytes, target_arch: str, symbol: str = "radek_translated_entry") -> bytes:
+def build_shared_object(machine_code: bytes, target_arch: str, symbol: str = "radek_recompiled_entry") -> bytes:
     """Wrap one relocation-free ARM function in a loadable Android ELF DSO."""
     if target_arch not in ("arm64", "armv7"):
-        raise InputError("translated ELF target must be arm64 or armv7")
+        raise InputError("statically recompiled ELF target must be arm64 or armv7")
     if not machine_code or len(machine_code) > 16 * 1024 * 1024:
-        raise InputError("translated ELF function is empty or exceeds the 16 MiB limit")
+        raise InputError("statically recompiled ELF function is empty or exceeds the 16 MiB limit")
     if not _SYMBOL.fullmatch(symbol):
-        raise InputError("invalid translated ELF symbol name")
+        raise InputError("invalid statically recompiled ELF symbol name")
 
     is_64 = target_arch == "arm64"
     elf_class = 2 if is_64 else 1
@@ -79,7 +79,7 @@ def build_shared_object(machine_code: bytes, target_arch: str, symbol: str = "ra
         dynamic_blob = b"".join(struct.pack("<qQ", tag, value) for tag, value in dynamic_entries)
     else:
         if any(value > 0xFFFFFFFF for _, value in dynamic_entries):
-            raise InputError("translated ARM32 ELF exceeds its address range")
+            raise InputError("statically recompiled ARM32 ELF exceeds its address range")
         dynamic_blob = b"".join(struct.pack("<iI", tag, value) for tag, value in dynamic_entries)
 
     # SysV ELF hash table for exactly one defined global symbol.
@@ -107,7 +107,7 @@ def build_shared_object(machine_code: bytes, target_arch: str, symbol: str = "ra
     symbols_end = symbols_offset + len(symbols_blob)
     data_end = max(dynamic_offset + len(dynamic_blob), hash_offset + len(hash_blob), symbols_end)
     if data_end - data_offset > 16 * 1024 * 1024:
-        raise InputError("translated ELF dynamic data exceeds the 16 MiB limit")
+        raise InputError("statically recompiled ELF dynamic data exceeds the 16 MiB limit")
     shstrtab_offset = data_end
     section_offset = _align(shstrtab_offset + len(shstrtab), symbol_alignment)
     section_count = 7
@@ -171,7 +171,7 @@ def build_shared_object(machine_code: bytes, target_arch: str, symbol: str = "ra
             struct.pack_into("<IIQQQQIIQQ", image, section_offset + index * shdr_size, *header)
     else:
         if total_size > 0xFFFFFFFF or data_end > 0xFFFFFFFF:
-            raise InputError("translated ARM32 ELF exceeds its file/address range")
+            raise InputError("statically recompiled ARM32 ELF exceeds its file/address range")
         struct.pack_into(
             "<HHIIIIIHHHHHH",
             image,

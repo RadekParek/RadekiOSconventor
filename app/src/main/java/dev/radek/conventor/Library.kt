@@ -13,7 +13,7 @@ object NativeBridge {
     init { System.loadLibrary("radek") }
     external fun analyze(bytes: ByteArray): String
     external fun analyzeCompact(bytes: ByteArray): String
-    external fun translateTrivial(bytes: ByteArray): String
+    external fun recompileTrivial(bytes: ByteArray): String
     external fun findAndroidLibrary(symbol: String): String?
     external fun findImplementedApiReplacement(sourceSymbol: String): String?
 
@@ -283,26 +283,26 @@ class Library(private val context: Context) {
             val macho = JSONObject(NativeBridge.analyzeCompact(binaryBytes))
             // Bounded on-device conversion proof: is the whole executable exactly
             // one closed-integer routine with nothing left over? Fail closed.
-            val deviceTranslation = try {
-                JSONObject(NativeBridge.translateTrivial(binaryBytes))
+            val deviceRecompilation = try {
+                JSONObject(NativeBridge.recompileTrivial(binaryBytes))
             } catch (_: Exception) {
                 JSONObject().put("status", "UNSUPPORTED").put("reason", "native prover unavailable")
             }
             // Keep the persisted proof small: only the longest few printable
             // strings matter (they feed the launch message), never the whole
             // __cstring section of a large binary.
-            deviceTranslation.optJSONArray("strings")?.let { strings ->
+            deviceRecompilation.optJSONArray("strings")?.let { strings ->
                 val kept = JSONArray()
                 for (index in 0 until minOf(strings.length(), 64)) {
                     val value = strings.optString(index, "")
                     if (value.length in 3..512) kept.put(value)
                 }
-                deviceTranslation.put("strings", kept)
+                deviceRecompilation.put("strings", kept)
             }
-            val deviceProven = deviceTranslation.optString("status") == "PROVEN" &&
-                deviceTranslation.optInt("coveragePercent", 0) == 100 &&
-                deviceTranslation.optInt("functionCount", 0) == 1
-            report.put("deviceTranslation", deviceTranslation)
+            val deviceProven = deviceRecompilation.optString("status") == "PROVEN" &&
+                deviceRecompilation.optInt("coveragePercent", 0) == 100 &&
+                deviceRecompilation.optInt("functionCount", 0) == 1
+            report.put("deviceRecompilation", deviceRecompilation)
             updateProgress(38, "ANALYZING", "Main executable parsed; checking embedded Mach-O images", forceSave = true)
             report.put("machO", macho)
             updateProgress(53, "Mach-O analysis", "Primary executable analysis completed")
@@ -409,7 +409,7 @@ class Library(private val context: Context) {
             val verifiedNdkCandidatePercent = apiMapping.optInt("runtimeVerifiedCandidateCoveragePercent", 0)
             val verifiedNdkImportPercent = apiMapping.optInt("runtimeVerifiedImportCoveragePercent", 0)
             val unimplementedCompatStubCount = apiMapping.optInt("compatStubHandlerCount", 0)
-            report.put("apiTranslation", JSONObject()
+            report.put("apiImplementationGeneration", JSONObject()
                 .put("status", if (verifiedApiReplacements > 0) "RUNTIME_IMPLEMENTATION_AVAILABLE_NOT_LINKED" else "NO_API_REPLACEMENT_LINKED")
                 .put("attempted", false)
                 .put("generatedApiReplacements", 0)
@@ -424,11 +424,11 @@ class Library(private val context: Context) {
                     "The analyzer runtime contains concrete compatibility exports, but no matching import was verified on this device and no game API replacement was linked."))
             if (deviceProven) {
                 report.put("portProgress", JSONObject()
-                    .put("percent", deviceTranslation.optInt("coveragePercent", 100))
+                    .put("percent", deviceRecompilation.optInt("coveragePercent", 100))
                     .put("status", "PROVEN_CONVERTIBLE_ON_DEVICE")
                     .put("completeGameConversion", false)
-                    .put("translatedFunctions", 1)
-                    .put("translatedTextBytes", deviceTranslation.optInt("sourceBytes", 0))
+                    .put("recompiledFunctions", 1)
+                    .put("recompiledTextBytes", deviceRecompilation.optInt("sourceBytes", 0))
                     .put("basis", "The native prover verified that the whole executable __text is one closed-integer routine; the importer packages that proof into a signed APK automatically after analysis. Bytes are proven, packaging follows below."))
             } else {
                 report.put("portProgress", JSONObject()
@@ -446,8 +446,8 @@ class Library(private val context: Context) {
                 !hasCandidate -> "No supported ARM64/ARMv7/ARMv6 slice. ARM64e PAC reconstruction is blocked."
                 analysisErrors.length() > 0 -> "This bundle links embedded frameworks or libraries; ${analysisErrors.length()} image(s) could not be decoded on-device, and frameworks, imports or metadata need unsupported compatibility/linker implementations.$apiBlocker The analysis itself completed."
                 incompatible -> "Frameworks, imports, incomplete dyld bindings, metadata or embedded code require unsupported compatibility/linker implementations.$apiBlocker The analysis itself completed."
-                deviceProven -> "The executable is fully covered by the proven closed-integer subset. Force convert builds a real signed APK whose translated entry routine runs through JNI; general games remain unsupported."
-                else -> "Analysis completed, but complete iOS-to-Android game-code translation, API replacement, and packaging are not implemented for this input. Force can build a separate branded preview shell."
+                deviceProven -> "The executable is fully covered by the proven closed-integer subset. Force convert builds a real signed APK whose statically recompiled entry routine runs through JNI; general games remain unsupported."
+                else -> "Analysis completed, but complete iOS-to-Android game-code static recompilation, API replacement, and packaging are not implemented for this input. Force can build a separate branded preview shell."
             }
             report.put("blockers", JSONArray().put(reason)).put("hostCommand", "python3 -m radek analyze input.ipa --authorized --output workspace/analysis")
             val terminalState = if (encrypted || incompatible || !hasCandidate) ConversionState.BLOCKED else ConversionState.PARTIAL
@@ -458,7 +458,7 @@ class Library(private val context: Context) {
                     .put("percent", 5)
                     .put("stage", "CONVERTING")
                     .put("status", "RUNNING")
-                    .put("message", "Proven subset; packaging the translated entry into a signed APK automatically."))
+                    .put("message", "Proven subset; packaging the statically recompiled entry into a signed APK automatically."))
                 log(ConversionState.CONVERTING, "Bounded conversion proof passed; building the signed APK automatically", 100)
                 save(dir, report)
                 try {
@@ -493,7 +493,7 @@ class Library(private val context: Context) {
                     .put("stage", "NOT_BUILT")
                     .put("status", "NOT_BUILT")
                     .put("message", reason)
-                    .put("basis", "No game code is translated during IPA analysis. A user-triggered preview shell is tracked separately and is not counted as Android game-code progress."))
+                    .put("basis", "No game code is statically recompiled during IPA analysis. A user-triggered preview shell is tracked separately and is not counted as Android game-code progress."))
             }
             log(terminalState, reason, 100)
             save(dir, report)

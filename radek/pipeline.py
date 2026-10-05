@@ -14,7 +14,7 @@ from .gamepack import (
     complete_game_metadata,
     validate_complete_game,
 )
-from .api_translation import generate as generate_api_replacements
+from .api_implementations import generate as generate_api_replacements
 from .c_backend import emit as emit_c
 from .compat_layer import generate as generate_compat_registry
 from .elf import inspect as inspect_elf
@@ -61,7 +61,7 @@ class Pipeline:
             "state": None,
             "events": [],
             "capabilities": capabilities(),
-            "apiTranslation": {
+            "apiImplementationGeneration": {
                 "status": "NOT_ATTEMPTED",
                 "attempted": False,
                 "generatedApiReplacements": 0,
@@ -96,7 +96,7 @@ class Pipeline:
                 "completeGameConversion": False,
                 "message": (
                     "The honestly labelled experimental shell APK is only attempted on the convert "
-                    "path after isolated translated artifacts exist; it is never a complete-game APK."
+                    "path after isolated statically recompiled artifacts exist; it is never a complete-game APK."
                 ),
             },
         }
@@ -134,9 +134,9 @@ class Pipeline:
     def _build_experimental_shell_with(self, tools, work: Path, program) -> dict:
         artifacts: dict[str, tuple[str, bytes]] = {}
         candidates = [
-            ("libtranslated-entry.so", "native-code"),
-            ("translated-entry.c", "portable-c"),
-            ("translated-entry.bin", "machine-code"),
+            ("librecompiled-entry.so", "native-code"),
+            ("recompiled-entry.c", "portable-c"),
+            ("recompiled-entry.bin", "machine-code"),
             ("leaf-experiment.ll", "llvm-ir"),
         ]
         for relative in sorted(self.output.rglob("*")):
@@ -156,8 +156,8 @@ class Pipeline:
             "sourceApplication": self.report.get("application", {}),
             "targetAbi": program.target_abi,
             "machineCodeSha256": hashlib.sha256(program.machine_code).hexdigest(),
-            "translatedSourceBytes": program.source_size,
-            "translatedPercent": self.report.get("portProgress", {}).get("percent", 0),
+            "recompiledSourceBytes": program.source_size,
+            "recompiledPercent": self.report.get("portProgress", {}).get("percent", 0),
         }
         result = build_experimental_shell(work, self.output, tools, provenance, artifacts, log=self.log)
         self.log(
@@ -211,7 +211,7 @@ class Pipeline:
             "percent": 55,
             "stage": "PACKAGING",
             "status": "RUNNING",
-            "message": "Compiling the Android launcher, packaging resources and the translated entry.",
+            "message": "Compiling the Android launcher, packaging resources and the statically recompiled entry.",
         }
         self.transition("PACKAGING", "Assembling, aligning and signing the bounded complete-game APK")
         final_path = self.output / artifact_filename(ipa.name)
@@ -248,11 +248,11 @@ class Pipeline:
             "sizeBytes": build_result["sizeBytes"],
             "launchMessage": metadata["launchMessage"],
             "reachableSourceFunctions": 1,
-            "translatedReachableFunctions": 1,
-            "untranslatedReachableFunctions": 0,
+            "recompiledReachableFunctions": 1,
+            "notRecompiledReachableFunctions": 0,
             "validation": validation,
             "message": (
-                "Every statically reachable instruction of this IPA was translated and packaged into "
+                "Every statically reachable instruction of this IPA was statically recompiled and packaged into "
                 "a signed, installable Android APK that passed the complete-game-v1 static checks. "
                 "This is the bounded one-routine subset, not a general game converter; device "
                 "execution and gameplay remain untested."
@@ -260,14 +260,14 @@ class Pipeline:
         }
         self.report["nativeCodeArtifact"]["linkedIntoGame"] = True
         self.report["nativeCodeArtifact"]["apkProduced"] = True
-        self.report["leafTranslationAssessment"]["nativeCodeLinkedIntoGame"] = True
-        self.report["leafTranslationAssessment"]["apkProduced"] = True
+        self.report["staticRecompilationAssessment"]["nativeCodeLinkedIntoGame"] = True
+        self.report["staticRecompilationAssessment"]["apkProduced"] = True
         port = self.report["portProgress"]
         port["status"] = "COMPLETE_CONVERSION_BUILT"
         port["completeGameConversion"] = True
         port["basis"] = (
             f"{program.source_size} source instruction bytes (100% of this slice's executable __text "
-            f"bytes) were translated and linked into {final_path.name}. This is the bounded "
+            f"bytes) were statically recompiled and linked into {final_path.name}. This is the bounded "
             "one-function subset; general games remain unsupported."
         )
         self.report["conversionProgress"] = {
@@ -398,9 +398,9 @@ class Pipeline:
                         if key in ("functionCount", "objectiveCClasses", "swiftTypes", "usedApis")
                     ),
                 )
-                api_translation = generate_api_replacements(reconstruction, self.output)
-                api_translation["reconstructedApiUseCount"] = self.report["reconstructionSummary"].get("usedApis", 0)
-                self.report["apiTranslation"] = api_translation
+                api_implementations = generate_api_replacements(reconstruction, self.output)
+                api_implementations["reconstructedApiUseCount"] = self.report["reconstructionSummary"].get("usedApis", 0)
+                self.report["apiImplementationGeneration"] = api_implementations
                 # Full resolution registry: every observed Darwin import gets a
                 # verified implementation or an explicitly labelled stub handler.
                 # Stub counts are resolution coverage, never implementation coverage.
@@ -488,15 +488,15 @@ class Pipeline:
                 }
 
                 c_source = emit_c(program)
-                c_path = self.output / "translated-entry.c"
+                c_path = self.output / "recompiled-entry.c"
                 c_path.write_text(c_source, encoding="utf-8")
-                machine_code_path = self.output / "translated-entry.bin"
+                machine_code_path = self.output / "recompiled-entry.bin"
                 machine_code_path.write_bytes(program.machine_code)
                 shared_object = build_shared_object(program.machine_code, program.output_architecture)
-                shared_object_path = self.output / "libtranslated-entry.so"
+                shared_object_path = self.output / "librecompiled-entry.so"
                 shared_object_path.write_bytes(shared_object)
                 elf_report = inspect_elf(shared_object)
-                exported = elf_report.get("exports", {}).get("radek_translated_entry")
+                exported = elf_report.get("exports", {}).get("radek_recompiled_entry")
                 expected_code_hash = hashlib.sha256(program.machine_code).hexdigest()
                 if (
                     elf_report["architecture"] != program.target_abi
@@ -511,7 +511,7 @@ class Pipeline:
                     "sharedLibraryPath": shared_object_path.name,
                     "machineCodePath": machine_code_path.name,
                     "portableCPath": c_path.name,
-                    "exportedSymbol": "radek_translated_entry",
+                    "exportedSymbol": "radek_recompiled_entry",
                     "targetAbi": program.target_abi,
                     "machineCodeBytes": len(program.machine_code),
                     "sourceBytes": program.source_size,
@@ -525,12 +525,12 @@ class Pipeline:
                     "androidDeviceLoadTest": "NOT_RUN",
                     "completeGameConversion": False,
                     "message": (
-                        "A loadable ARM Android shared object exports one translated integer entry function. "
+                        "A loadable ARM Android shared object exports one statically recompiled integer entry function. "
                         "It is not linked into a game, does not contain API replacements, and is not a game APK."
                     ),
                 }
                 self.log(
-                    "NATIVE_ENTRY_TRANSLATION",
+                    "NATIVE_ENTRY_RECOMPILATION",
                     "Wrote and statically validated one standalone Android ELF function; no game APK was emitted",
                 )
                 # This function has no calls, memory accesses, or address references,
@@ -539,7 +539,7 @@ class Pipeline:
                 for edge in self.report.get("dependencies", {}).get("edges", []):
                     edge["classification"] = "not-required-by-standalone-entry"
                     edge["reason"] = (
-                        "The isolated translated entry function has no calls, memory accesses, or address "
+                        "The isolated statically recompiled entry function has no calls, memory accesses, or address "
                         "references. This does not implement the linked framework or the rest of the game."
                     )
                 self.report["selectedArchitecture"] = selected["architecture"]
@@ -552,15 +552,15 @@ class Pipeline:
                     if section.get("name") == "__text"
                 )
                 if total_text_bytes <= 0 or program.source_size <= 0 or program.source_size > total_text_bytes:
-                    raise RuntimeError("cannot compute verified __text byte coverage for translated entry")
-                translated_percent = round(100.0 * program.source_size / total_text_bytes, 6)
+                    raise RuntimeError("cannot compute verified __text byte coverage for statically recompiled entry")
+                recompiled_percent = round(100.0 * program.source_size / total_text_bytes, 6)
 
                 leaf_assessment = program.report()
                 leaf_assessment["loweredBytesInMemory"] = leaf_assessment.pop("outputBytes")
                 leaf_assessment["loweredCodeSha256InMemory"] = leaf_assessment.pop("machineCodeSha256")
-                self.report["leafTranslationAssessment"] = {
+                self.report["staticRecompilationAssessment"] = {
                     **leaf_assessment,
-                    "status": "TRANSLATED_ENTRY_ARTIFACT",
+                    "status": "RECOMPILED_ENTRY_ARTIFACT",
                     "machineCodeGeneratedInMemory": True,
                     "completeGameConversion": False,
                     "nativeCodeWritten": True,
@@ -569,22 +569,22 @@ class Pipeline:
                     "portableCArtifact": c_path.name,
                     "apkProduced": False,
                     "message": (
-                        "One statically proven closed-integer entry function was translated and written as a "
+                        "One statically proven closed-integer entry function was statically recompiled and written as a "
                         "standalone Android ELF shared object. It is not linked into the game APK; the rest "
-                        "of the game, lifecycle, resources, and reachable APIs remain untranslated."
+                        "of the game, lifecycle, resources, and reachable APIs remain not statically recompiled."
                     ),
                 }
                 self.report["portProgress"] = {
-                    "percent": translated_percent,
-                    "status": "PARTIAL_ENTRY_CODE_TRANSLATED",
-                    "metric": "translated source bytes / executable __text bytes in the selected Mach-O slice",
-                    "translatedFunctions": 1,
+                    "percent": recompiled_percent,
+                    "status": "PARTIAL_RECOMPILATION",
+                    "metric": "statically recompiled source bytes / executable __text bytes in the selected Mach-O slice",
+                    "recompiledFunctions": 1,
                     "totalTextBytes": total_text_bytes,
-                    "translatedTextBytes": program.source_size,
+                    "recompiledTextBytes": program.source_size,
                     "completeGameConversion": False,
                     "basis": (
-                        f"{program.source_size} source instruction bytes were translated into a standalone "
-                        f"{program.target_abi} function ({translated_percent:.6f}% of this slice's executable "
+                        f"{program.source_size} source instruction bytes were statically recompiled into a standalone "
+                        f"{program.target_abi} function ({recompiled_percent:.6f}% of this slice's executable "
                         "__text bytes). This is not gameplay, whole-app function coverage, API/link integration, "
                         "or APK progress."
                     ),
@@ -628,7 +628,7 @@ class Pipeline:
                     "stage": "NOT_BUILT",
                     "status": "NOT_BUILT",
                     "message": (
-                        "No APK was produced. The isolated translated function and any generated API shims "
+                        "No APK was produced. The isolated statically recompiled function and any generated API shims "
                         "were not linked to a game or Android launcher."
                     ),
                 }
@@ -644,7 +644,7 @@ class Pipeline:
                     }
                 blocker = (
                     "No complete iOS-to-Android game converter is implemented for this input: the "
-                    "restricted leaf assessment does not translate the game's full reachable code, APIs, "
+                    "restricted leaf assessment does not statically recompile the game's full reachable code, APIs, "
                     "lifecycle, or assets."
                 )
                 self.report.setdefault("blockers", []).append(blocker)
@@ -652,7 +652,7 @@ class Pipeline:
                     self.report["experimentalShell"] = self._attempt_experimental_shell(work, program)
                     if self.report["experimentalShell"].get("status") == "BUILT_NOT_A_GAME":
                         self.report["conversionProgress"]["message"] = (
-                            "No complete-game APK was produced. The isolated translated function and any "
+                            "No complete-game APK was produced. The isolated statically recompiled function and any "
                             "generated API shims were not linked into a game. A separately labelled "
                             "experimental shell APK packages the artifacts for inspection only."
                         )

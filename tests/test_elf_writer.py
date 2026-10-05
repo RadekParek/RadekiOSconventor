@@ -9,7 +9,7 @@ from radek.ir import lift
 
 
 class ELFWriterTests(unittest.TestCase):
-    def test_generated_arm64_dso_exports_exact_translated_machine_code(self):
+    def test_generated_arm64_dso_exports_exact_recompiled_machine_code(self):
         source = struct.pack("<II", 0x52800540, 0xD65F03C0)
         program = lift(source, "arm64")
         image = build_shared_object(program.machine_code, "arm64")
@@ -18,7 +18,7 @@ class ELFWriterTests(unittest.TestCase):
         self.assertEqual(info["architecture"], "arm64-v8a")
         self.assertEqual(info["needed"], [])
         self.assertEqual(info["undefinedSymbols"], [])
-        exported = info["exports"]["radek_translated_entry"]
+        exported = info["exports"]["radek_recompiled_entry"]
         self.assertEqual(exported["size"], len(program.machine_code))
         self.assertEqual(exported["sha256"], hashlib.sha256(program.machine_code).hexdigest())
 
@@ -31,7 +31,7 @@ class ELFWriterTests(unittest.TestCase):
         self.assertEqual(info["architecture"], "armeabi-v7a")
         self.assertEqual(info["needed"], [])
         self.assertEqual(info["undefinedSymbols"], [])
-        self.assertEqual(info["exports"]["radek_translated_entry"]["size"], len(program.machine_code))
+        self.assertEqual(info["exports"]["radek_recompiled_entry"]["size"], len(program.machine_code))
 
     def test_rejects_empty_code_bad_symbol_and_unsupported_architecture(self):
         for args in ((b"", "arm64"), (b"\xc0\x03\x5f\xd6", "x86_64"),

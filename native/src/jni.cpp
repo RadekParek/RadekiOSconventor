@@ -160,7 +160,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_dev_radek_conventor_NativeBridge_analy
     }
 }
 
-extern "C" JNIEXPORT jstring JNICALL Java_dev_radek_conventor_NativeBridge_translateTrivial(
+extern "C" JNIEXPORT jstring JNICALL Java_dev_radek_conventor_NativeBridge_recompileTrivial(
     JNIEnv *env, jobject, jbyteArray input) {
     try {
         auto n = env->GetArrayLength(input);
@@ -173,7 +173,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_dev_radek_conventor_NativeBridge_trans
         env->GetByteArrayRegion(input, 0, n, reinterpret_cast<jbyte *>(b.data()));
         if (env->ExceptionCheck())
             return nullptr;
-        return env->NewStringUTF(radek::translateTrivial(b).dump().c_str());
+        return env->NewStringUTF(radek::recompileTrivial(b).dump().c_str());
     } catch (const std::exception &e) {
         env->ThrowNew(env->FindClass("java/io/IOException"), e.what());
         return nullptr;

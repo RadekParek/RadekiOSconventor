@@ -11,7 +11,7 @@ from its own analysis, never assumed:
   Objective-C/Swift/unwind metadata, no encryption;
 * the executable's whole ``__text`` section is exactly the proven
   closed-integer entry routine (MOV-immediate/MOVK/register MOV/immediate
-  ADD/SUB/RET), so reachable functions == translated functions == 1 and
+  ADD/SUB/RET), so reachable functions == statically recompiled functions == 1 and
   reachable instruction-byte coverage is 100%;
 * no reachable APIs (nothing is imported), so API accounting is complete with
   zero replacements and zero passthroughs;
@@ -23,7 +23,7 @@ from its own analysis, never assumed:
 
 The produced APK carries a generated Android launcher that displays the launch
 message recovered from the IPA's ``__cstring`` section and executes the
-translated entry through JNI, ``lib/<abi>/libconverted.so`` exporting
+statically recompiled entry through JNI, ``lib/<abi>/libconverted.so`` exporting
 ``Java_dev_radek_generated_MainActivity_runNative``, and the full
 ``complete-game-v1`` provenance checked by ``radek.apk.validate_apk`` and the
 Android app's attachment flow.
@@ -99,7 +99,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 
 /** Launcher of a bounded complete-game conversion. Shows the message recovered
- *  from the IPA and runs the translated native entry. */
+ *  from the IPA and runs the statically recompiled native entry. */
 public final class MainActivity extends Activity {
     private static boolean nativeReady = false;
 
@@ -165,12 +165,12 @@ public final class MainActivity extends Activity {
         String nativeLine;
         if (nativeReady) {
             try {
-                nativeLine = "Translated iOS entry executed on Android, returned: " + runNative();
+                nativeLine = "Statically recompiled iOS entry executed on Android, returned: " + runNative();
             } catch (Throwable error) {
-                nativeLine = "Translated native entry did not run: " + error;
+                nativeLine = "Statically recompiled native entry did not run: " + error;
             }
         } else {
-            nativeLine = "Translated native library could not be loaded on this device.";
+            nativeLine = "Statically recompiled native library could not be loaded on this device.";
         }
         root.addView(label(nativeLine, 13, Color.rgb(92, 227, 181), false));
         root.addView(label(
@@ -311,7 +311,7 @@ def assess_complete_conversion(
             if len(functions) != 1 or functions[0].get("address") != slice_data.get("entryPoint"):
                 block("the single reconstructed function is not the entry point")
             elif functions[0].get("calls"):
-                block("the entry routine makes calls that are not translated")
+                block("the entry routine makes calls that are not statically recompiled")
             apis = slice_data.get("apis") or {}
             if apis.get("used") or apis.get("importCount"):
                 block("reachable APIs require generated replacements that do not exist")
@@ -382,12 +382,12 @@ def complete_game_metadata(
             "status": "COMPLETE",
             "completeGameConversion": True,
             "reachableSourceFunctions": 1,
-            "translatedReachableFunctions": 1,
-            "untranslatedReachableFunctions": 0,
+            "recompiledReachableFunctions": 1,
+            "notRecompiledReachableFunctions": 0,
             "reachableApiCount": 0,
             "generatedApiReplacements": 0,
             "nativeApiPassthroughs": 0,
-            "untranslatedReachableApiCount": 0,
+            "unimplementedReachableApiCount": 0,
             "apiCoverageComplete": True,
             "apiReplacements": [],
             "resourcesComplete": True,

@@ -5,7 +5,7 @@ import org.json.JSONObject
 
 /**
  * Conservative native-symbol and semantic API equivalence inventory.
- * A candidate is a translation plan only: this module does not rewrite Mach-O
+ * A candidate is a static recompilation plan only: this module does not rewrite Mach-O
  * code, bridge Objective-C objects, link a Bionic library, or generate Java.
  */
 internal object AndroidApiMapper {
@@ -329,7 +329,7 @@ internal object AndroidApiMapper {
                         resolveNdkLibrary != null -> "CATALOG_ONLY_RUNTIME_NOT_RESOLVED"
                         else -> "REVIEWED_NAME_CATALOG"
                     })
-                    .put("translationStrategy", "potential direct NDK symbol link; caller ABI and relocation still require verification")
+                    .put("staticRecompilationStrategy", "potential direct NDK symbol link; caller ABI and relocation still require verification")
                     .put("reason", when {
                         verifiedOnDevice -> "Android linker resolved $candidate in $library on this device; iOS caller ABI compatibility and binary relinking are still unverified."
                         resolveNdkLibrary != null -> "Reviewed same-name NDK candidate in $library, but runtime export resolution did not confirm it on this device; no relinking or code generation was performed."
@@ -340,7 +340,7 @@ internal object AndroidApiMapper {
                     .put("targetLibrary", "NDK compiler-rt/libunwind toolchain runtime")
                     .put("targetSymbol", candidate)
                     .put("resolutionEvidence", "REVIEWED_TOOLCHAIN_CANDIDATE_NOT_LINKED")
-                    .put("translationStrategy", "static NDK compiler-rt/libunwind integration required; no libgcc_s.so alias or link was generated")
+                    .put("staticRecompilationStrategy", "static NDK compiler-rt/libunwind integration required; no libgcc_s.so alias or link was generated")
                     .put("reason", "$compilerRuntimeCandidate. Android NDK does not provide a drop-in libgcc_s.so; symbol ABI and exception personality must be validated before a link can be claimed.")
                 replacementTarget != null -> item
                     .put("classification", "IMPLEMENTED_API_REPLACEMENT_AVAILABLE")
@@ -354,7 +354,7 @@ internal object AndroidApiMapper {
                         resolveApiReplacement != null -> "COMPAT_SOURCE_PRESENT_RUNTIME_NOT_RESOLVED"
                         else -> "COMPILED_COMPATIBILITY_RUNTIME"
                     })
-                    .put("translationStrategy", "concrete compatibility shim exists; Mach-O callsite rewrite and game linking are not implemented")
+                    .put("staticRecompilationStrategy", "concrete compatibility shim exists; Mach-O callsite rewrite and game linking are not implemented")
                     .put("reason", when {
                         replacementVerified -> "The concrete implementation export $replacementTarget was resolved from libioscompat.so on this device; the IPA callsite was not rewritten or linked."
                         resolveApiReplacement != null -> "A concrete implementation is built into the analyzer runtime, but its export was not resolved on this device; no IPA callsite rewrite or game link was performed."
@@ -363,7 +363,7 @@ internal object AndroidApiMapper {
                 semanticTarget != null -> item
                     .put("classification", "SEMANTIC_REWRITE_CANDIDATE")
                     .put("targetApi", semanticTarget)
-                    .put("translationStrategy", "source/object/lifecycle rewrite required")
+                    .put("staticRecompilationStrategy", "source/object/lifecycle rewrite required")
                     .put("reason", "Android API family candidate only; Objective-C object layout, method semantics and lifecycle are not binary-compatible.")
                 else -> {
                     val compatHandler = if (resolveCompatHandler == null) null else try {
@@ -382,7 +382,7 @@ internal object AndroidApiMapper {
                                 .put("targetLibrary", "libioscompat.so")
                                 .put("targetSymbol", handler)
                                 .put("implementationCodePresent", false)
-                                .put("translationStrategy", "explicit unimplemented resolution handler")
+                                .put("staticRecompilationStrategy", "explicit unimplemented resolution handler")
                                 .put(
                                     "reason",
                                     "A stub resolution handler for $source was registered in the " +
@@ -399,7 +399,7 @@ internal object AndroidApiMapper {
                                 .put("targetLibrary", "libioscompat.so")
                                 .put("targetSymbol", handler)
                                 .put("implementationCodePresent", true)
-                                .put("translationStrategy", "tested implementation body in the compat registry")
+                                .put("staticRecompilationStrategy", "tested implementation body in the compat registry")
                                 .put(
                                     "reason",
                                     "The compat registry resolved $source to a tested implementation " +
@@ -452,9 +452,9 @@ internal object AndroidApiMapper {
             .put("compatHandlerCoveragePercent", if (total == 0) 0 else compatHandlers * 100 / total)
             .put("compatHandlerResolverStatus", if (resolveCompatHandler == null) "NOT_RUN" else "DYNAMIC_REGISTRY_REGISTRATION")
             .put("unmappedSymbolCount", unmappedSymbols)
-            .put("implementedTranslationCount", 0)
-            .put("implementedTranslationCoveragePercent", 0)
-            .put("generatedTranslationCount", 0)
+            .put("linkedImplementationCount", 0)
+            .put("linkedImplementationCoveragePercent", 0)
+            .put("generatedApiImplementationCount", 0)
             .put("truncated", truncated)
             .put("symbols", result)
     }
@@ -501,7 +501,7 @@ internal object AndroidApiMapper {
 
     private fun classifyUnsupported(symbol: String): String = when {
         symbol.contains("objc", ignoreCase = true) -> "Objective-C runtime ABI and message dispatch are not implemented."
-        symbol.startsWith("_swift", ignoreCase = true) || symbol.contains("Swift", ignoreCase = true) -> "Swift runtime/ABI translation is not implemented."
+        symbol.startsWith("_swift", ignoreCase = true) || symbol.contains("Swift", ignoreCase = true) -> "Swift runtime/ABI static recompilation is not implemented."
         symbol.startsWith("_UI") || symbol.startsWith("_CG") || symbol.startsWith("_CA") || symbol.startsWith("_MTL") ->
             "Apple UI/graphics/Metal APIs require a real Android renderer or object/lifecycle rewrite; none was generated."
         symbol.startsWith("_AV") || symbol.startsWith("_Audio") || symbol.startsWith("_AL") ->

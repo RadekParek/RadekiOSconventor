@@ -1,7 +1,7 @@
 """End-to-end conversion of the committed synthetic sample IPA.
 
 The sample is deliberately inside the proven subset so the whole honest path
-runs: analysis, leaf translation, compatibility-registry generation and (when
+runs: analysis, leaf static recompilation, compatibility-registry generation and (when
 an Android toolchain is present) the labelled experimental shell. It must
 never reach READY and never claim a complete-game conversion.
 """
@@ -37,7 +37,7 @@ class SampleIpaTests(unittest.TestCase):
         )
         self.assertEqual(report["state"], "PARTIAL")
         self.assertGreater(report["portProgress"]["percent"], 0)
-        self.assertEqual(report["portProgress"]["translatedTextBytes"], len(CODE))
+        self.assertEqual(report["portProgress"]["recompiledTextBytes"], len(CODE))
         self.assertFalse(report["portProgress"]["completeGameConversion"])
         registry = report["compatRegistry"]
         self.assertEqual(registry["status"], "REGISTRY_SOURCE_GENERATED")
@@ -53,9 +53,9 @@ class SampleIpaTests(unittest.TestCase):
         self.assertEqual(report["state"], "BLOCKED")
         self.assertEqual(report["conversionProgress"]["status"], "NOT_BUILT")
         self.assertEqual(report["conversionProgress"]["percent"], 0)
-        # Isolated translated artifacts were really written and validated.
-        self.assertTrue((output / "libtranslated-entry.so").is_file())
-        self.assertTrue((output / "translated-entry.c").is_file())
+        # Isolated statically recompiled artifacts were really written and validated.
+        self.assertTrue((output / "librecompiled-entry.so").is_file())
+        self.assertTrue((output / "recompiled-entry.c").is_file())
         self.assertTrue((output / "ioscompat" / "libioscompat.cpp").is_file())
         # The experimental shell is either built and labelled, skipped for
         # lack of toolchain, or honestly failed — never silently claimed.

@@ -2,7 +2,7 @@
 
 The native analyzer (``radek-macho``) performs the bounded binary parsing and
 returns offsets, addresses and symbol tables. This module adds the semantic
-layer on top: address translation, typed reads, section lookup and stub
+layer on top: address mapping, typed reads, section lookup and stub
 resolution. All reads are bounds checked against the slice they belong to.
 """
 
@@ -100,7 +100,7 @@ class MachOImage:
     def sections_named(self, name: str) -> list[Section]:
         return [s for s in self.sections if s.name == name]
 
-    # --- address translation --------------------------------------------------
+    # --- address mapping --------------------------------------------------
 
     def addr_to_offset(self, address: int) -> int | None:
         for item in self.sections:

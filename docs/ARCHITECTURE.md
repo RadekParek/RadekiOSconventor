@@ -7,8 +7,8 @@
   otherwise-unmapped symbols, and clearly separates all of those checks from implementation;
   `SafeZip` handles untrusted extraction; `Plist` handles
   XML/binary parsing; `NativeBridge` calls C++ through JNI (including the compat-registry bridge
-  and the bounded-conversion prover `translateTrivial`); `ConvertedApkBuilder` converts IPAs proven
-  to be one closed-integer routine into a signed APK whose translated entry runs through JNI;
+  and the bounded-conversion prover `recompileTrivial`); `ConvertedApkBuilder` converts IPAs proven
+  to be one closed-integer routine into a signed APK whose statically recompiled entry runs through JNI;
   `PlaceholderApkBuilder` customizes, signs and verifies a bundled source-free Android preview shell
   for everything else; both builders finish with `InstallAudit`, which re-runs the installer's own
   structural checks so a failure is reported instead of collapsing into Android's "app not installed".
@@ -43,9 +43,9 @@
   explicitly unimplemented stub handler, plus `registry.json`. It reports resolution coverage
   separately from implementation coverage and never links anything.
 - `radek/c_backend.py` and `radek/elf_writer.py`: lower only that proven leaf to executable C for
-  host semantic tests and a minimal ARM ET_DYN shared object exporting `radek_translated_entry`.
+  host semantic tests and a minimal ARM ET_DYN shared object exporting `radek_recompiled_entry`.
   The `.so` is self-contained but isolated; it is not linked into the original program or an APK.
-- `radek/api_translation.py`: emits source for selected host-tested C/time/CoreFoundation/POSIX
+- `radek/api_implementations.py`: emits source for selected host-tested C/time/CoreFoundation/POSIX
   shims only when resolved reconstructed internal calls connect the selected entry to matching
   imports. The report records source generation and separately records zero game links.
 - `radek/llvm_ir.py`: emits supplementary textual LLVM IR from the proven closed-integer leaf and
@@ -60,7 +60,7 @@
   artifacts with mandatory on-screen and metadata disclosure; its validator fails closed if the
   disclosure or contract is missing.
 - `radek/pipeline.py`: guarded analysis states, durable JSON/JSONL reports and isolated temporary
-  workspace cleanup. The bounded proven subset can link a translated entry into a signed, statically
+  workspace cleanup. The bounded proven subset can link a statically recompiled entry into a signed, statically
   validated `complete-game-v1` APK; inputs outside it remain blocked and may receive only the
   separately labelled experimental shell.
 - `radek/ceiling.py`: the conversion-ceiling ledger. It walks the same gates, in the same order, as
@@ -84,7 +84,7 @@ The importer's analysis path is:
 The CONVERTING/PACKAGING/VALIDATING stages run only for IPAs inside the bounded complete-conversion
 subset; every other IPA resolves straight to `PARTIAL`, `BLOCKED` or `FAILED`.
 
-- `PARTIAL`: inspection completed and, if the proof succeeds, an isolated translated-entry library
+- `PARTIAL`: inspection completed and, if the proof succeeds, an isolated recompiled-entry library
   and/or source for a reachable API in the bounded compiled-compatibility subset was emitted.
   General game conversion is not implemented.
 - `BLOCKED`: input protection, unsupported executable semantics or missing conversion capabilities
@@ -98,19 +98,19 @@ inventory and API triage.
 - `READY`: entered only when the bounded complete-conversion gate proves the executable is exactly
   one closed-integer routine and a signed `complete-game-v1` APK was built and statically validated.
 
-Proven IPAs are converted automatically during import — the signed APK whose translated entry runs
+Proven IPAs are converted automatically during import — the signed APK whose statically recompiled entry runs
 through JNI is built and attached with no user action, leaving the entry in `READY`. The red **Force
 convert to .apk** action never overrides these states: for proven IPAs it simply rebuilds the
 converted APK; everything else gets a separately named, signed preview shell carrying the app name,
 recovered icon, and machine-readable static-analysis metadata. The preview launcher displays that
-the shell started and that no translated executable is included; it does not display converter
+the shell started and that no statically recompiled executable is included; it does not display converter
 branding or static-analysis details. The artifact metadata (`placeholder-info.json` retains the full
 `analysisSummary`, and the report keeps `completeGameConversion`/`gameCodeIncluded` false and
 `placeholderOnly` true as appropriate), so nothing claims the game was converted. The preview shell has its own filename, metadata, progress and provider validation. A host
 result remains shareable/installable only after the `complete-game-v1` contract passes attachment
 checks; the CLI produces such a result only for the proven bounded subset (see `radek/gamepack.py`).
 The CLI `convert` path may additionally emit `experimental-shell.apk` (`experimental-shell-v1`): a
-signed shell whose launcher and metadata disclose that no game code is translated. It is reported
+signed shell whose launcher and metadata disclose that no game code is statically recompiled. It is reported
 in `experimentalShell` separately from `conversionProgress`, which stays `NOT_BUILT` for anything
 outside the bounded subset.
 
@@ -124,7 +124,7 @@ availability is not game integration. The bounded
 on-device APK packs `libioscompat.so` as a 16 KiB-aligned native dependency and declares it through
 `DT_NEEDED`; because the accepted executable has no imports, no individual API callsite is rewritten
 or counted as a linked replacement. A dependency can only be classified `converted`, `provided by
-compatibility layer`, or `Android equivalent` for the functions actually wired into output. The closed-integer backend translates one function only; it
+compatibility layer`, or `Android equivalent` for the functions actually wired into output. The closed-integer backend statically recompiles one function only; it
 does not implement the app, resources, lifecycle, or arbitrary APIs.
 
 Stub handlers are a legitimate forward step only when they stay classified as stubs: the compat
@@ -134,7 +134,7 @@ placeholder/experimental status from artifact metadata is prohibited—the metad
 artifacts honest without showing static-analysis details on the launcher.
 
 Future graphics providers should separate API command/state capture from an Android GLES backend;
-Metal requires shader/type translation plus an appropriate Android rendering backend. Neither
+Metal requires shader/type static recompilation plus an appropriate Android rendering backend. Neither
 exists, so unsupported APIs remain blocked rather than bound to no-ops. Framework providers should
 be introduced behind a versioned ABI symbol registry and tests of observable behavior, not by
 accepting symbol names alone.

@@ -16,7 +16,7 @@ framework targets remain compatibility candidates until their ABI and behavior a
 
 from __future__ import annotations
 
-from .api_translation import _SUPPORTED as _COMPILED_COMPAT_IMPORTS
+from .api_implementations import _SUPPORTED as _COMPILED_COMPAT_IMPORTS
 
 KIND_LIBRARY = "native-library"
 KIND_PLATFORM = "platform-api"
@@ -157,13 +157,13 @@ TABLE: tuple[Provider, ...] = (
              "Reachability flags come from the platform connectivity callbacks."),
     Provider("MobileCoreServices.framework/MobileCoreServices", "MobileCoreServices",
              "android.webkit.MimeTypeMap", KIND_PLATFORM, STATUS_COMPATIBILITY,
-             "UTI to MIME type translation."),
+             "UTI-to-MIME mapping."),
     Provider("Accelerate.framework/Accelerate", "Accelerate",
              "NEON intrinsics in libioscompat.so", KIND_RUNTIME, STATUS_COMPATIBILITY,
              "vDSP/vImage hot paths are implemented with ARM NEON."),
     Provider("Metal.framework/Metal", "Metal", "libvulkan.so · OpenGL ES",
              KIND_PLATFORM, STATUS_COMPATIBILITY,
-             "Metal render pipelines fall back to Vulkan/GLES command translation."),
+             "Metal render pipelines require Vulkan/GLES command rewriting."),
     Provider("WebKit.framework/WebKit", "WebKit", "android.webkit.WebView",
              KIND_PLATFORM, STATUS_COMPATIBILITY, "WKWebView content is rendered by the platform WebView."),
     Provider("AdSupport.framework/AdSupport", "AdSupport", "none",

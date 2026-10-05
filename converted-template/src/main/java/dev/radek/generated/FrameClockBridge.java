@@ -5,7 +5,7 @@ import android.view.Choreographer;
 /**
  * Lifecycle-scoped bridge from Android's UI frame clock to libioscompat.so.
  * The native side dispatches only registered C callback links. This does not
- * emulate Objective-C CADisplayLink or Objective-C message dispatch.
+ * implement Objective-C CADisplayLink or Objective-C message dispatch.
  */
 final class FrameClockBridge {
     private static boolean libraryLoaded;

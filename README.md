@@ -1,8 +1,8 @@
 # RadekiOSConventor
 
-An **offline IPA inspection and bounded native-reconstruction workbench**, not an iOS emulator or a general game converter. It includes an Android importer/analyzer, a C++ Mach-O parser, and Python reconstruction tools.
+An **offline IPA inspection and bounded native-reconstruction workbench** for authorized inputs. It includes an Android importer/analyzer, a C++ Mach-O parser, and Python reconstruction tools.
 
-> **One bounded subset converts for real; everything else stays honestly unbuilt.** When an IPA's whole executable is statically proven to be exactly one closed-integer ARM entry routine (MOV-immediate, MOVK, register MOV, immediate ADD/SUB, RET) with no imports, dependencies, fixups or runtime metadata, both the host CLI and the on-device app convert it end to end into a signed, installable APK (`complete-game-v1`) — on Android this happens automatically during import, no extra button needed: the translated entry is packaged as `libconverted.so` and runs through JNI when the launcher opens, showing the message recovered from the IPA. The three-instruction `tests/data/hello-test.ipa` displays `hello test succesfull`; `tests/data/simple.ipa` adds a deterministic 128-operation ARM64 routine and also converts through the same path. Outside that proven subset nothing is translated: the host can still lower the entry routine into a standalone shared object and report compatibility registries, and on the `convert` path it packages those artifacts into a signed, explicitly labelled **experimental shell** APK (`experimental-shell-v1`) that states on screen that no game code is translated. The Android app can separately build an explicitly labelled, signed, installable preview shell for unconvertible IPAs; it contains no translated game code and cannot run the IPA's game. Device execution and gameplay of bounded conversions are never claimed as tested.
+> **One bounded subset converts for real; everything else stays honestly unbuilt.** When an IPA's whole executable is statically proven to be exactly one closed-integer ARM entry routine (MOV-immediate, MOVK, register MOV, immediate ADD/SUB, RET) with no imports, dependencies, fixups or runtime metadata, both the host CLI and the on-device app convert it end to end into a signed, installable APK (`complete-game-v1`) — on Android this happens automatically during import, no extra button needed: the statically recompiled entry is packaged as `libconverted.so` and runs through JNI when the launcher opens, showing the message recovered from the IPA. The three-instruction `tests/data/hello-test.ipa` displays `hello test succesfull`; `tests/data/simple.ipa` adds a deterministic 128-operation ARM64 routine and also converts through the same path. Outside that proven subset nothing is statically recompiled: the host can still lower the entry routine into a standalone shared object and report compatibility registries, and on the `convert` path it packages those artifacts into a signed, explicitly labelled **experimental shell** APK (`experimental-shell-v1`) that states on screen that no game code is statically recompiled. The Android app can separately build an explicitly labelled, signed, installable preview shell for unconvertible IPAs; it contains no statically recompiled game code and cannot run the IPA's game. Device execution and gameplay of bounded conversions are never claimed as tested.
 
 ## Offline reconstruction
 
@@ -21,13 +21,13 @@ Results are written as `reconstruction.json` and `reconstruction.md` beside `rep
 run also records a **conversion ceiling** (`report.json` → `conversionCeiling`, plus a
 “Conversion ceiling” section in `reconstruction.md`): an ordered gate ledger over target ABI,
 protection, container, slice format, loader metadata, the entry-routine proof, reachable-code
-translation, API linking, resources, lifecycle and APK packaging. The first gate that cannot pass
+static recompilation, API linking, resources, lifecycle and APK packaging. The first gate that cannot pass
 is named with the fail-closed prover's own statement as evidence, and every later gate is
 `NOT_REACHED` — never estimated. For a real game this typically reports
 `ENTRY_ROUTINE`/`API_LINKING` with the concrete first obstacle (for example an instruction outside
 the proven subset, or *import symbols declared and not linked*), which is the honest answer to
 “how far can this be converted”. The ledger carries `countsAsConversionProgress: false`: it is an
-assessment, not translated code, and it never counts symbol triage or stub handlers as progress.
+assessment, not statically recompiled code, and it never counts symbol triage or stub handlers as progress.
 Analysis also writes an `ioscompat/` directory containing the generated compatibility-registry
 source (`libioscompat.cpp`), copied compatibility headers and a `registry.json` classification of
 every observed Darwin import as `verified` (tested implementation) or `stubbed-unimplemented`
@@ -36,20 +36,20 @@ they are resolution targets for a future linker, not API implementations, and th
 them separately from verified shims. `compatRegistry.symbolResolution` states this split
 explicitly (verified / stubbed-unimplemented / unresolved, `linkedIntoGame: 0`,
 `resolutionIsNotImplementation: true`), so a 100% resolution figure is never read as 100%
-implementation, translation or gameplay coverage.
+implementation, static recompilation or gameplay coverage.
 When (and only when) the entry routine passes the closed-integer proof, the host writes:
 
-- `translated-entry.bin`: lowered ARM64/ARMv7 function bytes;
-- `libtranslated-entry.so`: a minimal, relocation-free Android ET_DYN library exporting
-  `radek_translated_entry`, statically checked for ABI, export size/hash, and undefined symbols;
-- `translated-entry.c`: a portable C rendering of the same proof-carrying integer operations,
+- `recompiled-entry.bin`: lowered ARM64/ARMv7 function bytes;
+- `librecompiled-entry.so`: a minimal, relocation-free Android ET_DYN library exporting
+  `radek_recompiled_entry`, statically checked for ABI, export size/hash, and undefined symbols;
+- `recompiled-entry.c`: a portable C rendering of the same proof-carrying integer operations,
   executable in host tests to compare return-value semantics;
 - `leaf-experiment.ll`: supplementary textual LLVM IR for the same proven leaf.
 
 On the `convert` path only, when those artifacts exist, the host additionally assembles,
 zipaligns and signs `experimental-shell.apk` using the Android toolchain (aapt2/javac/d8/
 zipalign/apksigner) under the `experimental-shell-v1` contract. The shell launcher displays the
-disclosure that no game code is translated, and its metadata repeats it; the validator rejects a
+disclosure that no game code is statically recompiled, and its metadata repeats it; the validator rejects a
 shell that drops the disclosure or claims game code. The shell never satisfies
 `complete-game-v1`, and its build status is reported separately from `conversionProgress`, which
 stays 0 / `NOT_BUILT` unless the IPA passed the bounded complete-conversion gate and a signed
@@ -72,16 +72,16 @@ pointer slots when statically readable.
   needed for proven inputs. Everything outside the proven subset creates nothing on import; there,
   the red **Force convert to .apk** action builds a separately named, signed and installable
   preview shell using the IPA app name and recovered icon where available. The preview shell
-  contains no iOS executable, translated game code or gameplay; its launcher visibly says that the
-  preview started and no translated executable is included. Preview-shell creation does not count
-  as code-translation or complete-game progress.
+  contains no iOS executable, statically recompiled game code or gameplay; its launcher visibly says that the
+  preview started and no statically recompiled executable is included. Preview-shell creation does not count
+  as code-static recompilation or complete-game progress.
 - A host APK can be attached only if its metadata declares the `complete-game-v1` contract and
   passes source-identity, complete reachable-code/API/resource, ABI, packaging and provenance
   checks. Preview-shell APK metadata and provider paths are separate; a preview shell can never
   satisfy the host APK contract. The host CLI **is** a producer for that contract for the proven
   bounded subset only (see `radek/gamepack.py`); IPAs outside the subset stay `NOT_BUILT`.
 - The `experimental-shell-v1` APK is a third, distinct category: a signed, honestly labelled
-  inspection shell for the isolated translated artifacts and compatibility-registry source. It is
+  inspection shell for the isolated statically recompiled artifacts and compatibility-registry source. It is
   produced only on the `convert` path, is validated with `python3 -m radek validate-shell`, and can
   never be attached as a complete-game host APK.
 - The original IPA archive itself is retained only in private analysis storage until the library
@@ -121,9 +121,9 @@ implementation entries plus a pool of stub trampolines. Symbols that would other
 can be registered at runtime (`radek_compat_register_stub` / `NativeBridge.compatRegisterStub`) and
 then resolve to an explicit stub handler instead of nothing. The on-device triage reports those as
 `compat stub handler(s) registered (unimplemented)` — a resolution category that is never counted
-toward verified implementations or generated translations. The host likewise generates a per-IPA
+toward verified implementations or generated API implementations. The host likewise generates a per-IPA
 registry source in which every observed import is classified exactly as `verified` or
-`stubbed-unimplemented`. Symbol-triage percentages describe categorization, not translation
+`stubbed-unimplemented`. Symbol-triage percentages describe categorization, not static recompilation
 coverage. The full Foundation/CoreFoundation and Objective-C ABIs, UIKit, graphics, audio, input,
 game lifecycle and general resource APIs remain unsupported when required.
 
@@ -143,19 +143,19 @@ CMake 3.22.1; the Gradle wrapper is included. No Python packages are required.
 
 A small synthetic sample IPA (`tests/data/sample-leaf.ipa`, regenerable with
 `python3 tools/make_sample_ipa.py`) is committed for end-to-end checks: its entry routine lies
-entirely inside the proven subset, so analysis reaches PARTIAL with nonzero translated-byte
+entirely inside the proven subset, so analysis reaches PARTIAL with nonzero statically recompiled-byte
 coverage and a complete compatibility registry. Run it through both paths:
 
 ```sh
 python3 -m radek analyze tests/data/sample-leaf.ipa --authorized --output .local/analysis
 python3 -m radek convert tests/data/sample-leaf.ipa --authorized --output .local/conversion
-# .local/conversion holds libtranslated-entry.so, ioscompat/ registry source, and — when an
+# .local/conversion holds librecompiled-entry.so, ioscompat/ registry source, and — when an
 # Android toolchain is installed — experimental-shell.apk. State is BLOCKED: no game APK.
 ```
 
 A longer end-to-end regression fixture is also committed. It contains a deterministic 128-operation
 ARM64 entry (over eighty times the hello fixture's code bytes), with no imports or unresolved
-runtime dependencies, and is inside the same narrow translation subset:
+runtime dependencies, and is inside the same narrow static recompilation subset:
 
 ```sh
 python3 tools/make_simple_ipa.py  # deterministically regenerates tests/data/simple.ipa
@@ -168,7 +168,7 @@ For other synthetic Mach-O inputs, `tools/make_fixture.py` produces variants:
 ```sh
 python3 tools/make_fixture.py --arch arm64 --output .local/fixture.ipa
 python3 -m radek analyze .local/fixture.ipa --authorized --output .local/analysis
-# Inspect .local/analysis/libtranslated-entry.so and report.json.
+# Inspect .local/analysis/librecompiled-entry.so and report.json.
 # No game APK is produced.
 ```
 

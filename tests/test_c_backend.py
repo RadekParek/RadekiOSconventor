@@ -58,8 +58,8 @@ class CBackendTests(unittest.TestCase):
         for index, (code, source_arch, thumb, target_arch, expected) in enumerate(cases):
             with self.subTest(index=index), tempfile.TemporaryDirectory() as directory:
                 program = lift(code, source_arch, thumb, target_arch=target_arch)
-                source = Path(directory) / "translated.c"
-                library = Path(directory) / "translated.so"
+                source = Path(directory) / "recompiled.c"
+                library = Path(directory) / "recompiled.so"
                 source.write_text(emit(program), encoding="utf-8")
                 subprocess.run(
                     [
@@ -80,9 +80,9 @@ class CBackendTests(unittest.TestCase):
                     capture_output=True,
                     text=True,
                 )
-                translated = ctypes.CDLL(str(library)).radek_translated_entry
-                translated.restype = ctypes.c_uint32
-                self.assertEqual(translated(), expected)
+                native_entry = ctypes.CDLL(str(library)).radek_recompiled_entry
+                native_entry.restype = ctypes.c_uint32
+                self.assertEqual(native_entry(), expected)
 
     def test_c_backend_rejects_untrusted_names_and_non_leaf_operations(self):
         program = lift(struct.pack("<II", 0x52800500, 0xD65F03C0), "arm64")

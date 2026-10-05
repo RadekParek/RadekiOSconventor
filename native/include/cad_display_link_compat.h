@@ -5,7 +5,7 @@
  *
  * Android launchers drive radek_compat_CADisplayLinkDispatchFrame from
  * android.view.Choreographer. This is a usable native frame scheduler for a
- * future translator/runtime; it is not an Objective-C CADisplayLink class or
+ * future static recompilation backend/runtime; it is not an Objective-C CADisplayLink class or
  * objc_msgSend bridge. The callback/context pair must outlive the active link.
  */
 

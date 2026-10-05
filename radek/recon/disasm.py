@@ -1,7 +1,7 @@
 """Machine code decoding, function discovery and control-flow reconstruction.
 
 This module performs **static decoding only**. The machine code is never
-executed, interpreted or emulated: instructions are translated into records and
+executed by this analyzer; instructions are decoded into records and
 basic blocks that later stages turn into a readable listing.
 
 Coverage is deliberately honest. ARM64 is decoded in depth; ARMv7/Thumb and

@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tests.fixtures import ipa, macho
 
 OUTPUT = Path(__file__).resolve().parent.parent / "tests" / "data" / "simple.ipa"
-LAUNCH_MESSAGE = "Simple IPA: 128 integer operations translated"
+LAUNCH_MESSAGE = "Simple IPA: 128 integer operations statically recompiled"
 
 
 def movz(register: int, immediate: int) -> int:

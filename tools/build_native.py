@@ -112,3 +112,37 @@ print(
     "Native analyzer, portable runtime, Apple time API, bounded C/POSIX/CoreFoundation shims, "
     "CADisplayLink frame bridge, and compatibility registry tests passed"
 )
+
+compat_sources = [
+    root / "native/src/compat_runtime/guest_memory.cpp",
+    root / "native/src/compat_runtime/shim_registry.cpp",
+    root / "native/src/compat_runtime/macho_loader.cpp",
+    root / "native/src/compat_runtime/runner.cpp",
+    root / "native/src/compat_runtime/cpu.cpp",
+    root / "native/src/compat_runtime/objc_runtime.cpp",
+]
+subprocess.run(
+    [
+        compiler,
+        *flags,
+        *map(str, compat_sources),
+        str(root / "native/tests/compat_runtime.cpp"),
+        "-o",
+        str(out / "compat-runtime-tests"),
+    ],
+    check=True,
+)
+subprocess.run([str(out / "compat-runtime-tests")], check=True)
+subprocess.run(
+    [
+        compiler,
+        *flags,
+        str(root / "native/src/compat_runtime/objc_runtime.cpp"),
+        str(root / "native/tests/compat_runtime_objc.cpp"),
+        "-o",
+        str(out / "compat-runtime-objc-tests"),
+    ],
+    check=True,
+)
+subprocess.run([str(out / "compat-runtime-objc-tests")], check=True)
+print("compat-runtime-v1 guest memory, Mach-O/dyld, shim registry, CPU boundary, and Objective-C tests passed")

@@ -62,7 +62,7 @@ class PlaceholderArtifactContractTest {
             .put("status", "GENERATED")
             .put("placeholderOnly", true)
             .put("completeGameConversion", false)
-            .put("gameCodeTranslated", false)
+            .put("gameCodeRecompiled", false)
             .put("gameCodeIncluded", false)
             .put("gamePlayable", false)
             .put("installableAndroidPackage", true)

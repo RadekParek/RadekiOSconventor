@@ -111,7 +111,7 @@ class HelloIpaEligibilityTests(unittest.TestCase):
         report = Pipeline(self.root / "analysis").run(HELLO_PATH, True, analyze_only=True)
         self.assertEqual(report["state"], "PARTIAL")
         self.assertEqual(report["portProgress"]["percent"], 100.0)
-        self.assertEqual(report["portProgress"]["translatedTextBytes"], 12)
+        self.assertEqual(report["portProgress"]["recompiledTextBytes"], 12)
         self.assertFalse(report["portProgress"]["completeGameConversion"])
 
     def test_hello_ipa_is_eligible_and_carries_launch_message(self):
@@ -198,7 +198,7 @@ class SimpleIpaFixtureTests(unittest.TestCase):
         self.assertTrue(SIMPLE_PATH.is_file(), "committed simple.ipa fixture is missing")
         self.assertEqual(len(SIMPLE_CODE), 1072)
         self.assertGreater(len(SIMPLE_CODE), 80 * 12)  # hello-test has a 12-byte entry.
-        self.assertEqual(SIMPLE_LAUNCH_MESSAGE, "Simple IPA: 128 integer operations translated")
+        self.assertEqual(SIMPLE_LAUNCH_MESSAGE, "Simple IPA: 128 integer operations statically recompiled")
         with tempfile.TemporaryDirectory() as directory:
             regenerated = ipa(
                 Path(directory) / "simple.ipa",
@@ -270,7 +270,7 @@ class CompleteGameBuildSimulationTests(unittest.TestCase):
         self.assertEqual(complete["contract"], "complete-game-v1")
         self.assertEqual(complete["launchMessage"], "hello test succesfull")
         self.assertEqual(complete["artifact"], "hello-test.apk")
-        self.assertEqual(complete["untranslatedReachableFunctions"], 0)
+        self.assertEqual(complete["notRecompiledReachableFunctions"], 0)
         apk = self.root / "conversion" / "hello-test.apk"
         self.assertTrue(apk.is_file())
         with zipfile.ZipFile(apk) as package:
@@ -423,9 +423,9 @@ class NativeTrivialProverTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            translated = ctypes.CDLL(str(library)).radek_translated_entry
-            translated.restype = ctypes.c_uint32
-            self.assertEqual(translated(), SIMPLE_RETURN_VALUE)
+            native_entry = ctypes.CDLL(str(library)).radek_recompiled_entry
+            native_entry.restype = ctypes.c_uint32
+            self.assertEqual(native_entry(), SIMPLE_RETURN_VALUE)
 
     def test_sample_leaf_executable_is_rejected_for_full_coverage(self):
         import struct

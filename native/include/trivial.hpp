@@ -15,5 +15,5 @@ size_t proveArm64IntegerLeaf(const uint8_t *code, size_t size, std::string *reas
 /// executable is exactly one proven closed-integer ARM64 routine with no
 /// imports, dependencies, fixups or metadata, and returns its machine code
 /// plus recovered __cstring launch messages. Fails closed with UNSUPPORTED.
-Json translateTrivial(const std::vector<uint8_t> &data);
+Json recompileTrivial(const std::vector<uint8_t> &data);
 } // namespace radek

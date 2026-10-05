@@ -4,7 +4,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * Minimal self-contained Android ET_DYN writer for the translated entry code.
+ * Minimal self-contained Android ET_DYN writer for the statically recompiled entry code.
  *
  * Kotlin port of the host's `radek/elf_writer.py` (arm64): one exported,
  * relocation-free function, no imports, no Android lifecycle. Keeping the
@@ -28,9 +28,9 @@ internal object ConvertedElfWriter {
         neededLibraries: List<String> = emptyList(),
     ): ByteArray {
         require(machineCode.isNotEmpty() && machineCode.size <= MAX_CODE_BYTES) {
-            "translated ELF function is empty or exceeds the 16 MiB limit"
+            "statically recompiled ELF function is empty or exceeds the 16 MiB limit"
         }
-        require(Regex(SYMBOL_REGEX).matches(symbol)) { "invalid translated ELF symbol name" }
+        require(Regex(SYMBOL_REGEX).matches(symbol)) { "invalid statically recompiled ELF symbol name" }
         require(neededLibraries.size <= MAX_NEEDED_LIBRARIES &&
             neededLibraries.distinct().size == neededLibraries.size &&
             neededLibraries.all { Regex(NEEDED_LIBRARY_REGEX).matches(it) }) {
@@ -122,7 +122,7 @@ internal object ConvertedElfWriter {
             hashOffset + hashBlob.limit(),
             symbolsEnd,
         )
-        require(dataEnd - dataOffset <= MAX_CODE_BYTES) { "translated ELF dynamic data exceeds the 16 MiB limit" }
+        require(dataEnd - dataOffset <= MAX_CODE_BYTES) { "statically recompiled ELF dynamic data exceeds the 16 MiB limit" }
         val shstrtabOffset = dataEnd
         val sectionOffset = align(shstrtabOffset + shstrtab.size, symbolAlignment)
         val sectionCount = 7

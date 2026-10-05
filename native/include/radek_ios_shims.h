@@ -31,7 +31,7 @@
  *  - `struct tm` is layout-compatible between Darwin and bionic, so
  *    localtime_r/gmtime_r/mktime forward directly.
  *  - pthread_mutex_t / pthread_cond_t are larger on Darwin than on bionic, so
- *    translated callers always over-allocate; every operation here touches only
+ *    callers always over-allocate; every operation here touches only
  *    the leading bytes bionic owns.
  *  - pthread_t is an integer on bionic and a pointer on Darwin. Both are
  *    one 64-bit register wide, so values round-trip through calls unchanged;
@@ -284,7 +284,7 @@ double radek_compat_fmod(double numerator, double denominator);
 
 /*
  * pthread forwards. bionic's pthread_mutex_t / pthread_cond_t are smaller than
- * Darwin's, and translated callers therefore always over-allocate; every
+ * Darwin's, and callers therefore always over-allocate; every
  * operation below touches only the leading bytes bionic owns. pthread_t is an
  * integer on bionic and a pointer on Darwin, but both live in one 64-bit
  * register, so values round-trip through a call unchanged.
@@ -307,8 +307,8 @@ pthread_t radek_compat_pthread_self(void);
  *
  * native/src/ioscompat_registry.cpp (registry seeding) and native/src/jni.cpp
  * (on-device resolver) both expand this table, so the registry and the device
- * resolver can never disagree. radek/api_translation.py keeps a matching Python
- * table for host source generation, and tests/test_api_translation.py asserts
+ * resolver can never disagree. radek/api_implementations.py keeps a matching Python
+ * table for host source generation, and tests/test_api_implementations.py asserts
  * the two stay identical.
  */
 #define RADEK_IOS_SHIM_TABLE(X)                                                        \

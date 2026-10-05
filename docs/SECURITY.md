@@ -18,10 +18,10 @@ paths, case collisions and encrypted archives are rejected. Partial extraction i
 On Android, an authorized input is retained in app-private storage until the library entry is deleted;
 the authorization dialog discloses this. Import does not automatically build an APK. A separate user
 action builds either (for IPAs statically proven to be one closed-integer routine) a signed APK whose
-translated entry runs through JNI, with the bundle's static resources packaged verbatim under
+statically recompiled entry runs through JNI, with the bundle's static resources packaged verbatim under
 `assets/bundle/`, or a minimal, signed preview shell from the bundled source-free template; the
 original IPA archive is never embedded, the preview shell contains none of the executable, and no
-code outside the proven routine is ever translated or run by the converter.
+code outside the proven routine is ever statically recompiled or run by the converter.
 
 The host pipeline's closed-integer leaf assessment is not a complete game conversion. The former
 launcher wrapper has been disabled, and `build_apk` refuses to package that subset. No no-op iOS API

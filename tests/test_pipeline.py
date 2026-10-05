@@ -22,27 +22,27 @@ class PipelineTests(unittest.TestCase):
     def test_synthetic_arm64_analysis_is_partial_not_ready(self):
         report = self.run_fixture(analyze_only=True)
         self.assertEqual(report["state"], "PARTIAL")
-        self.assertEqual(report["leafTranslationAssessment"]["backend"], "preserved-arm64")
+        self.assertEqual(report["staticRecompilationAssessment"]["backend"], "preserved-arm64")
         self.assertEqual(report["llvmLift"]["status"], "ENTRY_SUBSET_ONLY")
         self.assertEqual(report["llvmLift"]["completeGameConversion"], False)
         self.assertTrue((self.root / "job/leaf-experiment.ll").is_file())
-        self.assertTrue((self.root / "job/translated-entry.c").is_file())
-        self.assertTrue((self.root / "job/translated-entry.bin").is_file())
-        self.assertTrue((self.root / "job/libtranslated-entry.so").is_file())
+        self.assertTrue((self.root / "job/recompiled-entry.c").is_file())
+        self.assertTrue((self.root / "job/recompiled-entry.bin").is_file())
+        self.assertTrue((self.root / "job/librecompiled-entry.so").is_file())
         self.assertEqual(report["nativeCodeArtifact"]["status"], "STANDALONE_ENTRY_FUNCTION_ONLY")
         self.assertFalse(report["nativeCodeArtifact"]["linkedIntoGame"])
         self.assertFalse(report["nativeCodeArtifact"]["apkProduced"])
         self.assertGreater(report["portProgress"]["percent"], 0)
-        self.assertEqual(report["portProgress"]["translatedFunctions"], 1)
-        self.assertEqual(report["portProgress"]["translatedTextBytes"], 8)
+        self.assertEqual(report["portProgress"]["recompiledFunctions"], 1)
+        self.assertEqual(report["portProgress"]["recompiledTextBytes"], 8)
         self.assertEqual(
             report["portProgress"]["percent"],
-            round(100 * report["portProgress"]["translatedTextBytes"] / report["portProgress"]["totalTextBytes"], 6),
+            round(100 * report["portProgress"]["recompiledTextBytes"] / report["portProgress"]["totalTextBytes"], 6),
         )
-        self.assertEqual(report["apiTranslation"]["generatedApiReplacements"], 0)
+        self.assertEqual(report["apiImplementationGeneration"]["generatedApiReplacements"], 0)
         self.assertEqual(report["conversionProgress"]["status"], "NOT_BUILT")
         self.assertEqual(report["conversionProgress"]["percent"], 0)
-        self.assertFalse(report["leafTranslationAssessment"]["completeGameConversion"])
+        self.assertFalse(report["staticRecompilationAssessment"]["completeGameConversion"])
         self.assertEqual(report["icon"]["status"], "SUPPORTED")
         self.assertFalse(list((self.root / "job").glob("job-*")))
         self.assertFalse((self.root / "job/input.apk").exists())
@@ -83,12 +83,12 @@ class PipelineTests(unittest.TestCase):
                 analyze_only=True,
             )
 
-        translation = report["apiTranslation"]
-        self.assertEqual(translation["status"], "IMPLEMENTATIONS_GENERATED_NOT_LINKED")
-        self.assertEqual(translation["generatedApiReplacements"], 1)
-        self.assertEqual(translation["linkedApiReplacements"], 0)
-        self.assertTrue(translation["codeGenerated"])
-        self.assertFalse(translation["replacements"][0]["linkedIntoGame"])
+        api_generation = report["apiImplementationGeneration"]
+        self.assertEqual(api_generation["status"], "IMPLEMENTATIONS_GENERATED_NOT_LINKED")
+        self.assertEqual(api_generation["generatedApiReplacements"], 1)
+        self.assertEqual(api_generation["linkedApiReplacements"], 0)
+        self.assertTrue(api_generation["codeGenerated"])
+        self.assertFalse(api_generation["replacements"][0]["linkedIntoGame"])
         self.assertTrue((self.root / "job/api-replacements/api-replacements.cpp").is_file())
         generated = (self.root / "job/api-replacements/api-replacements.cpp").read_text()
         self.assertIn("#define RADEK_API_CFAbsoluteTimeGetCurrent 1", generated)
@@ -104,7 +104,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result["state"], "PARTIAL")
         self.assertEqual(result["dependencies"]["edges"][0]["classification"], "not-required-by-standalone-entry")
         self.assertIn("does not implement the linked framework", result["dependencies"]["edges"][0]["reason"])
-        self.assertEqual(result["leafTranslationAssessment"]["backend"], "preserved-arm64")
+        self.assertEqual(result["staticRecompilationAssessment"]["backend"], "preserved-arm64")
 
     def test_reachable_framework_call_remains_blocked(self):
         result = self.run_fixture(
@@ -194,11 +194,11 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result["conversionProgress"]["status"], "NOT_BUILT")
         self.assertEqual(result["llvmLift"]["status"], "ENTRY_SUBSET_ONLY")
         self.assertGreater(result["portProgress"]["percent"], 0)
-        self.assertTrue(result["leafTranslationAssessment"]["nativeCodeWritten"])
-        self.assertFalse(result["leafTranslationAssessment"]["nativeCodeLinkedIntoGame"])
-        self.assertFalse(result["leafTranslationAssessment"]["apkProduced"])
-        self.assertEqual(result["apiTranslation"]["generatedApiReplacements"], 0)
-        self.assertFalse(result["apiTranslation"]["codeGenerated"])
+        self.assertTrue(result["staticRecompilationAssessment"]["nativeCodeWritten"])
+        self.assertFalse(result["staticRecompilationAssessment"]["nativeCodeLinkedIntoGame"])
+        self.assertFalse(result["staticRecompilationAssessment"]["apkProduced"])
+        self.assertEqual(result["apiImplementationGeneration"]["generatedApiReplacements"], 0)
+        self.assertFalse(result["apiImplementationGeneration"]["codeGenerated"])
         # Convert never emits a game APK. The only package that may exist is the
         # labelled experimental shell, and only if it passes its own contract.
         from radek.apk import validate_experimental_shell
@@ -243,8 +243,8 @@ class PipelineTests(unittest.TestCase):
         arm_mode = self.run_fixture(macho(cpu=12, subtype=6), analyze_only=True)
         self.assertEqual(arm_mode["state"], "PARTIAL")
         self.assertEqual(arm_mode["selectedArchitecture"], "armv6")
-        self.assertEqual(arm_mode["leafTranslationAssessment"]["backend"], "offline-armv6-to-armv7")
-        self.assertEqual(arm_mode["leafTranslationAssessment"]["targetAbi"], "armeabi-v7a")
+        self.assertEqual(arm_mode["staticRecompilationAssessment"]["backend"], "offline-armv6-to-armv7")
+        self.assertEqual(arm_mode["staticRecompilationAssessment"]["targetAbi"], "armeabi-v7a")
         self.assertIn(
             'target triple = "armv7-unknown-linux-androideabi"',
             (self.root / "job/leaf-experiment.ll").read_text(),
@@ -257,16 +257,16 @@ class PipelineTests(unittest.TestCase):
         thumb_mode = Pipeline(self.root / "job-thumb").run(thumb_source, True, analyze_only=True)
         self.assertEqual(thumb_mode["state"], "PARTIAL")
         self.assertEqual(thumb_mode["selectedArchitecture"], "armv6")
-        self.assertEqual(thumb_mode["leafTranslationAssessment"]["loweredBytesInMemory"], 8)
-        self.assertEqual(thumb_mode["leafTranslationAssessment"]["targetAbi"], "armeabi-v7a")
+        self.assertEqual(thumb_mode["staticRecompilationAssessment"]["loweredBytesInMemory"], 8)
+        self.assertEqual(thumb_mode["staticRecompilationAssessment"]["targetAbi"], "armeabi-v7a")
 
     def test_thumb_plan_targets_32bit_armv7(self):
         result = self.run_fixture(
             macho(struct.pack("<HH", 0x202A, 0x4770), cpu=12, subtype=9, thumb=True), analyze_only=True
         )
-        self.assertEqual(result["leafTranslationAssessment"]["backend"], "offline-armv7-to-armv7")
-        self.assertEqual(result["leafTranslationAssessment"]["targetAbi"], "armeabi-v7a")
-        self.assertEqual(result["leafTranslationAssessment"]["loweredBytesInMemory"], 8)
+        self.assertEqual(result["staticRecompilationAssessment"]["backend"], "offline-armv7-to-armv7")
+        self.assertEqual(result["staticRecompilationAssessment"]["targetAbi"], "armeabi-v7a")
+        self.assertEqual(result["staticRecompilationAssessment"]["loweredBytesInMemory"], 8)
 
     def test_explicit_target_abi_requires_a_matching_source_slice(self):
         arm32 = ipa(self.root / "arm32.ipa", macho(cpu=12, subtype=6))

@@ -12,8 +12,8 @@ internal object PlaceholderArtifactContract {
         require(conversion.optString("status") == "GENERATED") { "placeholder APK is not ready" }
         require(conversion.optBoolean("placeholderOnly", false)) { "result is not a placeholder APK" }
         require(!conversion.optBoolean("completeGameConversion", true)) { "placeholder cannot be a complete-game conversion" }
-        require(!conversion.optBoolean("gameCodeIncluded", true) && !conversion.optBoolean("gameCodeTranslated", true)) {
-            "placeholder metadata must not claim translated game code"
+        require(!conversion.optBoolean("gameCodeIncluded", true) && !conversion.optBoolean("gameCodeRecompiled", true)) {
+            "placeholder metadata must not claim statically recompiled game code"
         }
         require(!conversion.optBoolean("gamePlayable", true)) { "placeholder cannot claim gameplay" }
         require(conversion.optBoolean("installableAndroidPackage", false)) { "placeholder package was not verified for installation" }

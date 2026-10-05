@@ -109,9 +109,9 @@ void testEmptyInputRejected() {
     assert(proveArm64IntegerLeaf(nullptr, 0, &reason) == 0);
 }
 
-void testTranslateTrivialRejectsGarbage() {
+void testRecompileTrivialRejectsGarbage() {
     std::vector<uint8_t> garbage = {0x00, 0x01, 0x02, 0x03};
-    radek::Json result = radek::translateTrivial(garbage);
+    radek::Json result = radek::recompileTrivial(garbage);
     assert(result.fields.at("status").value == "UNSUPPORTED");
 }
 
@@ -239,10 +239,10 @@ std::vector<uint8_t> imageWithSymbolCount(uint32_t count) {
 }
 
 void testTextRelocationsRejectConversion() {
-    const auto unrelocated = radek::translateTrivial(imageWithTextRelocations(0));
+    const auto unrelocated = radek::recompileTrivial(imageWithTextRelocations(0));
     assert(unrelocated.fields.at("status").value == "PROVEN");
 
-    const auto relocated = radek::translateTrivial(imageWithTextRelocations(1));
+    const auto relocated = radek::recompileTrivial(imageWithTextRelocations(1));
     assert(relocated.fields.at("status").value == "UNSUPPORTED");
     assert(relocated.fields.at("reason").value.find("relocations in the proven __text section") != std::string::npos);
 }
@@ -291,7 +291,7 @@ int main() {
     testMissingReturnRejected();
     testTruncatedInstructionRejected();
     testEmptyInputRejected();
-    testTranslateTrivialRejectsGarbage();
+    testRecompileTrivialRejectsGarbage();
     testTextRelocationsRejectConversion();
     testCompactImportInventoryIsBoundedAndMarkedTruncated();
     testSymbolTablesAboveFormerLimitAreParsed();
