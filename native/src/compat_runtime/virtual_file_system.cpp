@@ -189,6 +189,26 @@ long VirtualFileSystem::tell(GuestAddress handle, std::string &detail) {
     return static_cast<long>(std::ftell(found->second.stream));
 }
 
+long VirtualFileSystem::length(GuestAddress handle, std::string &detail) {
+    const auto found = files_.find(handle);
+    if (found == files_.end()) {
+        detail = "guest file length refused: unknown file handle";
+        return -1;
+    }
+    const auto original = std::ftell(found->second.stream);
+    if (original < 0 || std::fseek(found->second.stream, 0, SEEK_END) != 0) {
+        detail = "guest file length could not seek to the end of the file";
+        return -1;
+    }
+    const auto size = std::ftell(found->second.stream);
+    const bool restored = std::fseek(found->second.stream, original, SEEK_SET) == 0;
+    if (size < 0 || !restored) {
+        detail = "guest file length could not restore the current position";
+        return -1;
+    }
+    return static_cast<long>(size);
+}
+
 bool VirtualFileSystem::eof(GuestAddress handle) const {
     const auto found = files_.find(handle);
     return found == files_.end() || std::feof(found->second.stream) != 0;

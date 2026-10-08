@@ -1,6 +1,7 @@
 import ctypes
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -8,6 +9,8 @@ import unittest
 from pathlib import Path
 
 from radek.compat_layer import CONTRACT, classify, collect_imports, generate
+from radek.compat_import_catalog import CONCRETE_DARWIN_COMPAT_PROVIDERS
+from radek.providers import BIONIC_SYMBOL_CANDIDATES
 
 
 def reconstruction(imports):
@@ -41,6 +44,39 @@ class CompatLayerTests(unittest.TestCase):
             report = generate({"images": [{"slices": [{}]}]}, Path(directory))
             self.assertEqual(report["status"], "NO_OBSERVED_IMPORTS")
             self.assertEqual(report["handlerResolutionCoveragePercent"], 0)
+
+    def test_angry_birds_provider_ledger_is_181_ndk_plus_73_darwin(self):
+        """The full fixture split reaches 100% without changing strict NDK coverage."""
+        native_catalog = (
+            Path(__file__).resolve().parent.parent
+            / "native/include/compat_runtime/ndk_import_catalog.hpp"
+        ).read_text(encoding="utf-8")
+        ndk_names = re.findall(r'\{"([^"]+)"\}', native_catalog)
+        self.assertEqual(len(ndk_names), 181)
+        self.assertEqual(len(set(ndk_names)), 181)
+        imports = ndk_names + list(CONCRETE_DARWIN_COMPAT_PROVIDERS)
+        self.assertEqual(len(imports), 254)
+        with tempfile.TemporaryDirectory() as directory:
+            report = generate(reconstruction(imports), Path(directory))
+        self.assertEqual(report["totalObservedImports"], 254)
+        self.assertEqual(report["sameNameNdkCandidateCount"], 181)
+        self.assertEqual(report["sameNameNdkProviderCount"], 181)
+        self.assertEqual(report["concreteDarwinProviderCount"], 73)
+        self.assertEqual(report["reviewedImportProviderCount"], 254)
+        self.assertEqual(report["importProviderCoveragePercent"], 100.0)
+        self.assertEqual(report["importProviderStatus"], "COMPLETE")
+
+    def test_full_ndk_catalog_matches_host_candidate_inventory(self):
+        native_catalog = (
+            Path(__file__).resolve().parent.parent
+            / "native/include/compat_runtime/ndk_full_import_catalog.hpp"
+        ).read_text(encoding="utf-8")
+        native_names = {
+            name
+            for name in re.findall(r'\{"([^\"]+)",\s*"[^\"]+"\}', native_catalog)
+        }
+        self.assertEqual(len(BIONIC_SYMBOL_CANDIDATES), 1229)
+        self.assertEqual(native_names, {"_" + name for name in BIONIC_SYMBOL_CANDIDATES})
 
     def test_generates_verified_and_stubbed_registry(self):
         imports = [

@@ -38,10 +38,13 @@ RADEK_ANALYZER="$PWD/.local/bin/radek-macho-sanitized" \
   native/src/compat_runtime/shim_registry.cpp native/src/compat_runtime/macho_loader.cpp \
   native/src/compat_runtime/runner.cpp native/src/compat_runtime/cpu.cpp \
   native/src/compat_runtime/objc_runtime.cpp native/src/compat_runtime/objc_shims.cpp \
+  native/src/compat_runtime/libsystem_shims.cpp \
   native/src/compat_runtime/app_lifecycle.cpp \
   native/src/compat_runtime/audio_session_shims.cpp \
   native/src/compat_runtime/gles_shims.cpp \
   native/src/compat_runtime/compiler_rt_shims.cpp \
+  native/src/compat_runtime/cxxabi_shims.cpp \
+  native/src/compat_runtime/ndk_compat_shims.cpp \
   native/src/compat_runtime/virtual_file_system.cpp \
   native/src/compat_runtime/darwin_compat_shims.cpp \
   native/src/compat_runtime/sjlj_unwind.cpp native/src/compat_runtime/trap_shims.cpp \
@@ -54,10 +57,13 @@ RADEK_ANALYZER="$PWD/.local/bin/radek-macho-sanitized" \
   native/src/compat_runtime/shim_registry.cpp native/src/compat_runtime/macho_loader.cpp \
   native/src/compat_runtime/runner.cpp native/src/compat_runtime/cpu.cpp \
   native/src/compat_runtime/objc_runtime.cpp native/src/compat_runtime/objc_shims.cpp \
+  native/src/compat_runtime/libsystem_shims.cpp \
   native/src/compat_runtime/app_lifecycle.cpp \
   native/src/compat_runtime/audio_session_shims.cpp \
   native/src/compat_runtime/gles_shims.cpp \
   native/src/compat_runtime/compiler_rt_shims.cpp \
+  native/src/compat_runtime/cxxabi_shims.cpp \
+  native/src/compat_runtime/ndk_compat_shims.cpp \
   native/src/compat_runtime/virtual_file_system.cpp \
   native/src/compat_runtime/darwin_compat_shims.cpp \
   native/src/compat_runtime/sjlj_unwind.cpp native/src/compat_runtime/trap_shims.cpp \
@@ -75,13 +81,35 @@ RADEK_ANALYZER="$PWD/.local/bin/radek-macho-sanitized" \
   native/src/compat_runtime/shim_registry.cpp native/src/compat_runtime/macho_loader.cpp \
   native/src/compat_runtime/runner.cpp native/src/compat_runtime/cpu.cpp \
   native/src/compat_runtime/objc_runtime.cpp native/src/compat_runtime/objc_shims.cpp \
+  native/src/compat_runtime/libsystem_shims.cpp \
   native/src/compat_runtime/app_lifecycle.cpp \
   native/src/compat_runtime/audio_session_shims.cpp \
   native/src/compat_runtime/gles_shims.cpp \
   native/src/compat_runtime/compiler_rt_shims.cpp \
+  native/src/compat_runtime/cxxabi_shims.cpp \
+  native/src/compat_runtime/ndk_compat_shims.cpp \
   native/src/compat_runtime/virtual_file_system.cpp \
   native/src/compat_runtime/darwin_compat_shims.cpp \
   native/src/compat_runtime/sjlj_unwind.cpp native/src/compat_runtime/trap_shims.cpp \
   native/tests/compat_runtime_lifecycle.cpp \
   -o .local/bin/compat-runtime-lifecycle-sanitized
 .local/bin/compat-runtime-lifecycle-sanitized
+"${CXX:-g++}" -std=c++17 -g -O1 -pthread -Wall -Wextra -Werror \
+  -fsanitize=address,undefined -fno-omit-frame-pointer -no-pie \
+  -I native/include native/src/compat_runtime/guest_memory.cpp \
+  native/src/compat_runtime/shim_registry.cpp native/src/compat_runtime/macho_loader.cpp \
+  native/src/compat_runtime/runner.cpp native/src/compat_runtime/cpu.cpp \
+  native/src/compat_runtime/objc_runtime.cpp native/src/compat_runtime/objc_shims.cpp \
+  native/src/compat_runtime/libsystem_shims.cpp \
+  native/src/compat_runtime/app_lifecycle.cpp \
+  native/src/compat_runtime/audio_session_shims.cpp \
+  native/src/compat_runtime/gles_shims.cpp \
+  native/src/compat_runtime/compiler_rt_shims.cpp \
+  native/src/compat_runtime/cxxabi_shims.cpp \
+  native/src/compat_runtime/ndk_compat_shims.cpp \
+  native/src/compat_runtime/virtual_file_system.cpp \
+  native/src/compat_runtime/darwin_compat_shims.cpp \
+  native/src/compat_runtime/sjlj_unwind.cpp native/src/compat_runtime/trap_shims.cpp \
+  native/tests/compat_runtime_cxxabi.cpp \
+  -o .local/bin/compat-runtime-cxxabi-sanitized
+.local/bin/compat-runtime-cxxabi-sanitized

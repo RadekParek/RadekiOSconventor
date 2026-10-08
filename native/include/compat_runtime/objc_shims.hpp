@@ -16,13 +16,14 @@
 namespace radek::compat_runtime::objc {
 
 /**
- * Bounded result of the application-lifecycle ("startup chain") adapters.
+ * Result of the application-lifecycle ("startup chain") adapters.
  *
  * The runtime drives `UIApplicationMain` far enough to instantiate the app's
- * delegate, deliver `applicationDidFinishLaunching:`, and service a bounded
- * number of queued background-thread iterations on the single guest CPU. None
- * of these counters is gameplay evidence: they describe how far a boot attempt
- * progressed before it stopped.
+ * delegate, deliver `applicationDidFinishLaunching:`, and service queued
+ * background-thread work on the single guest CPU. A zero frame limit means the
+ * service is unlimited (the Android game path); a non-zero value is reserved
+ * for an explicitly bounded host diagnostic. None of these counters is a
+ * gameplay claim: they describe the lifecycle events that were observed.
  */
 struct LifecycleOutcome {
     bool applicationMainEntered = false;
@@ -88,10 +89,10 @@ class ShimAdapter {
         GuestAddress accelerometerDelegate = 0;
         GuestAddress currentContext = 0;
         GuestAddress layerClass = 0;
-        // Bounded "main thread" service: the guest game thread asks the runtime
-        // to run a selector on the main thread; the adapter relays it into guest
-        // code and counts serviced calls. The sleep callout cancels the guest
-        // thread once the limit is reached so the harness terminates honestly.
+        // Main-thread service: the guest game thread asks the runtime to run a
+        // selector on the main thread; the adapter relays it into guest code and
+        // counts serviced calls. A zero limit leaves it running indefinitely for
+        // the device game path; host diagnostics may opt into a finite limit.
         std::uint32_t mainThreadFramesServiced = 0;
         std::uint32_t mainThreadFramesLimit = 0;
         bool mainThreadCancelled = false;
@@ -273,10 +274,10 @@ class ShimAdapter {
     const Runtime &runtime() const noexcept { return runtime_; }
 
     /**
-     * Bound the number of background-thread iterations the startup chain may
-     * service. The value is delivered to the virtual `sleepForTimeInterval:`
-     * callout: after this many iterations the guest thread is marked cancelled
-     * so the bounded boot attempt terminates by itself.
+     * Set an optional host-diagnostic frame limit for background-thread service.
+     * Zero means unlimited and is the value used by the Android game launcher.
+     * A non-zero value makes the virtual `sleepForTimeInterval:` callout mark
+     * the guest thread cancelled after that many iterations.
      */
     void setMainThreadServiceLimit(GuestAddressSpace &memory, std::uint32_t frames);
 

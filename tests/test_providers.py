@@ -11,6 +11,10 @@ import unittest
 from pathlib import Path
 
 from radek import providers
+from radek.compat_import_catalog import (
+    CONCRETE_DARWIN_COMPAT_IMPORT_COUNT,
+    CONCRETE_DARWIN_COMPAT_PROVIDERS,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 KOTLIN = ROOT / "app/src/main/java/dev/radek/conventor/Providers.kt"
@@ -173,6 +177,23 @@ class ProviderTests(unittest.TestCase):
                     "STATUS_NO_EXECUTION_PATH_YET": providers.STATUS_NO_EXECUTION_PATH_YET,
                 }
                 self.assertEqual(provider.status, status_values[status])
+
+    def test_concrete_darwin_provider_catalog_is_explicit_and_matches_kotlin(self):
+        """Darwin-only names must have a typed provider, not a relabelled NDK hit."""
+        self.assertEqual(CONCRETE_DARWIN_COMPAT_IMPORT_COUNT, 73)
+        self.assertEqual(len(CONCRETE_DARWIN_COMPAT_PROVIDERS), 73)
+        kotlin = (ROOT / "app/src/main/java/dev/radek/conventor/CompatImportProviders.kt").read_text(
+            encoding="utf-8"
+        )
+        pairs = dict(re.findall(r'^\s*"((?:[^"\\]|\\.)*)"\s+to\s+"([^"]+)"', kotlin, re.M))
+        # Kotlin escapes the dollar in Objective-C class names inside string
+        # templates; source-level parity restores it for comparison.
+        pairs = {name.replace(r"\$", "$" ): provider for name, provider in pairs.items()}
+        self.assertEqual(CONCRETE_DARWIN_COMPAT_PROVIDERS, pairs)
+        for symbol, provider in CONCRETE_DARWIN_COMPAT_PROVIDERS.items():
+            with self.subTest(symbol=symbol):
+                self.assertEqual(providers.CONCRETE_DARWIN_COMPAT_PROVIDERS[symbol], "libioscompat.so:" + provider)
+                self.assertIn(provider, providers.for_symbol(symbol))
 
     def test_ndk_name_candidate_catalogs_match_between_kotlin_and_host(self):
         """The on-device mapper and the host CLI must agree on every candidate.

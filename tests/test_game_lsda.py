@@ -28,6 +28,15 @@ class GameLsdaTest(unittest.TestCase):
             type_entries.update(table.type_entries)
         self.assertEqual(len(type_entries), 4)
 
+    def test_action_chains_are_bounded(self):
+        for table in self.parsed.values():
+            self.assertGreaterEqual(table.action_base, table.address)
+            records = {record for _, _, record in table.actions}
+            self.assertEqual(set(table.action_next), records)
+            for record, next_record in table.action_next.items():
+                if next_record:
+                    self.assertIn(next_record, records)
+
     def test_byte_ranges_cover_tables(self):
         section = self.image.section_named("__DATA", "__gcc_except_tab")
         covered = set()

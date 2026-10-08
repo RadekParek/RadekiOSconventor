@@ -61,6 +61,7 @@ class VirtualFileSystem {
                       std::string &detail);
     bool seek(GuestAddress handle, long offset, int whence, std::string &detail);
     long tell(GuestAddress handle, std::string &detail);
+    long length(GuestAddress handle, std::string &detail);
     bool eof(GuestAddress handle) const;
     bool failed(GuestAddress handle) const;
     bool flush(GuestAddress handle, std::string &detail);

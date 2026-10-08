@@ -1,9 +1,10 @@
-// Bounded iOS application-lifecycle ("startup chain") adapters.
+// iOS application-lifecycle ("startup chain") adapters.
 //
 // `UIApplicationMain` is the first call a UIKit app makes. Real dyld/dyld-based
 // UIKit creates the UIApplication singleton, instantiates the delegate class
 // named by the caller, delivers `applicationDidFinishLaunching:`, and then runs
-// the main run loop. This file implements that chain in a bounded way:
+// the main run loop. This file implements that chain without an artificial
+// frame-count or sleep-count stop:
 //
 //   * the delegate is instantiated through the same guest object model the rest
 //     of the runtime uses, so the app's own machine code runs for real;
@@ -13,8 +14,9 @@
 //   * a background thread started with `+detachNewThreadSelector:...` is queued
 //     and executed by the boot runner on the same guest CPU;
 //   * `performSelectorOnMainThread:...` relays the selector into guest code, and
-//     the bounded `sleepForTimeInterval:` callout cancels the guest thread after
-//     a fixed number of iterations so the attempt terminates by itself.
+//     `sleepForTimeInterval:` remains a real no-op timing adapter so a running
+//     game loop is not cancelled by the compatibility layer. A host diagnostic
+//     can still opt into an external time budget.
 //
 // Framework objects created here (UIApplication, UIScreen, ...) are host objects
 // materialized in the guest address space. Their behavior is deliberately a
@@ -124,6 +126,8 @@ GuestAddress ShimAdapter::lifecycleFrameworkObject(GuestAddressSpace &memory,
 }
 
 void ShimAdapter::setMainThreadServiceLimit(GuestAddressSpace &memory, std::uint32_t frames) {
+    // Zero is intentionally unlimited. Keep this hook for host diagnostics and
+    // older probes, but the Android runner always supplies zero.
     auto &state = guestState(memory);
     state.lifecycle.mainThreadFramesLimit = frames;
 }
@@ -651,9 +655,9 @@ bool ShimAdapter::lifecycleThreadMessage(CpuRegisterState &registers, GuestAddre
     if (selectorName == "name")
         return finish(createGuestString(memory, "radek-guest-thread", true));
     if (selectorName == "sleepForTimeInterval:") {
-        // The bounded main-loop service: after the configured number of sleeps
-        // the runtime cancels the guest thread it is running, so the guest loop
-        // exits by itself and the attempt terminates without spinning forever.
+        // A zero frame limit is the normal Android/game value: sleep is an
+        // ordinary compatibility call and never cancels the guest. The optional
+        // non-zero limit exists only for an explicitly bounded host diagnostic.
         ++lifecycle.sleepCount;
         if (lifecycle.mainThreadFramesLimit != 0 &&
             lifecycle.sleepCount >= lifecycle.mainThreadFramesLimit) {
@@ -1276,8 +1280,8 @@ BootLifecycleHooks ShimAdapter::lifecycleHooks() {
             events.push(radek::Json(event));
         lifecycle["events"] = std::move(events);
         lifecycle["note"] =
-            "bounded startup-chain trace: lifecycle messages delivered to real guest code, "
-            "no rendered frame, no GPU surface, and no gameplay claim";
+            "startup-chain trace: lifecycle messages delivered to real guest code; "
+            "the trace itself is not a rendered-frame, GPU-surface, or gameplay claim";
         report["lifecycle"] = lifecycle;
     };
     return hooks;

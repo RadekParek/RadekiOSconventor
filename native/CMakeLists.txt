@@ -76,6 +76,8 @@ if(RADEK_BUILD_COMPAT_RUNTIME)
         src/compat_runtime/objc_shims.cpp
         src/compat_runtime/audio_session_shims.cpp
         src/compat_runtime/compiler_rt_shims.cpp
+        src/compat_runtime/cxxabi_shims.cpp
+        src/compat_runtime/ndk_compat_shims.cpp
         src/compat_runtime/sjlj_unwind.cpp
         src/compat_runtime/trap_shims.cpp
         src/compat_runtime/libsystem_shims.cpp
@@ -169,6 +171,12 @@ if(RADEK_BUILD_COMPAT_RUNTIME)
         target_compile_options(compat-runtime-darwin-compat-tests PRIVATE -Wall -Wextra -Werror)
         target_link_libraries(compat-runtime-darwin-compat-tests PRIVATE compat_runtime_core)
         add_test(NAME compat-runtime-darwin-compat COMMAND compat-runtime-darwin-compat-tests)
+
+        add_executable(compat-runtime-cxxabi-tests tests/compat_runtime_cxxabi.cpp)
+        target_include_directories(compat-runtime-cxxabi-tests PRIVATE include)
+        target_compile_options(compat-runtime-cxxabi-tests PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(compat-runtime-cxxabi-tests PRIVATE compat_runtime_core)
+        add_test(NAME compat-runtime-cxxabi COMMAND compat-runtime-cxxabi-tests)
 
         add_executable(compat-runtime-objc-tests tests/compat_runtime_objc.cpp)
         target_include_directories(compat-runtime-objc-tests PRIVATE include)
