@@ -360,12 +360,18 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
                 exceptions_.erase(state);
             }
             guards_.erase(&memory);
+            // RTTI/vtable data bindings are materialized while the Mach-O
+            // loader applies its external relocations, immediately before the
+            // image initializers run. They are therefore live guest data for
+            // this image, not stale state that this reset callback may unmap.
+            // Drop only the host-side cache entry; GuestAddressSpace owns the
+            // mappings and will release them with the boot attempt. This also
+            // prevents a second image initializer from returning a pointer into
+            // a previous address-space incarnation whose stack address was
+            // reused by the host.
             auto tables = vtables_.find(&memory);
-            if (tables != vtables_.end()) {
-                for (const auto &[key, address] : tables->second)
-                    (void)key, memory.unmap(address);
+            if (tables != vtables_.end())
                 vtables_.erase(tables);
-            }
             return true;
         });
     registered_ = true;

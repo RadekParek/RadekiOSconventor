@@ -5,10 +5,12 @@
 #include "compat_runtime/libsystem_shims.hpp"
 #include "compat_runtime/guest_memory.hpp"
 #include "compat_runtime/shim_registry.hpp"
+#include "compat_runtime/virtual_file_system.hpp"
 
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -137,6 +139,38 @@ void testStringAdapters() {
     CHECK(harness.read(kDestination, 6) == std::string("ab\0\0\0\0", 6));
 }
 
+void testSyntheticBundleFiles() {
+    const std::filesystem::path root = "/tmp/radek-native-vfs-synthetic-test";
+    std::filesystem::remove_all(root);
+    CHECK(std::filesystem::create_directories(root));
+    auto &files = guestFileSystem();
+    files.mount(bundleGuestPath(), root.string(), false);
+
+    Harness harness;
+    const GuestAddress path = kDataBase + 0x300;
+    const GuestAddress mode = kDataBase + 0x380;
+    const GuestAddress destination = kDataBase + 0x400;
+    harness.write(path, "/radek-bundle/App.app/data/bundleIndex.idx");
+    harness.write(mode, "rb");
+    const auto index = harness.call("_fopen", path, mode);
+    CHECK(index != 0);
+    CHECK(harness.call("_fread", destination, 1, 64, index) == 22);
+    CHECK(harness.read(destination, 22) == "__loose_files__,0,0,0\n");
+    CHECK(harness.call("_fclose", index) == 0);
+
+    harness.write(path, "/radek-bundle/App.app/highscores.lua");
+    const auto state = harness.call("_fopen", path, mode);
+    CHECK(state != 0);
+    CHECK(harness.call("_fread", destination, 1, 1, state) == 0);
+    CHECK(harness.call("_fclose", state) == 0);
+    CHECK(files.refusedCount() == 0);
+    bool sawSynthetic = false;
+    for (const auto &diagnostic : files.diagnostics())
+        sawSynthetic = sawSynthetic || diagnostic.find("synthetic") != std::string::npos;
+    CHECK(sawSynthetic);
+    std::filesystem::remove_all(root);
+}
+
 void testGuestHeapAllocator() {
     Harness harness;
     const auto first = harness.call("_malloc", 64);
@@ -240,6 +274,7 @@ int main() {
     try {
         testMemoryAdapters();
         testStringAdapters();
+        testSyntheticBundleFiles();
         testGuestHeapAllocator();
         testCxxOperatorAllocators();
         testUnregisteredSymbolsStillFailClosed();

@@ -51,10 +51,13 @@ void appendImportArrays(radek::Json &report, const radek::Json &loader) {
 // way real process startup does. Returns false when the stack cannot be
 // mapped or written; the caller must treat that as a failed boot setup.
 bool prepareBootStack(GuestAddressSpace &addressSpace, CpuRegisterState &registers) {
-    // Real iOS main-thread stacks are ~1 MiB and game engines nest deeply on
-    // top of that; a 64 KiB probe stack overflows into whatever is mapped
-    // below it and then faults on a runtime page boundary.
-    constexpr std::size_t stackSize = 8U * 1024U * 1024U;
+    // Real iOS main-thread stacks are roughly 1 MiB, but this compatibility
+    // boundary executes framework callbacks synchronously on the one guest CPU.
+    // Several UIKit/Foundation startup continuations can remain nested while
+    // the translated app reaches its first run-loop turn, so keep a generous
+    // bounded stack rather than allowing a downward spill into the loader's
+    // dynamic-address guard range.
+    constexpr std::size_t stackSize = 32U * 1024U * 1024U;
     // Frame (all offsets from the 16-aligned SP, matching dyld's layout of
     // argc followed by argv pointers, envp pointers, then strings):
     //   SP+0:  argc = 1

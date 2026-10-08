@@ -198,24 +198,34 @@ Java_dev_radek_gameruntime_GameBootActivity_runGameBootAttempt(JNIEnv *env, jobj
         {
             radek::Json gles = radek::Json::object();
             const auto driver = glesForwarder.driver();
+            const auto *drawableContext = radek::compat_runtime::gles::lastForwarder();
             gles["driverGlesLibraryLoaded"] = driver.glesLoaded;
             gles["driverEglLibraryLoaded"] = driver.eglLoaded;
             gles["driverDetail"] = driver.detail;
-            gles["drawableReady"] = glesForwarder.drawableReady();
-            gles["presentingToWindow"] = glesForwarder.presentingToWindow();
-            gles["drawableWidth"] = static_cast<std::uint64_t>(glesForwarder.drawableWidth());
-            gles["drawableHeight"] = static_cast<std::uint64_t>(glesForwarder.drawableHeight());
+            gles["drawableReady"] = drawableContext != nullptr && drawableContext->drawableReady();
+            gles["presentingToWindow"] = drawableContext != nullptr && drawableContext->presentingToWindow();
+            gles["drawableWidth"] = drawableContext != nullptr
+                ? static_cast<std::uint64_t>(drawableContext->drawableWidth()) : 0;
+            gles["drawableHeight"] = drawableContext != nullptr
+                ? static_cast<std::uint64_t>(drawableContext->drawableHeight()) : 0;
+            gles["guestCallsObserved"] = static_cast<std::uint64_t>(glesForwarder.guestCallsObserved());
             gles["forwardedCalls"] = static_cast<std::uint64_t>(glesForwarder.forwardedCalls());
             gles["refusedCalls"] = static_cast<std::uint64_t>(glesForwarder.refusedCalls());
-            gles["framesPresented"] = static_cast<std::uint64_t>(glesForwarder.framesPresented());
+            gles["framesPresented"] = drawableContext != nullptr
+                ? static_cast<std::uint64_t>(drawableContext->framesPresented()) : 0;
             radek::Json diagnostics = radek::Json::array();
             for (const auto &diagnostic : glesForwarder.diagnostics())
                 diagnostics.push(radek::Json(diagnostic));
+            if (drawableContext != nullptr && drawableContext != &glesForwarder) {
+                for (const auto &diagnostic : drawableContext->diagnostics())
+                    diagnostics.push(radek::Json(diagnostic));
+            }
             gles["diagnostics"] = std::move(diagnostics);
             gles["note"] =
-                "guest OpenGL ES calls are forwarded to the platform EGL/GLES driver and "
-                "presented on the launcher's surface; refused calls are listed in "
-                "diagnostics; a rendered frame is guest output, not gameplay evidence";
+                "guestCallsObserved counts guest imports entering the compatibility layer; "
+                "forwardedCalls counts calls handed to the platform EGL/GLES driver, and "
+                "refused calls are listed in diagnostics; a rendered frame is guest output, "
+                "not gameplay evidence";
             report["gles"] = std::move(gles);
         }
 
@@ -257,6 +267,8 @@ Java_dev_radek_gameruntime_GameBootActivity_runGameBootAttempt(JNIEnv *env, jobj
             providers["boundedNdkFallbackCalloutCount"] = static_cast<std::uint64_t>(
                 ndkShims.registeredCalloutCount());
             providers["ndkFallbackCallsObserved"] = ndkShims.callCount();
+            providers["guestPthreadTransfersObserved"] = ndkShims.guestThreadTransferCount();
+            providers["guestPthreadCompletionsObserved"] = ndkShims.guestThreadCompletionCount();
             providers["genericNdkCallsObserved"] = ndkShims.genericCallCount();
             providers["genericNdkProviderCount"] = static_cast<std::uint64_t>(
                 ndkShims.genericProviderCount());

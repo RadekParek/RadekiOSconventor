@@ -351,7 +351,7 @@ void memoryWriteHook(uc_engine *engine, uc_mem_type, std::uint64_t address, int 
     }
 }
 
-bool invalidMemoryHook(uc_engine *, uc_mem_type, std::uint64_t address, int size,
+bool invalidMemoryHook(uc_engine *engine, uc_mem_type type, std::uint64_t address, int size,
                        std::int64_t, void *userData) {
     auto &state = *static_cast<HookState *>(userData);
     state.memoryFault = true;
@@ -363,7 +363,43 @@ bool invalidMemoryHook(uc_engine *, uc_mem_type, std::uint64_t address, int size
     constexpr char digits[] = "0123456789abcdef";
     for (int shift = 28; shift >= 0; shift -= 4)
         state.message.push_back(digits[(address >> shift) & 0xf]);
-    state.message += " (" + std::to_string(size) + " byte(s)).";
+    state.message += " (" + std::to_string(size) + " byte(s), ";
+    switch (type) {
+    case UC_MEM_READ_UNMAPPED:
+    case UC_MEM_READ_PROT:
+        state.message += "read";
+        break;
+    case UC_MEM_WRITE_UNMAPPED:
+    case UC_MEM_WRITE_PROT:
+        state.message += "write";
+        break;
+    case UC_MEM_FETCH_UNMAPPED:
+    case UC_MEM_FETCH_PROT:
+        state.message += "fetch";
+        break;
+    default:
+        state.message += "unknown access";
+        break;
+    }
+    state.message += ").";
+    std::uint32_t pc = 0;
+    if (engine && readRegister(engine, UC_ARM_REG_PC, pc) == UC_ERR_OK) {
+        state.message += " pc=0x";
+        for (int shift = 28; shift >= 0; shift -= 4)
+            state.message.push_back(digits[(pc >> shift) & 0xf]);
+    }
+    if (state.memory && state.memory->regions) {
+        for (const auto &region : state.memory->regions()) {
+            const std::uint64_t end = static_cast<std::uint64_t>(region.base) + region.size;
+            if (address >= region.base && address < end) {
+                state.message += " mapped=" + region.name + "[0x";
+                for (int shift = 28; shift >= 0; shift -= 4)
+                    state.message.push_back(digits[(region.base >> shift) & 0xf]);
+                state.message += "+" + std::to_string(region.size) + "]";
+                break;
+            }
+        }
+    }
     return false;
 }
 

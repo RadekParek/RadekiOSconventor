@@ -126,6 +126,8 @@ Java_dev_radek_compat_runtime_RuntimeBridge_runAuthorizedMainBinary(JNIEnv *env,
         report["importProviders"]["boundedNdkFallbackCalloutCount"] = static_cast<std::uint64_t>(
             ndkShims.registeredCalloutCount());
         report["importProviders"]["ndkFallbackCallsObserved"] = ndkShims.callCount();
+        report["importProviders"]["guestPthreadTransfersObserved"] = ndkShims.guestThreadTransferCount();
+        report["importProviders"]["guestPthreadCompletionsObserved"] = ndkShims.guestThreadCompletionCount();
         report["importProviders"]["genericNdkCallsObserved"] = ndkShims.genericCallCount();
         report["importProviders"]["genericNdkProviderCount"] = static_cast<std::uint64_t>(
             ndkShims.genericProviderCount());

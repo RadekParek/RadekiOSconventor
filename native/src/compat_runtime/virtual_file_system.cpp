@@ -16,6 +16,17 @@ bool isWriteMode(const std::string &mode) {
            mode.find('+') != std::string::npos;
 }
 
+bool isSyntheticUserStatePath(const std::string &path) {
+    for (const auto *name : {"/highscores.lua", "/settings.lua"}) {
+        if (path == name || path == name + 1 || path == std::string("./") + (name + 1))
+            return true;
+        if (path.size() >= std::strlen(name) &&
+            path.compare(path.size() - std::strlen(name), std::strlen(name), name) == 0)
+            return true;
+    }
+    return false;
+}
+
 /** True when `path` contains no empty, "." or ".." component. */
 bool isContainedRelativePath(const std::string &path) {
     std::size_t start = 0;
@@ -124,6 +135,42 @@ GuestAddress VirtualFileSystem::open(const std::string &guestPath, const std::st
     }
     const std::string nativeMode = mode.empty() ? "rb" : mode;
     std::FILE *stream = std::fopen(hostPath.c_str(), nativeMode.c_str());
+    if (stream == nullptr && !wantsWrite &&
+        (guestPath == "data/bundleIndex.idx" ||
+         guestPath == "./data/bundleIndex.idx" ||
+         (guestPath.size() > std::strlen("/data/bundleIndex.idx") &&
+          guestPath.compare(guestPath.size() - std::strlen("/data/bundleIndex.idx"),
+                            std::strlen("/data/bundleIndex.idx"),
+                            "/data/bundleIndex.idx") == 0))) {
+        // Older iOS game builds use a generated CSV-like bundle index, while
+        // the authorized Angry Birds fixture carries the loose data files but
+        // no generated index. Match the existing translated runtime's explicit
+        // compatibility behavior: an empty index with one reserved marker
+        // makes the guest bundle parser expose no packed entries and continue
+        // to its direct-file fallback. This is not an invented asset; every
+        // actual data read still resolves against the mounted bundle directory.
+        stream = std::tmpfile();
+        if (stream != nullptr) {
+            static constexpr char emptyIndex[] = "__loose_files__,0,0,0\n";
+            const auto written = std::fwrite(emptyIndex, 1, sizeof(emptyIndex) - 1, stream);
+            if (written != sizeof(emptyIndex) - 1) {
+                std::fclose(stream);
+                stream = nullptr;
+            } else {
+                std::rewind(stream);
+            }
+        }
+        if (stream != nullptr)
+            note("guest fopen: using synthetic loose-file bundle index for '" + guestPath + "'");
+    }
+    if (stream == nullptr && !wantsWrite && isSyntheticUserStatePath(guestPath)) {
+        // A first launch has no persisted highscores/settings file. Use the
+        // same empty seekable state as the translated runtime so the guest's
+        // normal defaults path can proceed without manufacturing saved data.
+        stream = std::tmpfile();
+        if (stream != nullptr)
+            note("guest fopen: using empty synthetic user state for '" + guestPath + "'");
+    }
     if (stream == nullptr) {
         ++refused_;
         detail = "guest file I/O refused: '" + guestPath + "' could not be opened (" +

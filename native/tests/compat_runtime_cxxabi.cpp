@@ -141,6 +141,13 @@ void testRttiDataBindingIsGuestData() {
     GuestAddress again = 0;
     CHECK(binding->resolveGuestAddress(harness.memory, again, reason));
     CHECK(address == again);
+
+    // Mach-O data bindings are materialized before image initializers run. The
+    // initializer may reset host-side C++ ABI caches, but it must not unmap a
+    // vtable page that the loader already wrote into the guest image's
+    // relocation slots.
+    CHECK(harness.registry.initializeImage(harness.memory, {}, reason));
+    CHECK(harness.memory.contains(address, 16, MemoryPermission::Read));
 }
 
 void testAllNdkProvidersAndMinimalEmulation() {

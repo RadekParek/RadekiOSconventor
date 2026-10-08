@@ -25,8 +25,10 @@ argument is translated through the mapped guest regions with a range check. A
 surface that arrives after the first offscreen attach makes the GL layer recreate
 its window surface, so late surfaces still receive frames. The report's `gles`
 block states which driver was loaded, whether the drawable was handed to the
-platform, `forwardedCalls`/`refusedCalls`/`framesPresented`, and every refusal as
-a named diagnostic: a rendered frame is guest output, not gameplay evidence.
+platform, `guestCallsObserved` (imports entering the compat layer),
+`forwardedCalls` (calls actually handed to the driver), `refusedCalls`,
+`framesPresented`, and every refusal as a named diagnostic: a rendered frame is
+guest output, not gameplay evidence.
 
 ## Behavior contract
 
@@ -52,7 +54,8 @@ a named diagnostic: a rendered frame is guest output, not gameplay evidence.
    runtime, the AudioToolbox session state calls, and the bounded
    application-lifecycle chain
    (`UIApplicationMain` -> delegate instantiation -> `applicationDidFinishLaunching:`
-   -> single-guest-CPU service of the queued background-thread body).
+   -> single-guest-CPU service of queued Objective-C background work and
+   guest-callable `pthread_create` worker transfers).
 4. The launcher is **fullscreen** (`SYSTEM_UI_FLAG_IMMERSIVE_STICKY` plus
    layout through the display cutout) and runs in **sensor landscape** while the
    guest boots, showing only the game: the recovered splash frames are shown

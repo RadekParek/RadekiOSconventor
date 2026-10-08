@@ -168,6 +168,8 @@ int main(int argc, char **argv) {
             providers["boundedNdkFallbackCalloutCount"] = static_cast<std::uint64_t>(
                 ndkShims.registeredCalloutCount());
             providers["ndkFallbackCallsObserved"] = ndkShims.callCount();
+            providers["guestPthreadTransfersObserved"] = ndkShims.guestThreadTransferCount();
+            providers["guestPthreadCompletionsObserved"] = ndkShims.guestThreadCompletionCount();
             providers["genericNdkCallsObserved"] = ndkShims.genericCallCount();
             providers["genericNdkProviderCount"] = static_cast<std::uint64_t>(
                 ndkShims.genericProviderCount());
@@ -217,37 +219,42 @@ int main(int argc, char **argv) {
         // GL observability: which driver was found, whether its draws are handed to
         // the real GLES implementation, and every call the runtime had to refuse.
         {
-            const auto *context = radek::compat_runtime::gles::lastForwarder();
-            const auto driver = context != nullptr
-                                    ? context->driver()
-                                    : radek::compat_runtime::gles::DriverReport{};
+            // GL imports are bound to this per-attempt forwarder, while the
+            // EAGL compatibility object owns the drawable forwarder keyed by
+            // the guest address space. Keep those observations separate: a
+            // guest call entering a no-driver host must not be mistaken for a
+            // driver-forwarded call or a presented frame.
+            const auto *drawableContext = radek::compat_runtime::gles::lastForwarder();
+            const auto driver = glesForwarder.driver();
             radek::Json gles = radek::Json::object();
             gles["hostGlesDefines"] = static_cast<std::uint64_t>(1);
             gles["driverGlesLibraryLoaded"] = driver.glesLoaded;
             gles["driverEglLibraryLoaded"] = driver.eglLoaded;
             gles["driverDetail"] = driver.detail;
-            gles["drawableReady"] = context != nullptr && context->drawableReady();
-            gles["presentingToWindow"] = context != nullptr && context->presentingToWindow();
+            gles["drawableReady"] = drawableContext != nullptr && drawableContext->drawableReady();
+            gles["presentingToWindow"] = drawableContext != nullptr && drawableContext->presentingToWindow();
             gles["drawableWidth"] =
-                context != nullptr ? static_cast<std::uint64_t>(context->drawableWidth()) : 0;
+                drawableContext != nullptr ? static_cast<std::uint64_t>(drawableContext->drawableWidth()) : 0;
             gles["drawableHeight"] =
-                context != nullptr ? static_cast<std::uint64_t>(context->drawableHeight()) : 0;
-            gles["forwardedCalls"] =
-                context != nullptr ? static_cast<std::uint64_t>(context->forwardedCalls()) : 0;
-            gles["refusedCalls"] =
-                context != nullptr ? static_cast<std::uint64_t>(context->refusedCalls()) : 0;
+                drawableContext != nullptr ? static_cast<std::uint64_t>(drawableContext->drawableHeight()) : 0;
+            gles["guestCallsObserved"] = glesForwarder.guestCallsObserved();
+            gles["forwardedCalls"] = glesForwarder.forwardedCalls();
+            gles["refusedCalls"] = glesForwarder.refusedCalls();
             gles["framesPresented"] =
-                context != nullptr ? static_cast<std::uint64_t>(context->framesPresented()) : 0;
+                drawableContext != nullptr ? static_cast<std::uint64_t>(drawableContext->framesPresented()) : 0;
             radek::Json diagnostics = radek::Json::array();
-            if (context != nullptr) {
-                for (const auto &diagnostic : context->diagnostics())
+            for (const auto &diagnostic : glesForwarder.diagnostics())
+                diagnostics.push(radek::Json(diagnostic));
+            if (drawableContext != nullptr && drawableContext != &glesForwarder) {
+                for (const auto &diagnostic : drawableContext->diagnostics())
                     diagnostics.push(radek::Json(diagnostic));
             }
             gles["diagnostics"] = std::move(diagnostics);
             gles["note"] =
-                "guest OpenGL ES 1.1 calls are forwarded to the platform GLES/EGL driver; "
-                "refused calls are listed in diagnostics; a rendered frame is guest output, "
-                "not gameplay evidence and not a playable conversion";
+                "guestCallsObserved counts guest imports entering the compatibility layer; "
+                "forwardedCalls counts calls actually handed to a host driver, and refused "
+                "calls are listed in diagnostics; a rendered frame is guest output, not "
+                "gameplay evidence and not a playable conversion";
             report["gles"] = std::move(gles);
         }
 

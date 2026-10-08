@@ -31,7 +31,6 @@ constexpr std::size_t kMaximumStringBytes = 1U * 1024U * 1024U;
 constexpr int kErrnoInvalidArgument = 22;
 constexpr int kErrnoNoSuchProcess = 3;
 constexpr int kErrnoBusy = 16;
-constexpr int kErrnoNotImplemented = 38;
 constexpr int kEof = -1;
 
 bool readGuest(const GuestAddressSpace &memory, GuestAddress address, void *destination,
@@ -280,6 +279,32 @@ void ShimAdapter::registerFunction(ShimRegistry &registry, const std::string &sy
     registry.registerBinding(std::move(binding));
 }
 
+void ShimAdapter::registerTransferFunction(
+    ShimRegistry &registry, const std::string &symbol, const std::string &adapterName,
+    std::function<bool(CpuRegisterState &, GuestAddressSpace &, GuestAddress &, std::string &)>
+        invoke) {
+    if (registry.resolve(symbol).has_value())
+        return;
+    if (nextCallout_ > kCalloutEnd - 4U)
+        throw std::overflow_error("NDK compatibility callout window is exhausted");
+    ShimBinding binding;
+    binding.darwinSymbol = symbol;
+    binding.library = "Android NDK/system ABI";
+    binding.adapterName = adapterName;
+    binding.guestAddress = nextCallout_;
+    nextCallout_ += 4U;
+    binding.invokeTransfer = [this, invoke = std::move(invoke)](
+                                 CpuRegisterState &registers, GuestAddressSpace &memory,
+                                 GuestAddress &target, std::string &reason) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++calls_;
+        }
+        return invoke(registers, memory, target, reason);
+    };
+    registry.registerBinding(std::move(binding));
+}
+
 void ShimAdapter::registerExceptionBoundary(ShimRegistry &registry, const std::string &symbol,
                                             const std::string &adapterName,
                                             const std::string &reason) {
@@ -412,9 +437,6 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
                               "guest exit requested; execution stopped safely");
     registerExceptionBoundary(registry, "_longjmp", "ndk-longjmp-boundary",
                               "guest longjmp requires a guest stack transfer and is a bounded stop boundary");
-    registerExceptionBoundary(registry, "_pthread_exit", "ndk-pthread-exit-boundary",
-                              "guest pthread_exit requires a guest scheduler and is a bounded stop boundary");
-
     registerFunction(registry, "_setjmp", "ndk-setjmp-state",
                      [](CpuRegisterState &registers, GuestAddressSpace &memory,
                         std::string &reason) {
@@ -1147,6 +1169,96 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
     }
 
     // ---- pthread state -----------------------------------------------------
+    // A real ARM32 guest start routine cannot be called as a host function
+    // pointer. Run one bounded pthread entry synchronously on the same Unicorn
+    // CPU instead: the transfer preserves the guest ABI, and the continuation
+    // restores the creator's LR so pthread_create still returns normally. This
+    // is deliberately single-CPU scheduling, not a claim that host threads
+    // were recreated; it is enough for startup workers whose result is needed
+    // before the iOS main path continues.
+    registerFunction(registry, "_radek_pthread_continuation",
+                     "ndk-pthread-continuation",
+                     [this](CpuRegisterState &registers, GuestAddressSpace &memory,
+                            std::string &reason) {
+                         std::lock_guard<std::mutex> lock(mutex_);
+                         auto found = pthreadFrames_.find(&memory);
+                         if (found == pthreadFrames_.end() || found->second.empty()) {
+                             reason = "pthread continuation fired without a pending guest worker";
+                             return false;
+                         }
+                         const auto frame = found->second.back();
+                         found->second.pop_back();
+                         completedPthreads_[&memory].push_back(frame.threadToken);
+                         ++guestThreadCompletions_;
+                         if (found->second.empty())
+                             pthreadFrames_.erase(found);
+                         registers.r[14] = frame.callerReturnAddress;
+                         registers.r[0] = 0;
+                         return true;
+                     });
+    const auto pthreadContinuation = registry.resolve("_radek_pthread_continuation");
+    if (!pthreadContinuation || !pthreadContinuation->invoke)
+        throw std::logic_error("guest pthread continuation was not registered");
+    pthreadContinuationAddress_ = pthreadContinuation->guestAddress;
+    registerFunction(registry, "_pthread_exit", "ndk-pthread-exit-guest-worker",
+                     [this](CpuRegisterState &registers, GuestAddressSpace &memory,
+                            std::string &reason) {
+                         std::lock_guard<std::mutex> lock(mutex_);
+                         const auto found = pthreadFrames_.find(&memory);
+                         if (found == pthreadFrames_.end() || found->second.empty()) {
+                             reason = "pthread_exit was called without a pending guest worker";
+                             return false;
+                         }
+                         // The ordinary callout return path will jump to the
+                         // continuation instead of the worker's caller. The
+                         // continuation then records completion and restores
+                         // the creator's saved LR.
+                         registers.r[14] = pthreadContinuationAddress_;
+                         return true;
+                     });
+    registerTransferFunction(
+        registry, "_pthread_create", "ndk-pthread-create-guest-transfer",
+        [this](CpuRegisterState &registers, GuestAddressSpace &memory,
+               GuestAddress &target, std::string &reason) {
+            const auto threadCell = registers.r[0];
+            const auto start = registers.r[2];
+            const auto argument = registers.r[3];
+            const auto codeAddress = start & ~GuestAddress{1};
+            if (threadCell == 0 || start == 0 ||
+                !memory.contains(threadCell, sizeof(GuestAddress), MemoryPermission::Write) ||
+                !memory.contains(codeAddress, 2, MemoryPermission::Execute)) {
+                reason = "pthread_create received an invalid guest thread cell or start routine";
+                return false;
+            }
+            GuestAddress token = 0;
+            try {
+                token = memory.mapAny(sizeof(GuestAddress),
+                                      MemoryPermission::Read | MemoryPermission::Write,
+                                      "pthread-guest-handle", alignof(GuestAddress));
+            } catch (const std::exception &error) {
+                reason = std::string("pthread_create could not allocate a guest thread handle: ") +
+                         error.what();
+                return false;
+            }
+            if (!writeValue(memory, threadCell, token)) {
+                memory.unmap(token);
+                reason = "pthread_create could not write the guest thread handle";
+                return false;
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                pthreadFrames_[&memory].push_back(
+                    PthreadFrame{registers.r[14], token, threadCell});
+                ++guestThreadTransfers_;
+            }
+            registers.r[0] = argument;
+            registers.r[1] = 0;
+            registers.r[2] = 0;
+            registers.r[3] = 0;
+            registers.r[14] = pthreadContinuationAddress_;
+            target = start;
+            return true;
+        });
     registerFunction(registry, "_pthread_mutex_init", "ndk-pthread-mutex-init",
                      [](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { const std::uint32_t zero = 0; r.r[0] = r.r[0] && writeValue(memory, r.r[0], zero) ? 0U : kErrnoInvalidArgument; return true; });
     registerFunction(registry, "_pthread_mutex_destroy", "ndk-pthread-mutex-destroy",
@@ -1163,10 +1275,31 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
                      [](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { const std::uint32_t zero = 0; r.r[0] = r.r[0] && writeValue(memory, r.r[0], zero) ? 0U : kErrnoInvalidArgument; return true; });
     registerFunction(registry, "_pthread_mutexattr_settype", "ndk-pthread-mutexattr-settype",
                      [](CpuRegisterState &r, GuestAddressSpace &, std::string &) { r.r[0] = 0; return true; });
-    registerFunction(registry, "_pthread_create", "ndk-pthread-create-boundary",
-                     [](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { if (r.r[0]) { const std::uint32_t zero = 0; writeValue(memory, r.r[0], zero); } r.r[0] = kErrnoNotImplemented; return true; });
-    registerFunction(registry, "_pthread_join", "ndk-pthread-join-boundary",
-                     [](CpuRegisterState &r, GuestAddressSpace &, std::string &) { r.r[0] = kErrnoNoSuchProcess; return true; });
+    registerFunction(registry, "_pthread_join", "ndk-pthread-join-guest-worker",
+                     [this](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) {
+                         std::lock_guard<std::mutex> lock(mutex_);
+                         auto found = completedPthreads_.find(&memory);
+                         if (found == completedPthreads_.end()) {
+                             r.r[0] = kErrnoNoSuchProcess;
+                             return true;
+                         }
+                         const auto token = r.r[0];
+                         const auto tokenIt = std::find(found->second.begin(), found->second.end(), token);
+                         if (tokenIt == found->second.end()) {
+                             r.r[0] = kErrnoNoSuchProcess;
+                             return true;
+                         }
+                         found->second.erase(tokenIt);
+                         try {
+                             memory.unmap(token);
+                         } catch (const std::exception &) {
+                             // The handle is an internal completion token; a
+                             // stale/unmapped token does not change join's
+                             // successful guest result.
+                         }
+                         r.r[0] = 0;
+                         return true;
+                     });
     registerFunction(registry, "_pthread_getschedparam", "ndk-pthread-getschedparam",
                      [](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { if (r.r[1]) { const std::uint32_t zero = 0; writeValue(memory, r.r[1], zero); } if (r.r[2]) { const std::uint32_t zero = 0; writeValue(memory, r.r[2], zero); } r.r[0] = 0; return true; });
     registerFunction(registry, "_pthread_setschedparam", "ndk-pthread-setschedparam",
@@ -1225,6 +1358,16 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
 std::uint64_t ShimAdapter::callCount() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return calls_;
+}
+
+std::uint64_t ShimAdapter::guestThreadTransferCount() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return guestThreadTransfers_;
+}
+
+std::uint64_t ShimAdapter::guestThreadCompletionCount() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return guestThreadCompletions_;
 }
 
 std::uint64_t ShimAdapter::genericCallCount() const noexcept {

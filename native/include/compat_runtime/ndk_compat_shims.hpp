@@ -10,6 +10,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace radek::compat_runtime::ndk {
 
@@ -36,9 +37,23 @@ class ShimAdapter {
     std::map<GuestAddressSpace *, GuestAddress> strtokCursor_;
     std::map<GuestAddressSpace *, GuestAddress> environCells_;
     std::map<GuestAddressSpace *, GuestAddress> errnoCells_;
+    struct PthreadFrame {
+        GuestAddress callerReturnAddress = 0;
+        GuestAddress threadToken = 0;
+        GuestAddress threadCell = 0;
+    };
+    std::map<GuestAddressSpace *, std::vector<PthreadFrame>> pthreadFrames_;
+    std::map<GuestAddressSpace *, std::vector<GuestAddress>> completedPthreads_;
+    std::uint64_t guestThreadTransfers_ = 0;
+    std::uint64_t guestThreadCompletions_ = 0;
+    GuestAddress pthreadContinuationAddress_ = 0;
 
     void registerFunction(ShimRegistry &registry, const std::string &symbol,
                           const std::string &adapterName, Invoke invoke);
+    void registerTransferFunction(
+        ShimRegistry &registry, const std::string &symbol, const std::string &adapterName,
+        std::function<bool(CpuRegisterState &, GuestAddressSpace &, GuestAddress &,
+                           std::string &)> invoke);
     void registerGenericCandidate(ShimRegistry &registry, const char *symbol,
                                   const char *family);
     void registerExceptionBoundary(ShimRegistry &registry, const std::string &symbol,
@@ -48,6 +63,8 @@ class ShimAdapter {
     void registerBindings(ShimRegistry &registry);
 
     std::uint64_t callCount() const noexcept;
+    std::uint64_t guestThreadTransferCount() const noexcept;
+    std::uint64_t guestThreadCompletionCount() const noexcept;
     std::uint64_t genericCallCount() const noexcept;
     std::size_t genericProviderCount() const noexcept;
     std::size_t typedProviderCount() const noexcept;
