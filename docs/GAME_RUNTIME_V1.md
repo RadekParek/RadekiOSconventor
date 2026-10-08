@@ -1,13 +1,18 @@
 # game-runtime-v1: boot-attempt APK contract
 
-A `game-runtime-v1` APK packs a real iOS game executable and its bundle, runs
-the actual guest boot on-device, and shows that boot as a minimal diagnostic
-log. Guest execution stops at a documented boundary — the first actually-used
-unimplemented import, or the bounded instruction/time budget when the guest
-stays inside its own code — and the Android launcher remains open with the stop
-reason rather than crashing.
-It is not a conversion, not a static recompilation, and not gameplay; it never
-shows a preview or menu.
+A `game-runtime-v1` APK packs a real iOS game executable and its bundle and
+runs the actual guest boot on-device. The Android runner does **not** impose an
+instruction-count or wall-clock cutoff: once the guest enters its own render
+loop it is allowed to stay alive for gameplay. Execution stops only at a real
+runtime boundary (an unimplemented import, guest exception, memory/execution
+fault, or unavailable backend) or when setup fails, and the launcher remains
+open with the exact reason rather than crashing.
+It is still not a complete static recompilation contract: framework/input
+coverage must be sufficient for the particular game before gameplay can be
+claimed. The runtime does not show a preview shell in place of the guest.
+The host-only `radek-gameboot --diagnostic-probe` command opts into a finite
+time window so CI/CLI probes can return JSON for a guest that intentionally
+runs forever; that flag is never passed by the APK.
 
 ## Native GL, not a reimplementation
 
@@ -37,17 +42,17 @@ a named diagnostic: a rendered frame is guest output, not gameplay evidence.
    data files; refused accesses are listed in the report's `guestFileSystem`
    block instead of being invented.
 3. Unimplemented imports are bound to abort-on-call traps. The guest executes
-   real instructions from the Mach-O entry point until it calls (or touches
-   data of) a documented boundary: the first unimplemented import it touches,
-   or the bounded instruction/time budget when the guest stays inside its own
-   code. Implemented adapters run for real
+   real instructions from the Mach-O entry point without an artificial
+   instruction/time budget. It continues while implemented adapters and the
+   guest's own render loop are active, and stops only when it calls (or touches
+   data of) a documented runtime boundary. Implemented adapters run for real
    instead of trapping: the native OpenGL ES 1.1 forwarding (below), libSystem
    memory/string/malloc and the file/stdio/math/time shims served by the virtual
    file system, the ARM EABI compiler-runtime helpers, the bounded Objective-C
    runtime, the AudioToolbox session state calls, and the bounded
    application-lifecycle chain
    (`UIApplicationMain` -> delegate instantiation -> `applicationDidFinishLaunching:`
-   -> bounded service of the queued background-thread body).
+   -> single-guest-CPU service of the queued background-thread body).
 4. The launcher is **fullscreen** (`SYSTEM_UI_FLAG_IMMERSIVE_STICKY` plus
    layout through the display cutout) and runs in **sensor landscape** while the
    guest boots, showing only the game: the recovered splash frames are shown
@@ -60,12 +65,13 @@ a named diagnostic: a rendered frame is guest output, not gameplay evidence.
    frame the guest renders covers the boot screen. The diagnostic panel stays
    hidden while the guest runs and is revealed, after the launcher switches back
    to **portrait**, when the attempt stops.
-5. The launcher shows loader/trap/instruction progress in that panel. When guest
-   execution stops or setup fails, the launcher keeps the fullscreen diagnostic
-   screen open; it does not throw an Android crash or show a preview. The stop
-   reason is reported as what it is: a named unimplemented import trap, the
-   bounded `TIME_LIMIT`/`INSTRUCTION_LIMIT` budget with the executed instruction
-   count (explicitly *not* an unimplemented import), a guest exception, a memory
+5. The launcher shows loader/trap/instruction progress in that panel. While the
+   unlimited device guest is running, the panel is hidden behind the black game
+   viewport. When guest execution stops or setup fails, the launcher keeps the
+   fullscreen diagnostic screen open; it does not throw an Android crash or show
+   a preview. The stop reason is reported as what it is: a named unimplemented
+   import trap, an explicitly bounded host/legacy `TIME_LIMIT` or
+   `INSTRUCTION_LIMIT` report (not used by the APK), a guest exception, a memory
    or execution fault, or an unavailable CPU backend. A JSON `null` trap name is
    never printed as an import called `null`.
 6. Every report keeps `status: "not_runnable"`. Executed instructions are
@@ -134,11 +140,11 @@ and digest against the report.
   shown fullscreen, each one exactly once, and the sequence stays on the last
   frame instead of cycling; the guest's own EGL frames take over as soon as the
   guest renders. The diagnostics panel stays hidden while the guest runs.
-- When the attempt stops for any reason (unimplemented import, budget,
-  fault, unavailable backend), the launcher switches back to **portrait** and
-  reveals the diagnostic log, so the stop reason is readable without touching
-  anything. The activity declares `configChanges` for orientation so rotating
-  the device never restarts the guest.
+- When the attempt stops for any reason (unimplemented import, guest exception,
+  fault, unavailable backend, or setup failure), the launcher switches back to
+  **portrait** and reveals the diagnostic log, so the stop reason is readable
+  without touching anything. The activity declares `configChanges` for
+  orientation so rotating the device never restarts the guest.
 
 ## Angry Birds v1.0 status (tracked fixture)
 
@@ -149,34 +155,37 @@ and digest against the report.
   Darwin-only imports that Android has no same-name export for are now bound
   through the translation layer described below (stream cells, ctype sweep,
   EAGL keys, errno cell, rune locale, CoreFoundation class token, OpenAL).
-- Boot: entry point reached, **2,000,000 guest instructions executed** (the
-  bounded entry budget). The runtime enters `_main`, performs the
-  `NSAutoreleasePool +new` setup, enters `UIApplicationMain`, instantiates the
-  image's own `AppController` delegate, wires it into the `UIApplication`
-  singleton, delivers `applicationDidFinishLaunching:` to the real guest
-  implementation, and keeps running inside the app: it builds its UIKit
-  window/EAGL view (`-[UIView layer]` -> `CAEAGLLayer`, `numberWithBool:`,
+- Boot: the previous host diagnostic run reached **2,000,000 guest
+  instructions** only because it used the old bounded probe policy. The device
+  runner now uses zero for both limits (unlimited) and therefore does not stop
+  the Angry Birds guest merely because an instruction counter expired. It
+  enters `_main`, performs the `NSAutoreleasePool +new` setup, enters
+  `UIApplicationMain`, instantiates the image's own `AppController` delegate,
+  wires it into the `UIApplication` singleton, delivers
+  `applicationDidFinishLaunching:` to the real guest implementation, and keeps
+  running inside the app: it builds its UIKit window/EAGL view
+  (`-[UIView layer]` -> `CAEAGLLayer`, `numberWithBool:`,
   `dictionaryWithObjectsAndKeys:`, `EAGLContext initWithAPI:` /
   `setCurrentContext:`, `addSubview:`, `makeKeyAndVisible`), starts its engine
   render setup (the GLES calls are forwarded to the host driver), and asks for
   its own bundle data through the guest filesystem.
-- Stop: `INSTRUCTION_LIMIT` — the attempt ends at the bounded budget, not at an
-  unimplemented call: `trappedImport` is empty and `trapCalls` is `0` for this
-  image. When the guest does touch an unimplemented import the attempt still
-  stops there with the trap named, exactly as before.
+- Stop: on the device, only a named unimplemented import, guest exception, memory
+  or execution fault, unavailable backend, or setup failure ends the attempt.
+  The host `--diagnostic-probe` flag may still return `TIME_LIMIT` for CI and
+  reports that as a host-only diagnostic, never as an APK gameplay cutoff.
 - Report: `lifecycle.applicationMainEntered: true`,
-  `applicationMainReturned: false` (the boot was still running when the budget
-  ended), `delegateClassName: "AppController"`, ten recorded startup-chain
-  events, and the guest filesystem's refusals are named when no bundle mount is
+  `delegateClassName: "AppController"`, startup-chain events, and the guest
+  filesystem's refusals are named when no bundle mount is
   configured.
 - The VFP unit is enabled for the guest (`CPACR` CP10/CP11 access and
   `FPEXC.EN`), because the ARMv6 image uses scalar VFP from its first delegate
   frame on; without it the attempt stopped on a decode fault at `vpush`.
 - The host suite (`tests/test_gameruntime.py`) and CI pin the *shape* of this
-  behavior (entry point reached, a documented stop boundary — a named trapped
-  import or a bounded execution limit — and a non-empty startup chain); the
-  manifest from the CI run is uploaded as
-  `angrybirds-gameboot-artifacts`.
+  behavior (entry point reached, a documented host-probe boundary — a named
+  trapped import, guest/backend fault, or explicit diagnostic timeout — and a
+  non-empty startup chain); the manifest from the CI run is uploaded as
+  `angrybirds-gameboot-artifacts`. The APK/JNI path is separately asserted to
+  leave all execution budgets at zero.
 - Remaining honest gap: on the host the OpenGL ES calls have no driver to
   forward to, so nothing is rendered there; on Android the same calls are
   forwarded to the platform GLES/EGL driver (see the GL forwarding section).

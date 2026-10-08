@@ -56,9 +56,11 @@ import java.util.zip.Inflater;
  * such as SPLASHES.png + SPLASHES.dat) as an automatically advancing boot
  * animation while running the real guest boot through libcompat_runtime_v1.so.
  * The splash never needs a touch: it advances on its own while the guest boots
- * and stops on a stable frame when the boot attempt ends. When guest execution
- * stops or setup fails, the fullscreen diagnostic panel stays open with the
- * exact stop reason instead of crashing.
+ * and stops on a stable frame when the boot attempt ends. The device runner has
+ * no arbitrary instruction or wall-clock budget, so a game loop is allowed to
+ * remain alive for gameplay; it stops only for a real runtime boundary or setup
+ * failure. When that happens, the fullscreen diagnostic panel stays open with
+ * the exact stop reason instead of crashing.
  */
 public final class GameBootActivity extends Activity {
     private static final String RUNTIME_LIBRARY = "compat_runtime_v1";
@@ -90,6 +92,10 @@ public final class GameBootActivity extends Activity {
     private ImageView splashImageView;
     private TextView splashCaptionView;
     private SurfaceView gameSurfaceView;
+    // Surface callbacks can run before System.loadLibrary completes. Retain the
+    // latest holder surface so the runtime gets the real window as soon as its
+    // JNI entry is available instead of silently staying on an offscreen pbuffer.
+    private volatile Surface latestGameSurface;
     private LinearLayout overlayView;
     private final List<SplashFrame> activeSplashFrames = new ArrayList<>();
     private int currentSplashIndex = 0;
@@ -129,11 +135,14 @@ public final class GameBootActivity extends Activity {
      */
     private static native void setGameSurface(Surface surface);
 
-    private static void publishGameSurface(Surface surface) {
+    private void publishGameSurface(Surface surface) {
+        latestGameSurface = surface;
         try {
             setGameSurface(surface);
         } catch (Throwable ignored) {
-            // No native runtime in this process (unit tests): nothing to attach.
+            // Surface creation commonly wins the race with System.loadLibrary.
+            // The boot thread retries latestGameSurface immediately after the
+            // runtime loads; unit tests also run safely without JNI.
         }
     }
 
@@ -322,8 +331,9 @@ public final class GameBootActivity extends Activity {
     }
 
     /**
-     * Human-readable sentence for a bounded-execution stop. The runtime ends a
-     * boot attempt at a fixed instruction/time budget, a memory fault, or an
+     * Human-readable sentence for a bounded-execution stop in a diagnostic
+     * report. The device game path is unlimited, but old/host probe reports can
+     * still contain an explicit instruction/time budget, a memory fault, or an
      * exception; each of those is a different statement and must not be reported
      * as if the guest had called an unimplemented import.
      */
@@ -435,7 +445,10 @@ public final class GameBootActivity extends Activity {
         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
 
         FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(Color.rgb(6, 9, 16));
+        // Keep the game viewport genuinely black. The old blue-black value was
+        // visible in the bars around the recovered 480x320 splash and made the
+        // forced game APK look like a diagnostic shell.
+        root.setBackgroundColor(Color.BLACK);
 
         splashImageView = new ImageView(this);
         splashImageView.setScaleType(ImageView.ScaleType.FIT_CENTER);
@@ -447,6 +460,7 @@ public final class GameBootActivity extends Activity {
         // EAGL drawable to it through EGL). It sits above the splash so the game
         // covers the boot screen as soon as it renders.
         gameSurfaceView = new SurfaceView(this);
+        gameSurfaceView.setBackgroundColor(Color.BLACK);
         gameSurfaceView.setContentDescription("Guest game surface");
         gameSurfaceView.setZOrderOnTop(true);
         gameSurfaceView.getHolder().addCallback(new SurfaceHolder.Callback() {
@@ -506,9 +520,9 @@ public final class GameBootActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         GradientDrawable logBg = new GradientDrawable();
-        logBg.setColor(Color.argb(225, 11, 16, 29));
+        logBg.setColor(Color.argb(232, 0, 0, 0));
         logBg.setCornerRadius(dp(10));
-        logBg.setStroke(dp(1), Color.rgb(38, 56, 89));
+        logBg.setStroke(dp(1), Color.rgb(64, 64, 64));
 
         logView = new TextView(this);
         logView.setTextSize(11);
@@ -578,6 +592,10 @@ public final class GameBootActivity extends Activity {
                         // libcompat_runtime_v1 may be linked directly or carry its own dependency.
                     }
                     System.loadLibrary(RUNTIME_LIBRARY);
+                    // surfaceCreated/surfaceChanged can both have fired before
+                    // the library was loaded. Re-publish the retained surface
+                    // now, before the guest creates its EAGL drawable.
+                    publishGameSurface(latestGameSurface);
                 } catch (Throwable error) {
                     appendLine("Runtime library failed to load: " + error);
                     showTerminalState("Runtime library unavailable", "Check that the APK includes every native dependency. The diagnostic screen will remain open.");

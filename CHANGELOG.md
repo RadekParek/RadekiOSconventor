@@ -4,6 +4,35 @@ All notable changes to RadekiOSConventor. Every entry states what was verified a
 what was **not**: analysis, triage, name mappings and host static-recompilation
 coverage never mean a linked game, a playable conversion or a device-tested APK.
 
+## 2026-10-08 — Unlimited device guest loop and true-black generated launchers
+
+### The device game path no longer expires at 2,000,000 instructions
+
+The Android `game-runtime-v1` path now treats zero instruction and zero wall-clock
+limits as **unlimited**. The Unicorn backend no longer carries hidden 100-million/
+60-second ceilings, and the lifecycle adapter no longer cancels the guest after
+an eight-frame service window. A game loop can remain alive for rendering and
+input instead of being turned into a misleading `INSTRUCTION_LIMIT` diagnostic.
+The host `radek-gameboot` probe passes an explicit `--diagnostic-probe` flag so CI
+can still produce finite JSON for an infinite guest; that opt-in policy is not
+used by the APK/JNI entry.
+
+### Generated launchers use black, not blue-black, presentation chrome
+
+Both the statically converted launcher template and the forced game-runtime
+launcher now set the window, viewport, letterbox, surface, and diagnostic panel
+backgrounds to true black. This keeps the recovered game splash and EGL output
+from being framed by the former dark-blue bars.
+
+### The 71% same-name figure is explained at the point of use
+
+The detail card now says that `181/254 = 71.26%` is an exact public-NDK-name
+measure, not total Android triage. The other 73 Angry Birds imports require
+reviewed compatibility implementations, semantic framework targets, or
+compiler-runtime/unwind handling; those are deliberately separate categories.
+The reviewed mapping measure can therefore be 254/254 without pretending that
+all 254 names are direct Android exports.
+
 ## 2026-10-08 — Darwin-only translation layer + game-only launcher presentation
 
 ### Darwin-only imports now have translation-layer adapters

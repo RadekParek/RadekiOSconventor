@@ -3,7 +3,7 @@
         android:allowBackup="false"
         android:icon="@drawable/generated_converted_icon"
         android:label="__RADEK_PLACEHOLDER_LABEL__"
-        android:theme="@android:style/Theme.Material.NoActionBar">
+        android:theme="@style/RadekConvertedBlackTheme">
         <activity
             android:name="dev.radek.generated.MainActivity"
             android:exported="true">

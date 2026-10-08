@@ -381,7 +381,7 @@ internal class GameRuntimeApkBuilder(private val context: Context) {
                 .put("installableAndroidPackage", true)
                 .put("runtimeExecution", "NOT_TESTED")
                 .put("gamePlayability", "NOT_TESTED")
-                .put("bootBehavior", "ATTEMPTS_GUEST_BOOT_THEN_LEAVES_DIAGNOSTICS_OPEN_AT_FIRST_UNIMPLEMENTED_CALL")
+                .put("bootBehavior", "ATTEMPTS_GUEST_BOOT_WITH_UNLIMITED_DEVICE_EXECUTION_THEN_LEAVES_DIAGNOSTICS_OPEN_AT_REAL_RUNTIME_BOUNDARY")
                 .put("signing", JSONObject()
                     .put("schemes", JSONArray().put("v1").put("v2").put("v3"))
                     .put("certificateSha256", certificateHash))
@@ -393,7 +393,7 @@ internal class GameRuntimeApkBuilder(private val context: Context) {
             reportContext.save(dir, report)
             finalized = true
             backupFile.delete()
-            progress(100, "Game-runtime APK ready; boot diagnostics stay open at the first unimplemented call")
+            progress(100, "Game-runtime APK ready; device execution is unlimited and diagnostics remain available at a real runtime boundary")
             return conversion
         } catch (error: Throwable) {
             // An OutOfMemoryError is an Error, not an Exception: catching it

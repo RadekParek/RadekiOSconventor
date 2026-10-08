@@ -51,22 +51,36 @@ std::vector<std::uint8_t> readMainBinary(const char *path) {
 } // namespace
 
 int main(int argc, char **argv) {
-    if (argc != 2 && argc != 3) {
-        std::cerr << "usage: radek-gameboot <macho-main-executable> [bundle-payload-directory]\n"
-                     "  The optional second argument is the extracted .app directory the guest's\n"
+    if (argc < 2 || argc > 4) {
+        std::cerr << "usage: radek-gameboot <macho-main-executable> [bundle-payload-directory] [--diagnostic-probe]\n"
+                     "  The optional payload directory is the extracted .app directory the guest's\n"
                      "  own file reads are served from; without it every guest file access is\n"
-                     "  refused with a named diagnostic instead of inventing file contents.\n";
+                     "  refused with a named diagnostic instead of inventing file contents.\n"
+                     "  The optional --diagnostic-probe flag adds a host-only time window so a\n"
+                     "  command-line probe returns even when a real game enters its main loop.\n";
         return 1;
     }
     try {
+        const char *payloadDirectory = nullptr;
+        bool diagnosticProbe = false;
+        for (int index = 2; index < argc; ++index) {
+            if (std::string(argv[index]) == "--diagnostic-probe") {
+                diagnosticProbe = true;
+            } else if (payloadDirectory == nullptr) {
+                payloadDirectory = argv[index];
+            } else {
+                std::cerr << "unknown or duplicate radek-gameboot argument: " << argv[index] << "\n";
+                return 1;
+            }
+        }
         const auto bytes = readMainBinary(argv[1]);
         // The guest's own bundle reads are served from directories this front end
         // chose. The bundle mount is read-only; the fabricated NSHomeDirectory
         // results (Documents/Library/"~") get a writable scratch directory.
         auto &files = radek::compat_runtime::guestFileSystem();
-        if (argc == 3) {
-            files.mount(radek::compat_runtime::bundleGuestPath(), argv[2], false);
-            std::string scratch = std::string(argv[2]) + "/../radek-home";
+        if (payloadDirectory != nullptr) {
+            files.mount(radek::compat_runtime::bundleGuestPath(), payloadDirectory, false);
+            std::string scratch = std::string(payloadDirectory) + "/../radek-home";
             files.mount("/Documents", scratch + "/Documents", true);
             files.mount("/Library", scratch + "/Library", true);
         }
@@ -89,6 +103,13 @@ int main(int argc, char **argv) {
         const auto cpu = radek::compat_runtime::createArm32CpuBackend();
         radek::compat_runtime::BootAttemptRunner runner(shims, *cpu, traps,
                                                        objcShims.lifecycleHooks());
+        if (diagnosticProbe) {
+            // This limit belongs only to the host's JSON probe. The Android JNI
+            // entry leaves both values at zero, which means unlimited execution
+            // for the installed game APK.
+            runner.setEntryBudget(0, 20'000'000);
+            runner.setMainThreadInstructionBudget(0, 20'000'000);
+        }
         radek::Json report = runner.run(bytes, true);
 
         // Compiler-runtime observability: how much of the guest's integer

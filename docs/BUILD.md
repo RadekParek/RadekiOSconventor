@@ -46,7 +46,7 @@ entry routine runs through JNI and displays the message recovered from the IPA, 
 action. Everything else can be turned, via **Force convert to game APK**, into a separately named
 `game-runtime-v1` boot-attempt APK. It packages the selected 32-bit ARM executable, bundle resources,
 `libcompat_runtime_v1.so`, and its required `libunicorn.so` dependency. It attempts the actual guest
-boot and stops at a documented boundary (first unimplemented import, or the bounded instruction/time budget); the diagnostic screen remains open rather than
+boot without an artificial instruction/time cutoff and stops at a real documented boundary (first unimplemented import, guest exception, memory/execution fault, unavailable backend, or setup failure); the diagnostic screen remains open rather than
 crashing. This is not a playable conversion. A source-free preview shell with the IPA app name and
 recovered icon remains available as an explicit fallback; it contains no iOS executable or game
 code and visibly says it is only a preview. Full analysis stays in the library entry and machine-
