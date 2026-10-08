@@ -51,10 +51,13 @@ void appendImportArrays(radek::Json &report, const radek::Json &loader) {
 // way real process startup does. Returns false when the stack cannot be
 // mapped or written; the caller must treat that as a failed boot setup.
 bool prepareBootStack(GuestAddressSpace &addressSpace, CpuRegisterState &registers) {
-    // Real iOS main-thread stacks are ~1 MiB and game engines nest deeply on
-    // top of that; a 64 KiB probe stack overflows into whatever is mapped
-    // below it and then faults on a runtime page boundary.
-    constexpr std::size_t stackSize = 8U * 1024U * 1024U;
+    // Real iOS main-thread stacks are roughly 1 MiB, but this compatibility
+    // boundary executes framework callbacks synchronously on the one guest CPU.
+    // Several UIKit/Foundation startup continuations can remain nested while
+    // the translated app reaches its first run-loop turn, so keep a generous
+    // bounded stack rather than allowing a downward spill into the loader's
+    // dynamic-address guard range.
+    constexpr std::size_t stackSize = 32U * 1024U * 1024U;
     // Frame (all offsets from the 16-aligned SP, matching dyld's layout of
     // argc followed by argv pointers, envp pointers, then strings):
     //   SP+0:  argc = 1
@@ -253,6 +256,19 @@ radek::Json BootAttemptRunner::run(const std::vector<std::uint8_t> &mainBinary,
     report["unresolvedSymbols"] = radek::Json::array();
     report["trappedSymbols"] = radek::Json::array();
     report["unboundNlistSymbols"] = radek::Json::array();
+    radek::Json executionPolicy = radek::Json::object();
+    executionPolicy["instructionLimit"] = entryInstructionBudget_;
+    executionPolicy["timeLimitMicros"] = entryTimeLimitMicros_;
+    executionPolicy["mainThreadInstructionLimit"] = mainThreadInstructionBudget_;
+    executionPolicy["mainThreadTimeLimitMicros"] = mainThreadTimeLimitMicros_;
+    const bool unlimited = entryInstructionBudget_ == 0 && entryTimeLimitMicros_ == 0 &&
+                           mainThreadInstructionBudget_ == 0 && mainThreadTimeLimitMicros_ == 0;
+    executionPolicy["unlimited"] = unlimited;
+    executionPolicy["deviceGameplayPolicy"] = unlimited;
+    executionPolicy["note"] = unlimited
+        ? "No artificial instruction or wall-clock cutoff; execution ends at a real runtime boundary."
+        : "Explicit diagnostic limits are active; this is not the Android game APK policy.";
+    report["executionPolicy"] = std::move(executionPolicy);
 
     if (!authorizationConfirmed) {
         report["reason"] = "User authorization was not confirmed.";
@@ -383,7 +399,11 @@ radek::Json BootAttemptRunner::run(const std::vector<std::uint8_t> &mainBinary,
     report["functionOrigin"] = functionOrigin;
     report["execution"]["functionOrigin"] = functionOrigin;
 
-    constexpr std::uint32_t kBootMainThreadFrames = 8;
+    // Zero is the unlimited value. The device path must leave the guest's
+    // render/input loop alive instead of cancelling it after a handful of
+    // synthetic startup frames. A host diagnostic may still set an explicit
+    // lifecycle limit through the hook when it needs a finite probe.
+    constexpr std::uint32_t kBootMainThreadFrames = 0;
     if (lifecycle_.setMainThreadServiceLimit)
         lifecycle_.setMainThreadServiceLimit(addressSpace, kBootMainThreadFrames);
     auto result = cpu_.executeGuestFunction(prepared, memory, registers);
@@ -397,8 +417,9 @@ radek::Json BootAttemptRunner::run(const std::vector<std::uint8_t> &mainBinary,
     mainLoop["frameLimit"] = static_cast<std::uint64_t>(kBootMainThreadFrames);
     // A completed startup chain may leave the app's background thread queued
     // (`+[NSThread detachNewThreadSelector:...]`). The runtime cannot start a
-    // second host thread, so the queued body runs on the same guest CPU with its
-    // own bounded budget and its own report section.
+    // second host thread, so the queued body runs on the same guest CPU. It is
+    // unlimited on the device, just like the entry, and has its own report
+    // section when a diagnostic probe eventually stops it.
     if (result.status == CpuExecutionStatus::Returned && lifecycle_.prepareMainThreadEntry) {
         CpuRegisterState mainThreadRegisters = result.registers;
         GuestAddress mainThreadEntry = 0;

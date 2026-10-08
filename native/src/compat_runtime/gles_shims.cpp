@@ -237,6 +237,7 @@ struct Forwarder::Impl {
     ArrayState texCoordArray;
     ArrayState normalArray;
 
+    std::uint64_t guestCalls = 0;
     std::uint64_t forwarded = 0;
     std::uint64_t refused = 0;
     std::uint64_t frames = 0;
@@ -583,6 +584,7 @@ void Forwarder::registerBindings(ShimRegistry &registry) {
         impl.nextCallout += 4;
         binding.invoke = [&impl, invoke](CpuRegisterState &registers, GuestAddressSpace &memory,
                                          std::string &reason) {
+            ++impl.guestCalls;
             Args args{registers, memory, reason};
             try {
                 return invoke(args);
@@ -1229,6 +1231,7 @@ bool Forwarder::drawableReady() const { return impl_->egl.current && impl_->egl.
 bool Forwarder::presentingToWindow() const { return impl_->egl.windowSurface; }
 std::uint32_t Forwarder::drawableWidth() const { return impl_->drawableWidth; }
 std::uint32_t Forwarder::drawableHeight() const { return impl_->drawableHeight; }
+std::uint64_t Forwarder::guestCallsObserved() const { return impl_->guestCalls; }
 std::uint64_t Forwarder::forwardedCalls() const { return impl_->forwarded; }
 std::uint64_t Forwarder::refusedCalls() const { return impl_->refused; }
 std::uint64_t Forwarder::framesPresented() const { return impl_->frames; }

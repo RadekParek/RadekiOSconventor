@@ -8,7 +8,8 @@
 namespace radek::compat_runtime {
 namespace {
 constexpr std::uint64_t kGuestAddressSpaceSize = std::uint64_t{1} << 32;
-constexpr std::size_t kDirtyPageBytes = 4096;
+constexpr std::size_t kGuestPageBytes = 4096;
+constexpr std::size_t kDirtyPageBytes = kGuestPageBytes;
 
 bool isPowerOfTwo(std::size_t value) { return value != 0 && (value & (value - 1)) == 0; }
 
@@ -85,11 +86,17 @@ GuestAddress GuestAddressSpace::mapAny(std::size_t size, MemoryPermission permis
                                        std::string name, std::size_t alignment) {
     if (size == 0)
         throw std::invalid_argument("guest mapping size must be non-zero");
+    // Unicorn maps the guest address space a page at a time. Keep every
+    // dynamically allocated region page-shaped even when a shim requested a
+    // four-byte cell or a short C string; the extra zeroed tail is still inside
+    // the same bounded mapping and prevents a later engine synchronization from
+    // turning an otherwise valid guest allocation into a backend fault.
+    const auto mappedSize = static_cast<std::size_t>(alignUp(size, kGuestPageBytes));
     std::uint64_t candidate = alignUp(nextDynamicAddress_, alignment);
-    while (candidate + size <= 0xF0000000ULL) {
+    while (candidate + mappedSize <= 0xF0000000ULL) {
         const auto address = static_cast<GuestAddress>(candidate);
         auto next = regions_.lower_bound(address);
-        bool available = next == regions_.end() || candidate + size <= next->first;
+        bool available = next == regions_.end() || candidate + mappedSize <= next->first;
         if (available && next != regions_.begin()) {
             const auto previous = std::prev(next);
             const std::uint64_t previousEnd = static_cast<std::uint64_t>(previous->second.view.base) +
@@ -97,8 +104,8 @@ GuestAddress GuestAddressSpace::mapAny(std::size_t size, MemoryPermission permis
             available = candidate >= previousEnd;
         }
         if (available) {
-            const auto result = mapAt(address, size, permissions, std::move(name));
-            nextDynamicAddress_ = static_cast<GuestAddress>(alignUp(candidate + size, alignment));
+            const auto result = mapAt(address, mappedSize, permissions, std::move(name));
+            nextDynamicAddress_ = static_cast<GuestAddress>(alignUp(candidate + mappedSize, alignment));
             return result;
         }
         if (next != regions_.end())

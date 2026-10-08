@@ -69,6 +69,12 @@ jobs:
             radek-ccache-${{ runner.os }}-
       - name: Configure Gradle and validate wrapper
         uses: gradle/actions/setup-gradle@v5
+      # Install this before every host-test stage. The sanitizer suite imports
+      # radek.pipeline, which imports the optional game lifter at module load
+      # time; installing it only after the sanitizer step makes CI fail before
+      # the later host-test step can install it.
+      - name: Install optional host lifter dependency (capstone)
+        run: python3 -m pip install --disable-pip-version-check --no-cache-dir 'capstone==5.0.7'
       - name: Build native analyzer and run C++ runtime tests
         run: python3 tools/build_native.py
       - name: Configure and run CMake compat-runtime-v1 with pinned Unicorn ARM32 host tests
@@ -86,11 +92,9 @@ jobs:
           python3 compat-runtime-v1/tools/smoke_db.py validate
       - name: AddressSanitizer and UndefinedBehaviorSanitizer tests
         run: python3 tools/ci_run.py bash tools/test_sanitized.sh
-      # The host static-recompilation plan (radek/plan.py) uses this optional
-      # package to run the game lifter over real inputs. Without it the plan
-      # reports UNAVAILABLE and its tests skip, so this stays a soft dependency.
-      - name: Install optional host lifter dependency (capstone)
-        run: python3 -m pip install --disable-pip-version-check --no-cache-dir 'capstone==5.0.7'
+      # The host static-recompilation plan (radek/plan.py) uses this package
+      # to run the game lifter over real inputs. It is installed above, before
+      # the sanitizer and host test stages that import the pipeline.
       - name: Host tests and placeholder/complete-game separation regressions
         run: python3 tools/ci_run.py python3 -m unittest discover -v
       - name: Probe Angry Birds game-runtime boot attempt
@@ -106,7 +110,7 @@ jobs:
               ("artifact is the game APK name", manifest["artifact"]["name"] == "AngryBirds_v1.0_os30-game.apk"),
               ("thin 32-bit ARM slice staged", manifest["executable"]["format"] == "thin-macho32" and manifest["executable"]["cpuType"] == 12),
               ("boot was probed", probe["status"] == "PROBED"),
-              ("imports bound to traps", probe["loaderStatus"] == "LOADED_WITH_TRAPS" and probe["unresolvedSymbols"] == 0),
+              ("imports resolved", probe["loaderStatus"] in ("LOADED", "LOADED_WITH_TRAPS") and probe["unresolvedSymbols"] == 0),
               ("entry point reached", probe["entryPointReached"] is True),
               ("guest instructions executed", probe["instructions"] > 0),
               # The Darwin-only imports are served by the translation layer,

@@ -19,8 +19,11 @@ constexpr GuestAddress kReturnSentinel = 0xeffff000;
 constexpr std::uint32_t kCpsrThumbBit = 1U << 5;
 constexpr std::uint32_t kCpsrModeMask = 0x1f;
 constexpr std::uint32_t kCpsrUserMode = 0x10;
-constexpr std::uint64_t kMaximumInstructionLimit = 100000000;
-constexpr std::uint64_t kMaximumTimeLimitMicros = 60000000;
+// An execution limit of zero is intentionally unlimited. The Android launcher
+// must be able to keep the guest's main loop alive for gameplay; the host
+// diagnostic probe can still provide a finite opt-in time window through the
+// runner. Do not add a backend maximum here: it would silently recreate the
+// arbitrary stop that the game path is designed to avoid.
 // The iOS kernel hands user code a fully enabled VFP unit: CPACR grants
 // CP10/CP11 to EL0 and FPEXC.EN is set. Unicorn starts from a bare CPU, so a
 // guest `vpush`/`vmov`/`vadd` would otherwise decode as an invalid instruction
@@ -245,7 +248,9 @@ bool synchronizeEngineMappings(uc_engine *engine, const GuestMemoryCallbacks &me
 
 void codeHook(uc_engine *engine, std::uint64_t address, std::uint32_t, void *userData) {
     auto &state = *static_cast<HookState *>(userData);
-    if (state.instructions >= state.instructionLimit) {
+    // Unicorn's code hook is also the instruction counter. A zero limit means
+    // that it is observability-only and must never stop the guest.
+    if (state.instructionLimit != 0 && state.instructions >= state.instructionLimit) {
         state.instructionLimitHit = true;
         state.message = "guest function reached its instruction limit.";
         (void)uc_emu_stop(engine);
@@ -346,7 +351,7 @@ void memoryWriteHook(uc_engine *engine, uc_mem_type, std::uint64_t address, int 
     }
 }
 
-bool invalidMemoryHook(uc_engine *, uc_mem_type, std::uint64_t address, int size,
+bool invalidMemoryHook(uc_engine *engine, uc_mem_type type, std::uint64_t address, int size,
                        std::int64_t, void *userData) {
     auto &state = *static_cast<HookState *>(userData);
     state.memoryFault = true;
@@ -358,7 +363,43 @@ bool invalidMemoryHook(uc_engine *, uc_mem_type, std::uint64_t address, int size
     constexpr char digits[] = "0123456789abcdef";
     for (int shift = 28; shift >= 0; shift -= 4)
         state.message.push_back(digits[(address >> shift) & 0xf]);
-    state.message += " (" + std::to_string(size) + " byte(s)).";
+    state.message += " (" + std::to_string(size) + " byte(s), ";
+    switch (type) {
+    case UC_MEM_READ_UNMAPPED:
+    case UC_MEM_READ_PROT:
+        state.message += "read";
+        break;
+    case UC_MEM_WRITE_UNMAPPED:
+    case UC_MEM_WRITE_PROT:
+        state.message += "write";
+        break;
+    case UC_MEM_FETCH_UNMAPPED:
+    case UC_MEM_FETCH_PROT:
+        state.message += "fetch";
+        break;
+    default:
+        state.message += "unknown access";
+        break;
+    }
+    state.message += ").";
+    std::uint32_t pc = 0;
+    if (engine && readRegister(engine, UC_ARM_REG_PC, pc) == UC_ERR_OK) {
+        state.message += " pc=0x";
+        for (int shift = 28; shift >= 0; shift -= 4)
+            state.message.push_back(digits[(pc >> shift) & 0xf]);
+    }
+    if (state.memory && state.memory->regions) {
+        for (const auto &region : state.memory->regions()) {
+            const std::uint64_t end = static_cast<std::uint64_t>(region.base) + region.size;
+            if (address >= region.base && address < end) {
+                state.message += " mapped=" + region.name + "[0x";
+                for (int shift = 28; shift >= 0; shift -= 4)
+                    state.message.push_back(digits[(region.base >> shift) & 0xf]);
+                state.message += "+" + std::to_string(region.size) + "]";
+                break;
+            }
+        }
+    }
     return false;
 }
 
@@ -371,10 +412,8 @@ class UnicornArm32Backend final : public CpuBackend {
                               PreparedGuestFunction &prepared,
                               std::string &reason) const override {
         const auto address = function.entryPoint & ~GuestAddress{1};
-        if (address == 0 || !memory.read || !memory.regions || function.instructionLimit == 0 ||
-            function.instructionLimit > kMaximumInstructionLimit || function.timeLimitMicros == 0 ||
-            function.timeLimitMicros > kMaximumTimeLimitMicros) {
-            reason = "ARM32 guest function, memory callbacks, or execution limits are invalid.";
+        if (address == 0 || !memory.read || !memory.regions) {
+            reason = "ARM32 guest function or memory callbacks are invalid.";
             return false;
         }
         std::array<std::uint8_t, 4> firstInstruction{};
@@ -472,27 +511,40 @@ class UnicornArm32Backend final : public CpuBackend {
 
         bool returned = false;
         GuestAddress resumeAddress = function.entryPoint | (function.thumb ? 1U : 0U);
-        const auto deadline = std::chrono::steady_clock::now() +
-            std::chrono::microseconds(static_cast<std::int64_t>(function.timeLimitMicros));
-        while (hooks.instructions < function.instructionLimit) {
-            const auto now = std::chrono::steady_clock::now();
-            if (now >= deadline) {
-                hooks.timeLimitHit = true;
-                hooks.message = "guest function reached its time limit.";
-                break;
-            }
-            const auto remainingTime = std::chrono::duration_cast<std::chrono::microseconds>(deadline - now).count();
-            if (remainingTime <= 0) {
-                hooks.timeLimitHit = true;
-                hooks.message = "guest function reached its time limit.";
-                break;
+        const bool hasInstructionLimit = function.instructionLimit != 0;
+        const bool hasTimeLimit = function.timeLimitMicros != 0;
+        const auto deadline = hasTimeLimit
+            ? std::chrono::steady_clock::now() +
+                  std::chrono::microseconds(static_cast<std::int64_t>(function.timeLimitMicros))
+            : std::chrono::steady_clock::time_point::max();
+        // A zero count and zero timeout are Unicorn's no-limit values. In the
+        // normal Android path this loop therefore runs until the guest returns,
+        // reaches a trap, faults, or the process is otherwise stopped; there is
+        // no hidden instruction or one-minute backend ceiling.
+        while (!hasInstructionLimit || hooks.instructions < function.instructionLimit) {
+            std::uint64_t remainingTime = 0;
+            if (hasTimeLimit) {
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= deadline) {
+                    hooks.timeLimitHit = true;
+                    hooks.message = "guest function reached its time limit.";
+                    break;
+                }
+                const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(deadline - now).count();
+                if (micros <= 0) {
+                    hooks.timeLimitHit = true;
+                    hooks.message = "guest function reached its time limit.";
+                    break;
+                }
+                remainingTime = static_cast<std::uint64_t>(micros);
             }
 
             hooks.calloutDispatched = false;
-            const auto remaining = function.instructionLimit - hooks.instructions;
+            const auto remaining = hasInstructionLimit
+                ? function.instructionLimit - hooks.instructions
+                : std::uint64_t{0};
             status = uc_emu_start(engine, resumeAddress, kReturnSentinel,
-                                  static_cast<std::uint64_t>(remainingTime),
-                                  static_cast<std::size_t>(remaining));
+                                  remainingTime, static_cast<std::size_t>(remaining));
             if (hooks.memoryFault || hooks.instructionLimitHit || hooks.guestExceptionRaised)
                 break;
             if (status != UC_ERR_OK) {
@@ -509,10 +561,10 @@ class UnicornArm32Backend final : public CpuBackend {
                 break;
             }
             if (!hooks.calloutDispatched) {
-                if (hooks.instructions >= function.instructionLimit) {
+                if (hasInstructionLimit && hooks.instructions >= function.instructionLimit) {
                     hooks.instructionLimitHit = true;
                     hooks.message = "guest function reached its instruction limit.";
-                } else if (std::chrono::steady_clock::now() >= deadline) {
+                } else if (hasTimeLimit && std::chrono::steady_clock::now() >= deadline) {
                     hooks.timeLimitHit = true;
                     hooks.message = "guest function reached its time limit.";
                 } else {
@@ -539,7 +591,8 @@ class UnicornArm32Backend final : public CpuBackend {
         result.instructions = hooks.instructions;
         result.hasFaultAddress = hooks.hasFaultAddress;
         result.faultAddress = hooks.faultAddress;
-        if (hooks.instructionLimitHit || hooks.instructions >= function.instructionLimit) {
+        if (hooks.instructionLimitHit ||
+            (hasInstructionLimit && hooks.instructions >= function.instructionLimit)) {
             result.status = CpuExecutionStatus::InstructionLimit;
             result.message = hooks.message.empty() ? "guest function reached its instruction limit." : hooks.message;
         } else if (hooks.timeLimitHit) {

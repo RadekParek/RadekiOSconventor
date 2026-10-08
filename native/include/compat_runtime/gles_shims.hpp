@@ -63,6 +63,8 @@ class Forwarder {
     bool presentingToWindow() const;
     std::uint32_t drawableWidth() const;
     std::uint32_t drawableHeight() const;
+    /** Number of guest GLES imports entered, including calls refused by the host driver. */
+    std::uint64_t guestCallsObserved() const;
     std::uint64_t forwardedCalls() const;
     std::uint64_t refusedCalls() const;
     std::uint64_t framesPresented() const;

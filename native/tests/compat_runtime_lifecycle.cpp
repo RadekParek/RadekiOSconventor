@@ -12,8 +12,8 @@
 //   * `+[NSThread detachNewThreadSelector:...]` queues a background entry that
 //     `prepareQueuedMainThreadEntry` turns into an ABI-correct guest call;
 //   * `performSelectorOnMainThread:...` relays the selector into guest code and
-//     the bounded `sleepForTimeInterval:` callout cancels the thread after the
-//     configured number of iterations.
+//     the optional `sleepForTimeInterval:` diagnostic limit cancels the thread
+//     only when the test explicitly configures one.
 //
 // No Unicorn: every assertion is about adapter state and callout results, which
 // is exactly what the boot runner consumes.
@@ -217,7 +217,7 @@ int main() {
             CHECK(reason.find("null class-name") != std::string::npos);
         }
 
-        // Background thread detach + bounded main-thread service.
+        // Background thread detach + explicitly bounded diagnostic service.
         const auto delegate = [&]() {
             // `+[UIApplication sharedApplication] -delegate` returns the address
             // the adapter instantiated for this image.
@@ -275,8 +275,8 @@ int main() {
             CHECK(!outcome.mainThreadQueueExhausted);
         }
         {
-            // Bounded service: two sleeps cancel the virtual thread, so the
-            // guest loop exits by itself instead of running forever.
+            // An explicitly configured diagnostic service: two sleeps cancel
+            // the virtual thread, so the test loop exits deterministically.
             CpuRegisterState registers;
             std::string reason;
             CHECK(fixture.send(fixture.classData("_OBJC_CLASS_$_NSThread"), "currentThread",

@@ -65,6 +65,19 @@
     }
   ],
   "measurementNote": "One authorized Angry Birds v1.0 IPA has static-analysis and host-loader evidence recorded separately in staticEvidence. It has not been launched on Android or smoke-tested; apps and gamesUnblocked remain empty. Import rankings, the _main trace, and the loader first-missing import are static/host evidence, not guest execution.",
+  "importProviderEvidence": {
+    "observedImports": 254,
+    "strictSameNameNdkCandidates": 181,
+    "sameNameNdkRuntimeProviders": 181,
+    "concreteDarwinCompatibilityProviders": 73,
+    "runtimeProviderCatalogTotal": 254,
+    "fullNdkCandidateInventoryCount": 1229,
+    "fullNdkCatalogStatus": "COMPLETE",
+    "providerCoveragePercent": 100.0,
+    "status": "HOST_REGISTERED_NOT_GAMEPLAY",
+    "sameNameMetricRemainsStrict": true,
+    "note": "The 73 Darwin-only symbols are typed compat-runtime-v1 providers, not relabelled Android NDK exports. This ledger proves catalog and registration coverage only; it does not prove an IPA callsite rewrite, game link, or playable session."
+  },
   "staticEvidence": [
     {
       "evidenceId": "angrybirds-v1.0-static-2026-10-05",

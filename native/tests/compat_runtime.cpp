@@ -1,6 +1,7 @@
 #include "compat_runtime/runner.hpp"
 #include "compat_runtime/audio_session_shims.hpp"
 #include "compat_runtime/objc_shims.hpp"
+#include "compat_runtime/ndk_compat_shims.hpp"
 #include "compat_runtime/sjlj_unwind.hpp"
 
 #include "compat_runtime/runtime_contract.hpp"
@@ -469,6 +470,15 @@ void testGuestMemoryAndHeap() {
     for (const auto byte : zeroed)
         CHECK(byte == 0);
 
+    const auto tinyMapping = memory.mapAny(4, MemoryPermission::Read | MemoryPermission::Write,
+                                           "tiny-dynamic-cell");
+    const auto regionsBeforeTinyUnmap = memory.regions();
+    const auto tinyRegion = std::find_if(regionsBeforeTinyUnmap.begin(), regionsBeforeTinyUnmap.end(),
+        [tinyMapping](const GuestRegionView &region) { return region.base == tinyMapping; });
+    CHECK(tinyRegion != regionsBeforeTinyUnmap.end());
+    CHECK(tinyRegion->size == 4096);
+    memory.unmap(tinyMapping);
+
     memory.setPermissions(0x1000, MemoryPermission::Read);
     CHECK(!memory.write(0x1000, &value, sizeof(value)));
     CHECK(memory.read(0x1000, &readBack, sizeof(readBack)));
@@ -511,6 +521,76 @@ void testShimRegistry() {
         lowAddressFailed = true;
     }
     CHECK(lowAddressFailed);
+}
+
+void testGuestPthreadCreateTransfersAndJoins() {
+    ShimRegistry registry;
+    radek::compat_runtime::ndk::ShimAdapter ndkShims;
+    ndkShims.registerBindings(registry);
+    GuestAddressSpace memory;
+    memory.mapAt(0x1000, 4096, MemoryPermission::Read | MemoryPermission::Execute,
+                 "guest-pthread-entry");
+    memory.mapAt(0x2000, 4096, MemoryPermission::Read | MemoryPermission::Write,
+                 "guest-pthread-state");
+
+    const auto create = registry.resolve("_pthread_create");
+    const auto continuation = registry.resolve("_radek_pthread_continuation");
+    const auto exit = registry.resolve("_pthread_exit");
+    const auto join = registry.resolve("_pthread_join");
+    CHECK(create.has_value() && create->invokeTransfer);
+    CHECK(continuation.has_value() && continuation->invoke);
+    CHECK(exit.has_value() && exit->invoke);
+    CHECK(join.has_value() && join->invoke);
+
+    CpuRegisterState registers;
+    registers.r[0] = 0x2000;
+    registers.r[2] = 0x1000;
+    registers.r[3] = 0x12345678;
+    registers.r[14] = 0x3456;
+    std::string reason;
+    CHECK(registry.invokeCallout(create->guestAddress, registers, memory, reason) ==
+          GuestCalloutResult::Transferred);
+    CHECK(registers.r[15] == 0x1000);
+    CHECK(registers.r[0] == 0x12345678);
+    CHECK(registers.r[14] == continuation->guestAddress);
+    std::uint32_t token = 0;
+    CHECK(memory.read(0x2000, &token, sizeof(token)));
+    CHECK(token != 0);
+    CHECK(ndkShims.guestThreadTransferCount() == 1);
+
+    CHECK(registry.invokeCallout(continuation->guestAddress, registers, memory, reason) ==
+          GuestCalloutResult::Returned);
+    CHECK(registers.r[0] == 0);
+    CHECK(registers.r[14] == 0x3456);
+    CHECK(ndkShims.guestThreadCompletionCount() == 1);
+
+    // A worker that uses pthread_exit must take the same continuation path
+    // rather than turning a normal guest thread return into a host exception.
+    registers = CpuRegisterState{};
+    registers.r[0] = 0x2000;
+    registers.r[2] = 0x1000;
+    registers.r[3] = 0x87654321;
+    registers.r[14] = 0x4567;
+    CHECK(registry.invokeCallout(create->guestAddress, registers, memory, reason) ==
+          GuestCalloutResult::Transferred);
+    std::uint32_t exitToken = 0;
+    CHECK(memory.read(0x2000, &exitToken, sizeof(exitToken)));
+    CHECK(registry.invokeCallout(exit->guestAddress, registers, memory, reason) ==
+          GuestCalloutResult::Returned);
+    CHECK(registers.r[14] == continuation->guestAddress);
+    CHECK(registry.invokeCallout(continuation->guestAddress, registers, memory, reason) ==
+          GuestCalloutResult::Returned);
+    CHECK(registers.r[14] == 0x4567);
+    CHECK(ndkShims.guestThreadCompletionCount() == 2);
+
+    registers.r[0] = token;
+    CHECK(registry.invokeCallout(join->guestAddress, registers, memory, reason) ==
+          GuestCalloutResult::Returned);
+    CHECK(registers.r[0] == 0);
+    registers.r[0] = exitToken;
+    CHECK(registry.invokeCallout(join->guestAddress, registers, memory, reason) ==
+          GuestCalloutResult::Returned);
+    CHECK(registers.r[0] == 0);
 }
 
 void testObjectiveCShimsResolveThroughLoaderAndReturn() {
@@ -1861,6 +1941,7 @@ void testCpuBackendBoundary() {
 int main() {
     testGuestMemoryAndHeap();
     testShimRegistry();
+    testGuestPthreadCreateTransfersAndJoins();
     testSjLjContextRegistrationAndUnregistration();
     testSjLjResumeBoundaryStopsGuestExecution();
     testObjectiveCShimsResolveThroughLoaderAndReturn();

@@ -57,10 +57,14 @@ class BootAttemptRunner {
     TrapShimAdapter &traps_;
     std::size_t memoryLimit_;
     BootLifecycleHooks lifecycle_;
-    std::uint64_t entryInstructionBudget_ = 2000000;
-    std::uint64_t entryTimeLimitMicros_ = 20000000;
-    std::uint64_t mainThreadInstructionBudget_ = 2000000;
-    std::uint64_t mainThreadTimeLimitMicros_ = 20000000;
+    // Zero means unlimited. The Android game launcher uses the default so the
+    // guest remains alive for gameplay; the host probe opts into a finite time
+    // window explicitly because a command-line diagnostic must eventually
+    // return a JSON report when a guest enters an infinite game loop.
+    std::uint64_t entryInstructionBudget_ = 0;
+    std::uint64_t entryTimeLimitMicros_ = 0;
+    std::uint64_t mainThreadInstructionBudget_ = 0;
+    std::uint64_t mainThreadTimeLimitMicros_ = 0;
 
   public:
     BootAttemptRunner(ShimRegistry &shims, const CpuBackend &cpu,
@@ -75,19 +79,17 @@ class BootAttemptRunner {
           lifecycle_(std::move(lifecycle)) {}
 
     /**
-     * Bounded budget for the Mach-O entry point. The entry point of a UIKit app
-     * runs `_main` -> `UIApplicationMain` -> the delegate's
-     * `applicationDidFinishLaunching:`, so it needs far more than the probe's
-     * historical one-million-instruction window. The bound stays explicit: the
-     * report always states how many instructions were executed and whether the
-     * budget stopped the attempt.
+     * Set an optional diagnostic budget for the Mach-O entry point. A zero
+     * instruction count and zero time value mean unlimited execution. The
+     * Android game APK leaves both at zero; only the host probe uses this hook
+     * to keep a command-line report from hanging forever in a real game loop.
      */
     void setEntryBudget(std::uint64_t instructions, std::uint64_t timeLimitMicros) noexcept {
         entryInstructionBudget_ = instructions;
         entryTimeLimitMicros_ = timeLimitMicros;
     }
 
-    /** Bounded budget for the queued background-thread body. */
+    /** Set an optional diagnostic budget for the queued background-thread body. */
     void setMainThreadInstructionBudget(std::uint64_t instructions,
                                         std::uint64_t timeLimitMicros) noexcept {
         mainThreadInstructionBudget_ = instructions;

@@ -9,6 +9,11 @@
 // the probe itself failed (usage or I/O error).
 #include "compat_runtime/audio_session_shims.hpp"
 #include "compat_runtime/compiler_rt_shims.hpp"
+#include "compat_runtime/compat_import_catalog.hpp"
+#include "compat_runtime/cxxabi_shims.hpp"
+#include "compat_runtime/ndk_compat_shims.hpp"
+#include "compat_runtime/ndk_full_import_catalog.hpp"
+#include "compat_runtime/ndk_import_catalog.hpp"
 #include "compat_runtime/cpu.hpp"
 #include "compat_runtime/darwin_compat_shims.hpp"
 #include "compat_runtime/gles_shims.hpp"
@@ -26,6 +31,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -51,22 +57,36 @@ std::vector<std::uint8_t> readMainBinary(const char *path) {
 } // namespace
 
 int main(int argc, char **argv) {
-    if (argc != 2 && argc != 3) {
-        std::cerr << "usage: radek-gameboot <macho-main-executable> [bundle-payload-directory]\n"
-                     "  The optional second argument is the extracted .app directory the guest's\n"
+    if (argc < 2 || argc > 4) {
+        std::cerr << "usage: radek-gameboot <macho-main-executable> [bundle-payload-directory] [--diagnostic-probe]\n"
+                     "  The optional payload directory is the extracted .app directory the guest's\n"
                      "  own file reads are served from; without it every guest file access is\n"
-                     "  refused with a named diagnostic instead of inventing file contents.\n";
+                     "  refused with a named diagnostic instead of inventing file contents.\n"
+                     "  The optional --diagnostic-probe flag adds a host-only time window so a\n"
+                     "  command-line probe returns even when a real game enters its main loop.\n";
         return 1;
     }
     try {
+        const char *payloadDirectory = nullptr;
+        bool diagnosticProbe = false;
+        for (int index = 2; index < argc; ++index) {
+            if (std::string(argv[index]) == "--diagnostic-probe") {
+                diagnosticProbe = true;
+            } else if (payloadDirectory == nullptr) {
+                payloadDirectory = argv[index];
+            } else {
+                std::cerr << "unknown or duplicate radek-gameboot argument: " << argv[index] << "\n";
+                return 1;
+            }
+        }
         const auto bytes = readMainBinary(argv[1]);
         // The guest's own bundle reads are served from directories this front end
         // chose. The bundle mount is read-only; the fabricated NSHomeDirectory
         // results (Documents/Library/"~") get a writable scratch directory.
         auto &files = radek::compat_runtime::guestFileSystem();
-        if (argc == 3) {
-            files.mount(radek::compat_runtime::bundleGuestPath(), argv[2], false);
-            std::string scratch = std::string(argv[2]) + "/../radek-home";
+        if (payloadDirectory != nullptr) {
+            files.mount(radek::compat_runtime::bundleGuestPath(), payloadDirectory, false);
+            std::string scratch = std::string(payloadDirectory) + "/../radek-home";
             files.mount("/Documents", scratch + "/Documents", true);
             files.mount("/Library", scratch + "/Library", true);
         }
@@ -76,6 +96,8 @@ int main(int argc, char **argv) {
         radek::compat_runtime::audio::ShimAdapter audioShims;
         radek::compat_runtime::SjLjUnwindAdapter sjljUnwind;
         radek::compat_runtime::compiler_rt::ShimAdapter compilerRuntime;
+        radek::compat_runtime::cxxabi::ShimAdapter cxxAbi;
+        radek::compat_runtime::ndk::ShimAdapter ndkShims;
         radek::compat_runtime::gles::Forwarder glesForwarder;
         radek::compat_runtime::darwin_compat::ShimAdapter darwinShims(&objcShims);
         objcShims.registerBindings(shims);
@@ -83,12 +105,36 @@ int main(int argc, char **argv) {
         audioShims.registerBindings(shims);
         sjljUnwind.registerBindings(shims);
         compilerRuntime.registerBindings(shims);
+        cxxAbi.registerBindings(shims);
         glesForwarder.registerBindings(shims);
         darwinShims.registerBindings(shims);
+        ndkShims.registerBindings(shims);
+        const auto missingDarwinProviders =
+            radek::compat_runtime::compat_import_catalog::missingProviders(shims);
+        const auto missingNdkProviders =
+            radek::compat_runtime::ndk_import_catalog::missingProviders(shims);
+        const auto missingFullNdkProviders =
+            radek::compat_runtime::ndk_full_import_catalog::missingProviders(shims);
+        if (!missingDarwinProviders.empty() || !missingNdkProviders.empty() ||
+            !missingFullNdkProviders.empty()) {
+            const auto &missing = !missingDarwinProviders.empty() ? missingDarwinProviders
+                                  : !missingNdkProviders.empty() ? missingNdkProviders
+                                                                  : missingFullNdkProviders;
+            throw std::runtime_error(
+                "concrete import provider catalog is not fully registered; first missing: " +
+                missing.front());
+        }
         radek::compat_runtime::TrapShimAdapter traps;
         const auto cpu = radek::compat_runtime::createArm32CpuBackend();
         radek::compat_runtime::BootAttemptRunner runner(shims, *cpu, traps,
                                                        objcShims.lifecycleHooks());
+        if (diagnosticProbe) {
+            // This limit belongs only to the host's JSON probe. The Android JNI
+            // entry leaves both values at zero, which means unlimited execution
+            // for the installed game APK.
+            runner.setEntryBudget(0, 20'000'000);
+            runner.setMainThreadInstructionBudget(0, 20'000'000);
+        }
         radek::Json report = runner.run(bytes, true);
 
         // Compiler-runtime observability: how much of the guest's integer
@@ -103,6 +149,38 @@ int main(int argc, char **argv) {
                 "__divdi3/__moddi3, __floatdidf/__floatdisf/__fixdfdi); the C++ exception "
                 "runtime stays fail-closed through traps";
             report["compilerRuntime"] = std::move(helpers);
+        }
+
+        // Provider observability: the strict Darwin-only catalog is checked at
+        // startup, independently of the loader's later import resolution.
+        {
+            radek::Json providers = radek::Json::object();
+            providers["concreteDarwinProviderCount"] = static_cast<std::uint64_t>(
+                radek::compat_runtime::compat_import_catalog::kDarwinOnlyProviderCount);
+            providers["sameNameNdkProviderCount"] = static_cast<std::uint64_t>(
+                radek::compat_runtime::ndk_import_catalog::kProviderCount);
+            providers["fullNdkCandidateInventoryCount"] = static_cast<std::uint64_t>(
+                radek::compat_runtime::ndk_full_import_catalog::kProviderCount);
+            providers["fullNdkCatalogStatus"] = "COMPLETE";
+            providers["reviewedProviderCount"] = static_cast<std::uint64_t>(
+                radek::compat_runtime::compat_import_catalog::kDarwinOnlyProviderCount +
+                radek::compat_runtime::ndk_import_catalog::kProviderCount);
+            providers["boundedNdkFallbackCalloutCount"] = static_cast<std::uint64_t>(
+                ndkShims.registeredCalloutCount());
+            providers["ndkFallbackCallsObserved"] = ndkShims.callCount();
+            providers["guestPthreadTransfersObserved"] = ndkShims.guestThreadTransferCount();
+            providers["guestPthreadCompletionsObserved"] = ndkShims.guestThreadCompletionCount();
+            providers["genericNdkCallsObserved"] = ndkShims.genericCallCount();
+            providers["genericNdkProviderCount"] = static_cast<std::uint64_t>(
+                ndkShims.genericProviderCount());
+            providers["typedNdkProviderCount"] = static_cast<std::uint64_t>(
+                ndkShims.typedProviderCount());
+            providers["registrationStatus"] = "COMPLETE";
+            providers["sameNameNdkCandidatesAreSeparate"] = true;
+            providers["note"] =
+                "Darwin-only providers are typed compatibility adapters or guest-data bindings; "
+                "they are not relabelled Android NDK exports and do not prove game linkage.";
+            report["importProviders"] = std::move(providers);
         }
 
         // Filesystem observability: which directories the guest's own file
@@ -141,37 +219,42 @@ int main(int argc, char **argv) {
         // GL observability: which driver was found, whether its draws are handed to
         // the real GLES implementation, and every call the runtime had to refuse.
         {
-            const auto *context = radek::compat_runtime::gles::lastForwarder();
-            const auto driver = context != nullptr
-                                    ? context->driver()
-                                    : radek::compat_runtime::gles::DriverReport{};
+            // GL imports are bound to this per-attempt forwarder, while the
+            // EAGL compatibility object owns the drawable forwarder keyed by
+            // the guest address space. Keep those observations separate: a
+            // guest call entering a no-driver host must not be mistaken for a
+            // driver-forwarded call or a presented frame.
+            const auto *drawableContext = radek::compat_runtime::gles::lastForwarder();
+            const auto driver = glesForwarder.driver();
             radek::Json gles = radek::Json::object();
             gles["hostGlesDefines"] = static_cast<std::uint64_t>(1);
             gles["driverGlesLibraryLoaded"] = driver.glesLoaded;
             gles["driverEglLibraryLoaded"] = driver.eglLoaded;
             gles["driverDetail"] = driver.detail;
-            gles["drawableReady"] = context != nullptr && context->drawableReady();
-            gles["presentingToWindow"] = context != nullptr && context->presentingToWindow();
+            gles["drawableReady"] = drawableContext != nullptr && drawableContext->drawableReady();
+            gles["presentingToWindow"] = drawableContext != nullptr && drawableContext->presentingToWindow();
             gles["drawableWidth"] =
-                context != nullptr ? static_cast<std::uint64_t>(context->drawableWidth()) : 0;
+                drawableContext != nullptr ? static_cast<std::uint64_t>(drawableContext->drawableWidth()) : 0;
             gles["drawableHeight"] =
-                context != nullptr ? static_cast<std::uint64_t>(context->drawableHeight()) : 0;
-            gles["forwardedCalls"] =
-                context != nullptr ? static_cast<std::uint64_t>(context->forwardedCalls()) : 0;
-            gles["refusedCalls"] =
-                context != nullptr ? static_cast<std::uint64_t>(context->refusedCalls()) : 0;
+                drawableContext != nullptr ? static_cast<std::uint64_t>(drawableContext->drawableHeight()) : 0;
+            gles["guestCallsObserved"] = glesForwarder.guestCallsObserved();
+            gles["forwardedCalls"] = glesForwarder.forwardedCalls();
+            gles["refusedCalls"] = glesForwarder.refusedCalls();
             gles["framesPresented"] =
-                context != nullptr ? static_cast<std::uint64_t>(context->framesPresented()) : 0;
+                drawableContext != nullptr ? static_cast<std::uint64_t>(drawableContext->framesPresented()) : 0;
             radek::Json diagnostics = radek::Json::array();
-            if (context != nullptr) {
-                for (const auto &diagnostic : context->diagnostics())
+            for (const auto &diagnostic : glesForwarder.diagnostics())
+                diagnostics.push(radek::Json(diagnostic));
+            if (drawableContext != nullptr && drawableContext != &glesForwarder) {
+                for (const auto &diagnostic : drawableContext->diagnostics())
                     diagnostics.push(radek::Json(diagnostic));
             }
             gles["diagnostics"] = std::move(diagnostics);
             gles["note"] =
-                "guest OpenGL ES 1.1 calls are forwarded to the platform GLES/EGL driver; "
-                "refused calls are listed in diagnostics; a rendered frame is guest output, "
-                "not gameplay evidence and not a playable conversion";
+                "guestCallsObserved counts guest imports entering the compatibility layer; "
+                "forwardedCalls counts calls actually handed to a host driver, and refused "
+                "calls are listed in diagnostics; a rendered frame is guest output, not "
+                "gameplay evidence and not a playable conversion";
             report["gles"] = std::move(gles);
         }
 

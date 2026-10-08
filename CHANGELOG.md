@@ -4,6 +4,64 @@ All notable changes to RadekiOSConventor. Every entry states what was verified a
 what was **not**: analysis, triage, name mappings and host static-recompilation
 coverage never mean a linked game, a playable conversion or a device-tested APK.
 
+## 2026-10-08 — Whole-game ARM translation emitted before APK gates
+
+The Angry Birds pipeline no longer stops at the complete-game leaf prover before
+emitting translated code. After the metadata/API gate correctly blocks complete
+APK conversion, it now runs the fail-closed ARM lifter across the decoded game
+functions and writes `bytecode-translation/game_all.c`, generated dispatch and
+shim tables, and the non-zero-fill memory image. The current fixture emits 2,837
+functions with zero lift failures and 100% of the measured executable text-byte
+coverage. These are host portable-C translation artifacts, not a linked Android
+library or playable APK.
+
+## 2026-10-08 — Complete reviewed NDK inventory and bounded family adapters
+
+The native runtime now registers the complete 1,229-name reviewed Bionic/NDK
+inventory in addition to the exact 181-name Angry Birds fixture catalog and the
+separate 73-name Darwin compatibility catalog. Existing typed bindings take
+precedence; newly covered families include guest `environ`/`errno` cells,
+scalar libm forwarding, zlib Adler/CRC/version/bounds, virtual-bundle AAsset
+open/read/seek/close and file-length operations, bounded pthread mutex state,
+and named fail-closed boundaries for remaining Android framework, driver,
+dynamic-loader, and ABI signatures. Reports expose the full inventory count,
+typed-versus-generic provider split, and generic-call diagnostics without
+relabeling Darwin-only names as Android exports.
+
+The native registration, full-catalog parity, host Python suite, and sanitized
+native suite pass. This is provider/loader evidence only: no Android SDK/Java
+build, APK install, device smoke test, first frame, menu, or playable Angry
+Birds session is claimed here.
+
+## 2026-10-08 — Unlimited device guest loop and true-black generated launchers
+
+### The device game path no longer expires at 2,000,000 instructions
+
+The Android `game-runtime-v1` path now treats zero instruction and zero wall-clock
+limits as **unlimited**. The Unicorn backend no longer carries hidden 100-million/
+60-second ceilings, and the lifecycle adapter no longer cancels the guest after
+an eight-frame service window. A game loop can remain alive for rendering and
+input instead of being turned into a misleading `INSTRUCTION_LIMIT` diagnostic.
+The host `radek-gameboot` probe passes an explicit `--diagnostic-probe` flag so CI
+can still produce finite JSON for an infinite guest; that opt-in policy is not
+used by the APK/JNI entry.
+
+### Generated launchers use black, not blue-black, presentation chrome
+
+Both the statically converted launcher template and the forced game-runtime
+launcher now set the window, viewport, letterbox, surface, and diagnostic panel
+backgrounds to true black. This keeps the recovered game splash and EGL output
+from being framed by the former dark-blue bars.
+
+### The 71% same-name figure is explained at the point of use
+
+The detail card now says that `181/254 = 71.26%` is an exact public-NDK-name
+measure, not total Android triage. The other 73 Angry Birds imports require
+reviewed compatibility implementations, semantic framework targets, or
+compiler-runtime/unwind handling; those are deliberately separate categories.
+The reviewed mapping measure can therefore be 254/254 without pretending that
+all 254 names are direct Android exports.
+
 ## 2026-10-08 — Darwin-only translation layer + game-only launcher presentation
 
 ### Darwin-only imports now have translation-layer adapters
