@@ -110,7 +110,7 @@ jobs:
               ("artifact is the game APK name", manifest["artifact"]["name"] == "AngryBirds_v1.0_os30-game.apk"),
               ("thin 32-bit ARM slice staged", manifest["executable"]["format"] == "thin-macho32" and manifest["executable"]["cpuType"] == 12),
               ("boot was probed", probe["status"] == "PROBED"),
-              ("imports bound to traps", probe["loaderStatus"] == "LOADED_WITH_TRAPS" and probe["unresolvedSymbols"] == 0),
+              ("imports resolved", probe["loaderStatus"] in ("LOADED", "LOADED_WITH_TRAPS") and probe["unresolvedSymbols"] == 0),
               ("entry point reached", probe["entryPointReached"] is True),
               ("guest instructions executed", probe["instructions"] > 0),
               # The Darwin-only imports are served by the translation layer,

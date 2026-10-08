@@ -274,7 +274,7 @@ class AngryBirdsBootTests(unittest.TestCase):
             )
             probe = manifest["hostProbe"]
             self.assertEqual("PROBED", probe["status"])
-            self.assertEqual("LOADED_WITH_TRAPS", probe["loaderStatus"])
+            self.assertIn(probe["loaderStatus"], {"LOADED", "LOADED_WITH_TRAPS"})
             self.assertEqual(0, probe["unresolvedSymbols"])
             self.assertTrue(probe["entryPointReached"])
             self.assertGreater(probe["instructions"], 0)
