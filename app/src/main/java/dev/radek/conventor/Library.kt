@@ -490,7 +490,7 @@ class Library(private val context: Context) {
                 .put("analysisErrors", analysisErrors).put("analyzedImageCount", nodes.length()).put("failedImageCount", analysisErrors.length()))
             report.put("machO", JSONObject().put("slices", compactSlices(macho.optJSONArray("slices")))
                 .put("sliceCount", macho.optJSONArray("slices")?.length() ?: 0))
-            val verifiedApiReplacements = apiMapping.optInt("runtimeVerifiedApiReplacementCount", 0)
+            val verifiedApiReplacements = apiMapping.optInt("concreteDarwinProviderCount", 0)
             val importSymbolCount = apiMapping.optInt("distinctImportSymbols", 0)
             val ndkNameCandidateCount = apiMapping.optInt("mappedNameCandidates", 0)
             val verifiedNdkExportCount = apiMapping.optInt("runtimeVerifiedNdkCandidates", 0)
@@ -498,7 +498,7 @@ class Library(private val context: Context) {
             val verifiedNdkImportPercent = apiMapping.optInt("runtimeVerifiedImportCoveragePercent", 0)
             val unimplementedCompatStubCount = apiMapping.optInt("compatStubHandlerCount", 0)
             report.put("apiImplementationGeneration", JSONObject()
-                .put("status", if (verifiedApiReplacements > 0) "RUNTIME_IMPLEMENTATION_AVAILABLE_NOT_LINKED" else "NO_API_REPLACEMENT_LINKED")
+                .put("status", if (verifiedApiReplacements > 0) "RUNTIME_PROVIDER_CATALOG_PRESENT_NOT_LINKED" else "NO_API_REPLACEMENT_LINKED")
                 .put("attempted", false)
                 .put("generatedApiReplacements", 0)
                 .put("implementedRuntimeReplacements", verifiedApiReplacements)
@@ -507,7 +507,7 @@ class Library(private val context: Context) {
                 .put("linkedIntoGame", false)
                 .put("completeGameConversion", false)
                 .put("message", if (verifiedApiReplacements > 0)
-                    "$verifiedApiReplacements concrete compatibility export(s) were verified in libioscompat.so; no IPA callsite was rewritten and none was linked into a game."
+                    "$verifiedApiReplacements typed concrete Darwin compatibility provider(s) are catalogued in libioscompat.so; no IPA callsite was rewritten and none was linked into a game."
                 else
                     "The analyzer runtime contains concrete compatibility exports, but no matching import was verified on this device and no game API replacement was linked."))
             if (deviceProven) {

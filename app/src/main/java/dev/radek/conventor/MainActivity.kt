@@ -259,6 +259,8 @@ class MainActivity : Activity() {
         if (total == 0) return "Android API candidates: N/A (no imports)"
         val direct = mapping.optInt("mappedNameCandidates", 0)
         val directPercent = AndroidApiMapper.coveragePercent(direct, total)
+        val providers = mapping.optInt("runtimeProviderCount", 0)
+        val providerPercent = AndroidApiMapper.coveragePercent(providers, total)
         val reviewed = mapping.optInt("reviewedMappingCount", direct)
         val reviewedPercent = AndroidApiMapper.coveragePercent(reviewed, total)
         val breakdown = mapping.optJSONObject("reviewedMapping")?.optJSONObject("breakdown")
@@ -268,9 +270,38 @@ class MainActivity : Activity() {
             breakdown.optInt("compilerRuntimeToolchain", 0) to "toolchain-runtime candidates",
             breakdown.optInt("reviewedSemanticApiTarget", 0) to "semantic API targets",
         ).filter { it.first > 0 }.map { "${it.first} ${it.second}" }
-        return "Reviewed Android mappings: $reviewedPercent% ($reviewed/$total" +
+        return "Concrete import providers: $providerPercent% ($providers/$total = exact NDK/system candidates plus typed Darwin compatibility providers)" +
+            " · Reviewed Android mappings: $reviewedPercent% ($reviewed/$total" +
             (if (kinds.isEmpty()) "" else " = ${kinds.joinToString(" + ")}") + ")" +
             " · strict same-name NDK subset (smaller by design, its own measure): $directPercent% ($direct/$total)"
+    }
+
+    /**
+     * Explains the 71% headline shown for Angry Birds instead of making it look
+     * like the mapper dropped 29% of the imports. Same-name NDK coverage is an
+     * exact-name catalog test; reviewed compat, semantic, and compiler-runtime
+     * targets deliberately stay outside that denominator.
+     */
+    private fun strictNdkSubsetExplanation(mapping: JSONObject): String {
+        val total = mapping.optInt("distinctImportSymbols", 0)
+        val direct = mapping.optInt("mappedNameCandidates", 0)
+        if (total == 0 || direct >= total) return ""
+        val remaining = total - direct
+        val breakdown = mapping.optJSONObject("reviewedMapping")?.optJSONObject("breakdown")
+        val reasons = if (breakdown == null) emptyList() else listOf(
+            breakdown.optInt("concreteCompatImplementation", 0) to "compatibility implementations",
+            breakdown.optInt("reviewedSemanticApiTarget", 0) to "semantic API targets",
+            breakdown.optInt("compilerRuntimeToolchain", 0) to "compiler-runtime or unwind targets",
+        ).filter { it.first > 0 }.map { "${it.first} ${it.second}" }
+        val detail = if (reasons.isEmpty()) {
+            "$remaining imports need a non-name-based adapter or have no direct public NDK export."
+        } else {
+            "$remaining remaining imports are " + reasons.joinToString(", ") +
+                "; those are different mapping kinds, not same-name NDK exports."
+        }
+        return "Why the strict NDK figure is ${AndroidApiMapper.coveragePercent(direct, total)}%: " +
+            "it counts only exact public Android NDK/system export names ($direct/$total), " + detail +
+            " Reviewed mapping coverage is the separate measure for all reviewed targets."
     }
 
     /**
@@ -298,7 +329,7 @@ class MainActivity : Activity() {
         text("Import an IPA to automatically inspect its code and Android compatibility.", 15f, muted)
         val info = card()
         text("Bounded conversion, honest everywhere else", 17f, textColor, true, info)
-        text("The on-device app analyzes every IPA, and converts the proven subset automatically during import: an executable whose whole code is one closed-integer routine becomes a signed, installable APK whose statically recompiled entry runs through JNI — no extra tap needed. Anything outside that subset is not statically recompiled; Force then builds a signed, installable preview shell branded with the app name and recovered icon; it contains none of the IPA executable or game code. Host APKs are accepted only when they declare a complete game conversion and pass provenance and package checks.", 14f, muted, parent = info)
+        text("The on-device app analyzes every IPA, and converts the proven subset automatically during import: an executable whose whole code is one closed-integer routine becomes a signed, installable APK whose statically recompiled entry runs through JNI — no extra tap needed. Anything outside that subset is not statically recompiled; Force builds a game-runtime boot APK that runs the guest without an artificial instruction/time cutoff, plus a separate source-free preview shell fallback. Host APKs are accepted only when they declare a complete game conversion and pass provenance and package checks.", 14f, muted, parent = info)
         val add = button("Choose IPA", true) { authorize() }; add.isEnabled = !Jobs.busy
         button("Settings", parent = body) { settingsScreen() }.isEnabled = !Jobs.busy
         if (Jobs.busy) {
@@ -362,8 +393,15 @@ class MainActivity : Activity() {
                 val triage = mapping.optInt("classificationCoveragePercent", 0)
                 val unmapped = mapping.optInt("unmappedSymbolCount", 0)
                 val verified = mapping.optInt("runtimeVerifiedNdkCandidates", 0)
-                val compatCount = mapping.optInt("runtimeVerifiedApiReplacementCount", 0)
+                // The legacy dlsym field counts the broad generated export
+                // catalogue. The UI uses the strict concrete Darwin provider
+                // ledger so a generated fallback cannot inflate implementation
+                // coverage.
+                val compatCount = mapping.optInt("concreteDarwinProviderCount", 0)
                 val compatPercent = AndroidApiMapper.coveragePercent(compatCount, total)
+                val providerCount = mapping.optInt("runtimeProviderCount", 0)
+                val providerPercent = AndroidApiMapper.coveragePercent(providerCount, total)
+                val providerSummary = "import providers: $providerCount/$total ($providerPercent%)"
                 val totalVerifiedDevice = mapping.optJSONObject("evidence")
                     ?.optInt("exportsVerifiedOnThisDevice", maxOf(verified, compatCount))
                     ?: maxOf(verified, compatCount)
@@ -379,7 +417,7 @@ class MainActivity : Activity() {
                 val runtimeLinked = report.optJSONObject("apiImplementationGeneration")?.optBoolean("runtimeLibraryLinked", false) == true
                 val compatSummary = when {
                     runtimeLinked -> "libioscompat.so runtime linked; individual IPA callsites were not rewritten"
-                    compatStatus == "CURRENT_DEVICE_COMPAT_DLSYM" -> "$compatCount/$total ($compatPercent%) compiled compatibility implementation(s) verified; APK linking has not run"
+                    compatStatus == "CURRENT_DEVICE_COMPAT_DLSYM" -> "$compatCount/$total ($compatPercent%) typed concrete compatibility provider(s) catalogued; APK linking has not run"
                     else -> "compatibility export check not run"
                 }
                 val compilerSummary = if (compilerRuntime > 0) " · compiler-rt/libunwind candidates: $compilerRuntime (not linked)" else ""
@@ -387,7 +425,7 @@ class MainActivity : Activity() {
                 val stubs = mapping.optInt("compatStubHandlerCount", 0)
                 val stubSummary = if (stubs > 0) "$stubs compat stub handlers (unimplemented; not API bodies) · " else ""
                 val summary = if (total == 0) "API symbol triage: N/A (no imported symbols) · $compatSummary$compilerSummary · generated replacements: $generated"
-                    else "Symbol triage: $triage% ($classified/$total) · ${mappingCoverageSummary(mapping)} · $runtimeSummary · $compatSummary$compilerSummary · $stubSummary$semantic semantic · $unmapped unmapped · generated replacements: $generated"
+                    else "Symbol triage: $triage% ($classified/$total) · $providerSummary · ${mappingCoverageSummary(mapping)} · $runtimeSummary · $compatSummary$compilerSummary · $stubSummary$semantic semantic · $unmapped unmapped · generated replacements: $generated"
                 text(summary, 11f, muted, parent = item)
             }
             report.optJSONObject("hostConversion")?.takeIf { it.optString("status") == "ATTACHED" }?.let { host ->
@@ -489,7 +527,7 @@ class MainActivity : Activity() {
     }
     private fun authorize() {
         AlertDialog.Builder(this).setTitle("Authorized files only")
-            .setMessage("Confirm that you own this IPA or have permission to convert it. Protection mechanisms will not be bypassed. The source IPA is retained in app-private storage for analysis until you delete this library entry. Force convert builds a real signed APK when the executable passes the bounded conversion proof; otherwise it creates an installable preview shell that carries none of the IPA executable or game code. Complete-game host APKs still require the strict conversion contract.")
+            .setMessage("Confirm that you own this IPA or have permission to convert it. Protection mechanisms will not be bypassed. The source IPA is retained in app-private storage for analysis until you delete this library entry. Force convert builds a real signed APK when the executable passes the complete static-conversion proof; otherwise it creates a game-runtime APK containing the authorized 32-bit ARM executable and bundle, with a source-free preview shell as fallback. Complete-game host APKs still require the strict conversion contract.")
             .setNegativeButton("Cancel", null).setPositiveButton("I have permission") { _, _ ->
                 startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type = "*/*"; addCategory(Intent.CATEGORY_OPENABLE) }, pickerIpa)
             }.show()
@@ -543,8 +581,11 @@ class MainActivity : Activity() {
             val triage = mapping.optInt("classificationCoveragePercent", 0)
             val unmapped = mapping.optInt("unmappedSymbolCount", 0)
             val verified = mapping.optInt("runtimeVerifiedNdkCandidates", 0)
-            val implemented = mapping.optInt("runtimeVerifiedApiReplacementCount", 0)
+            val implemented = mapping.optInt("concreteDarwinProviderCount", 0)
             val implementedPercent = AndroidApiMapper.coveragePercent(implemented, total)
+            val providerCount = mapping.optInt("runtimeProviderCount", 0)
+            val providerPercent = AndroidApiMapper.coveragePercent(providerCount, total)
+            val providerSummary = " · import providers: $providerCount/$total ($providerPercent%)"
             val totalVerifiedDevice = mapping.optJSONObject("evidence")
                 ?.optInt("exportsVerifiedOnThisDevice", maxOf(verified, implemented))
                 ?: maxOf(verified, implemented)
@@ -560,7 +601,7 @@ class MainActivity : Activity() {
             val runtimeLinked = report.optJSONObject("apiImplementationGeneration")?.optBoolean("runtimeLibraryLinked", false) == true
             val compatSummary = when {
                 runtimeLinked -> " · libioscompat.so runtime linked; no individual IPA callsites rewritten"
-                compatStatus == "CURRENT_DEVICE_COMPAT_DLSYM" -> " · $implemented/$total ($implementedPercent%) compiled compatibility implementation(s) verified; APK linking has not run"
+                compatStatus == "CURRENT_DEVICE_COMPAT_DLSYM" -> " · $implemented/$total ($implementedPercent%) typed concrete compatibility provider(s) catalogued; APK linking has not run"
                 else -> ""
             }
             val compilerSummary = if (compilerRuntime > 0) " · compiler-rt/libunwind candidates (not linked): $compilerRuntime" else ""
@@ -571,8 +612,11 @@ class MainActivity : Activity() {
                 if (verifiedHandlers > 0) append(" · compat verified handlers: $verifiedHandlers")
             }
             val summary = if (total == 0) "Android API candidates: N/A (no imports)$compatSummary$compilerSummary"
-                else "Symbol triage: $triage% ($classified/$total) · ${mappingCoverageSummary(mapping)}$runtimeSummary$compatSummary$compilerSummary$stubSummary · semantic rewrites: $semantic · unmapped: $unmapped"
+                else "Symbol triage: $triage% ($classified/$total)$providerSummary · ${mappingCoverageSummary(mapping)}$runtimeSummary$compatSummary$compilerSummary$stubSummary · semantic rewrites: $semantic · unmapped: $unmapped"
             text(summary, 16f, textColor, true, mappingCard)
+            strictNdkSubsetExplanation(mapping).takeIf { it.isNotBlank() }?.let {
+                text(it, 12f, muted, parent = mappingCard)
+            }
             val generated = report.optJSONObject("hostConversion")?.optInt("generatedApiReplacements", 0) ?: 0
             val triageNote = if (mapping.optString("classificationStatus") == "COMPLETE" && total > 0)
                 "All $classified observed import symbols were categorized; categorization is not static recompilation."
@@ -649,7 +693,7 @@ class MainActivity : Activity() {
             val buildCard = card()
             text("Host APK validation/attachment · ${conversion.optInt("percent", 0)}% · ${conversion.optString("status", "NOT_BUILT")}", 16f, statusColor(conversion.optString("status")), true, buildCard)
             text(conversion.optString("message"), 12f, muted, parent = buildCard)
-            text("This is the complete-game APK path; it requires statically recompiled reachable code, API replacements, resources and lifecycle. Force convert packages the proven bounded subset into a real signed APK; anything else gets a game-runtime boot APK that leaves its stop/failure diagnostics open, and an installable preview shell that contains no statically recompiled game code remains available as a fallback.", 12f, muted, parent = buildCard)
+            text("This is the complete-game APK path; it requires statically recompiled reachable code, API replacements, resources and lifecycle. Force convert packages the proven bounded subset into a real signed APK; anything else gets a game-runtime boot APK with unlimited device execution that leaves diagnostics open only at a real runtime boundary, and an installable preview shell that contains no statically recompiled game code remains available as a fallback.", 12f, muted, parent = buildCard)
         }
         report.optJSONObject("deviceRecompilation")?.takeIf { it.optString("status") == "PROVEN" && it.optInt("coveragePercent", 0) == 100 }?.let { proof ->
             val proofCard = card()
@@ -688,7 +732,7 @@ class MainActivity : Activity() {
         button("View full machine-readable report") { showText("Conversion report", report.toString(2)) }
         button("View real conversion logs") { showText("Logs", File(dir, "conversion.jsonl").takeIf { it.isFile }?.readText() ?: "No logs") }
         text("APK conversion", 22f, textColor, true)
-        text("A general iOS-to-Android game static recompilation backend and framework/API replacements are not implemented. What is implemented is the bounded subset: when the executable is statically proven to be exactly one closed-integer routine, Force convert packages its statically recompiled machine code into a signed, installable APK that runs the entry through JNI and shows the message recovered from the IPA. Anything outside the subset gets a game-runtime boot-attempt APK: it packs the real 32-bit ARM executable and the bundle, opens into a minimal boot log, and stops guest execution at the first unimplemented call while leaving diagnostics on screen instead of crashing. This is not a playable game conversion. A branded preview shell with no executable remains available as an explicit fallback.", 14f, muted)
+        text("A general iOS-to-Android game static recompilation backend and framework/API replacements are not implemented. What is implemented is the complete static-conversion subset: when the executable is statically proven to be exactly one closed-integer routine, Force convert packages its statically recompiled machine code into a signed, installable APK that runs the entry through JNI and shows the message recovered from the IPA. Anything outside the subset gets a game-runtime boot-attempt APK: it packs the real 32-bit ARM executable and the bundle, runs without an artificial instruction/time cutoff, and stops only at a real runtime boundary while leaving diagnostics on screen instead of crashing. Framework/input coverage remains game-specific, so this is not a complete static game conversion. A branded preview shell with no executable remains available as an explicit fallback.", 14f, muted)
         button("Copy host analysis command") {
             val abi = preferences.getString("target_abi", "auto") ?: "auto"
             val suffix = if (abi == "auto") "" else " --target-abi $abi"
@@ -768,7 +812,7 @@ class MainActivity : Activity() {
             val executableBytes = gameRuntimeConversion?.optLong("executableBytes", 0L) ?: 0L
             val machoFormat = gameRuntimeConversion?.optString("machoFormat").orEmpty().ifBlank { "Mach-O" }
             text("Game-runtime boot-attempt APK · $machoFormat executable, $executableBytes byte(s) packed", 13f, accent, true)
-            text("Runs the real guest boot (shown as a minimal log) and stops guest execution at the first unimplemented call; the diagnostic screen stays open instead of crashing. No conversion, static recompilation, or gameplay is claimed.", 12f, muted)
+            text("Runs the real guest boot with no artificial instruction or time cutoff, so an implemented render loop can stay alive. It stops only at a real runtime boundary such as an unimplemented call, guest exception, memory/execution fault, or setup failure; the diagnostic screen stays open instead of crashing. This is not the complete-game static recompilation contract.", 12f, muted)
             button("Install ${gameOutputFile.name}", true) { installArtifact(dir, gameOutputFile.name) }
             button("Share ${gameOutputFile.name}") { shareResultApk(dir, gameOutputFile.name) }
             if (app.has("sha256")) button("Open installed game boot") {
@@ -788,7 +832,7 @@ class MainActivity : Activity() {
                     startForceConvert(dir, true)
                 }
             } else {
-                text("This IPA is outside the bounded conversion subset, so Force builds a game-runtime boot-attempt APK: it packs the real 32-bit ARM executable, its bundle, and the Unicorn native dependency. It opens into a minimal boot log; guest execution stops at the first unimplemented call, but the diagnostic screen remains open instead of crashing. This is not playable; a preview shell without an executable remains available as a fallback.", 12f, muted)
+                text("This IPA is outside the complete static-recompilation subset, so Force builds a game-runtime boot-attempt APK: it packs the real 32-bit ARM executable, its bundle, and the Unicorn native dependency. The device runner has no artificial instruction/time cutoff and keeps the black game viewport alive until a real runtime boundary; if it stops, the diagnostic screen remains open instead of crashing. A preview shell without an executable remains available as a fallback.", 12f, muted)
                 dangerButton(if (gameOutputFile != null) "Rebuild game APK" else "Force convert to game APK") {
                     startGameRuntimeBuild(dir)
                 }

@@ -3,9 +3,10 @@
 The host never builds APKs. :func:`run_gameboot` probes the real guest boot
 with the ``radek-gameboot`` host binary and writes the manifest that the
 on-device ``GameRuntimeApkBuilder`` implements: one authorized 32-bit ARM
-Mach-O slice plus the bundle, packed into a ``*-game.apk`` whose launcher
-shows the boot attempt as a minimal log, stops guest execution at the first
-actually-used unimplemented import, and leaves the diagnostic screen open.
+Mach-O slice plus the bundle, packed into a ``*-game.apk``. The host probe is
+finite by design; the device launcher leaves guest execution unlimited so an
+implemented render loop is not stopped by a diagnostic guard, and leaves the
+diagnostic screen open only when a real runtime boundary is reached.
 """
 
 from __future__ import annotations
@@ -194,7 +195,10 @@ def probe_boot(
         env["LD_LIBRARY_PATH"] = str(library_dir) + separator + env.get("LD_LIBRARY_PATH", "")
     try:
         completed = subprocess.run(
-            [str(binary), str(executable)],
+            # The host probe is intentionally a finite diagnostic run. The
+            # Android JNI path does not pass this flag and therefore keeps the
+            # guest execution policy unlimited for gameplay.
+            [str(binary), str(executable), "--diagnostic-probe"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout,
@@ -213,6 +217,7 @@ def probe_boot(
     execution = report.get("execution") or {}
     darwin_compat = report.get("darwinCompat") or {}
     gles = report.get("gles") or {}
+    execution_policy = report.get("executionPolicy") or {}
     return {
         "status": "PROBED",
         "exitCode": completed.returncode,
@@ -223,6 +228,7 @@ def probe_boot(
         "executionStatus": execution.get("status"),
         "entryPointReached": execution.get("entryPointReached", False),
         "instructions": execution.get("instructions", 0),
+        "executionPolicy": execution_policy,
         "trapCalls": report.get("trapCalls", 0),
         "trappedImport": report.get("trappedImport"),
         "reason": report.get("reason", ""),

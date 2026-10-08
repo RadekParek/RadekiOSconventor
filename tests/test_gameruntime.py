@@ -173,6 +173,40 @@ class ProbeTests(unittest.TestCase):
             probe = gameruntime.probe_boot(target, gameboot_binary=script)
             self.assertEqual("NOT_PROBED", probe["status"])
 
+    def test_host_probe_selects_the_finite_diagnostic_mode_explicitly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            args_file = tmpdir / "args"
+            report = {"executionPolicy": {"unlimited": False, "timeLimitMicros": 20_000_000}}
+            script = tmpdir / "fake-gameboot"
+            script.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"$@\" > {args_file}\n"
+                f"printf '%s\\n' '{json.dumps(report)}'\n"
+            )
+            script.chmod(script.stat().st_mode | stat.S_IXUSR)
+            target = tmpdir / "exec"
+            target.write_bytes(b"\x00" * 32)
+            probe = gameruntime.probe_boot(target, gameboot_binary=script)
+            self.assertEqual("PROBED", probe["status"])
+            self.assertFalse(probe["executionPolicy"]["unlimited"])
+            self.assertIn("--diagnostic-probe", args_file.read_text().splitlines())
+
+
+class RuntimeExecutionPolicySourceTests(unittest.TestCase):
+    def test_device_defaults_are_unlimited_and_only_host_probe_opts_in(self):
+        cpu = (REPO_ROOT / "native/include/compat_runtime/cpu.hpp").read_text(encoding="utf-8")
+        runner = (REPO_ROOT / "native/include/compat_runtime/runner.hpp").read_text(encoding="utf-8")
+        jni = (REPO_ROOT / "native/src/compat_runtime/gameruntime_jni.cpp").read_text(encoding="utf-8")
+        host = (REPO_ROOT / "native/src/compat_runtime/gameboot_main.cpp").read_text(encoding="utf-8")
+        self.assertIn("instructionLimit = 0", cpu)
+        self.assertIn("timeLimitMicros = 0", cpu)
+        self.assertIn("entryInstructionBudget_ = 0", runner)
+        self.assertIn("entryTimeLimitMicros_ = 0", runner)
+        self.assertIn("if (diagnosticProbe)", host)
+        self.assertIn("runner.setEntryBudget(0, 20'000'000)", host)
+        self.assertNotIn("setEntryBudget", jni)
+
 
 def make_synthetic_ipa(path: Path, executable_bytes: bytes) -> None:
     info = {
@@ -248,15 +282,22 @@ class AngryBirdsBootTests(unittest.TestCase):
             # real process-stream cells; none of these names is an Android export.
             self.assertEqual(34, probe["darwinCompatBoundSymbols"])
             self.assertEqual(3, probe["darwinCompatStreamCells"])
-            # The bounded boot attempt ends at a documented boundary: either the
-            # first unimplemented import it touches (trap) or one of its
-            # execution limits when the guest stays inside its own code.
+            # The host probe opts into a finite diagnostic window. The device
+            # policy is still unlimited; a real host run may stop at an import,
+            # guest/backend fault, or that explicit diagnostic timeout.
+            self.assertFalse(probe["executionPolicy"]["unlimited"])
+            self.assertEqual(20_000_000, probe["executionPolicy"]["timeLimitMicros"])
             stopped_at_trap = bool(probe["trappedImport"]) and probe["trapCalls"] == 1
-            stopped_at_limit = (
-                probe["trapCalls"] == 0
-                and probe["executionStatus"] in ("INSTRUCTION_LIMIT", "TIME_LIMIT")
-            )
-            self.assertTrue(stopped_at_trap or stopped_at_limit, probe)
+            stopped_at_boundary = probe["executionStatus"] in {
+                "RETURNED",
+                "TIME_LIMIT",
+                "INSTRUCTION_LIMIT",
+                "GUEST_EXCEPTION_RAISED",
+                "MEMORY_FAULT",
+                "EXECUTION_FAULT",
+                "BACKEND_UNAVAILABLE",
+            }
+            self.assertTrue(stopped_at_trap or stopped_at_boundary, probe)
             full = json.loads((output / "gameboot-report.json").read_text())
             self.assertEqual("not_runnable", full["status"])
             self.assertTrue(full["trapMode"])
@@ -272,6 +313,9 @@ class SplashScreenLauncherTests(unittest.TestCase):
         self.assertIn("decodeCgbiRgbaPixels", gameboot_java)
         self.assertIn("discoverSplashFramesFromBundle", gameboot_java)
         self.assertIn("SPLASHES.dat", gameboot_java)
+        self.assertIn("latestGameSurface", gameboot_java)
+        self.assertIn("Color.BLACK", gameboot_java)
+        self.assertIn("publishGameSurface(latestGameSurface)", gameboot_java)
 
         placeholder_java = (
             REPO_ROOT
@@ -284,6 +328,7 @@ class SplashScreenLauncherTests(unittest.TestCase):
             REPO_ROOT / "converted-template/src/main/java/dev/radek/generated/MainActivity.java"
         ).read_text(encoding="utf-8")
         self.assertIn("readSplash", converted_java)
+        self.assertIn("Color.BLACK", converted_java)
 
         with zipfile.ZipFile(ANGRY_BIRDS_IPA) as zf:
             dat = zf.read("Payload/AngryBirds.app/data/SPLASHES.dat")

@@ -416,7 +416,7 @@ internal class ConvertedApkBuilder(private val context: Context) {
                 .put("completedAt", java.time.Instant.now().toString())
             report.put("deviceConversion", conversion)
             val verifiedApiReplacements = report.optJSONObject("apiMapping")
-                ?.optInt("runtimeVerifiedApiReplacementCount", 0)?.coerceAtLeast(0) ?: 0
+                ?.optInt("concreteDarwinProviderCount", 0)?.coerceAtLeast(0) ?: 0
             report.put("apiImplementationGeneration", (report.optJSONObject("apiImplementationGeneration") ?: JSONObject())
                 .put("status", "RUNTIME_LIBRARY_LINKED_NO_CALLSITE_REWRITES")
                 .put("runtimeLibraryLinked", true)
@@ -424,7 +424,7 @@ internal class ConvertedApkBuilder(private val context: Context) {
                 .put("linkedApiReplacements", 0)
                 .put("linkedIntoGame", false)
                 .put("message", if (verifiedApiReplacements > 0) {
-                    "$verifiedApiReplacements concrete shim export(s) were verified and ${CompatibilityRuntime.SONAME} is linked into the APK through DT_NEEDED. The bounded executable has no imports, so no individual IPA API callsite was rewritten or counted as a linked API replacement."
+                    "$verifiedApiReplacements typed concrete Darwin provider(s) are catalogued and ${CompatibilityRuntime.SONAME} is linked into the APK through DT_NEEDED. The bounded executable has no imports, so no individual IPA API callsite was rewritten or counted as a linked API replacement."
                 } else {
                     "${CompatibilityRuntime.SONAME} is bundled and linked into the APK through DT_NEEDED. No imported API matched the runtime verification, and the bounded executable has no imports, so no individual IPA callsite was rewritten or counted as a linked API replacement; runtime execution was not tested."
                 }))

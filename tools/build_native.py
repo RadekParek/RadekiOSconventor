@@ -128,6 +128,8 @@ compat_sources = [
     root / "native/src/compat_runtime/libsystem_shims.cpp",
     root / "native/src/compat_runtime/gles_shims.cpp",
     root / "native/src/compat_runtime/compiler_rt_shims.cpp",
+    root / "native/src/compat_runtime/cxxabi_shims.cpp",
+    root / "native/src/compat_runtime/ndk_compat_shims.cpp",
     root / "native/src/compat_runtime/virtual_file_system.cpp",
     root / "native/src/compat_runtime/darwin_compat_shims.cpp",
 ]
@@ -203,8 +205,20 @@ subprocess.run(
     check=True,
 )
 subprocess.run([str(out / "compat-runtime-darwin-compat-tests")], check=True)
+subprocess.run(
+    [
+        compiler,
+        *flags,
+        *map(str, compat_sources),
+        str(root / "native/tests/compat_runtime_cxxabi.cpp"),
+        "-o",
+        str(out / "compat-runtime-cxxabi-tests"),
+    ],
+    check=True,
+)
+subprocess.run([str(out / "compat-runtime-cxxabi-tests")], check=True)
 print(
     "compat-runtime-v1 guest memory, Mach-O/dyld, shim registry, CPU boundary,"
-    " Objective-C, trap, libSystem C shim, Darwin-only translation layer, and bounded"
-    " application-lifecycle tests passed"
+    " Objective-C, trap, libSystem C shim, Darwin-only translation layer, full NDK"
+    " provider adapters, and bounded application-lifecycle tests passed"
 )

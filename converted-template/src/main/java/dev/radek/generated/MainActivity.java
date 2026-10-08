@@ -104,8 +104,11 @@ public final class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
-        getWindow().setStatusBarColor(Color.rgb(11, 16, 29));
-        getWindow().setNavigationBarColor(Color.rgb(11, 16, 29));
+        // Generated game APKs use true black behind the recovered splash and
+        // guest output. The previous blue-black palette was visible around
+        // letterboxed 480x320 assets on modern displays.
+        getWindow().setStatusBarColor(Color.BLACK);
+        getWindow().setNavigationBarColor(Color.BLACK);
 
         JSONObject metadata = readMetadata();
         String message = metadata.optString("launchMessage", "Native entry started.");
@@ -113,12 +116,12 @@ public final class MainActivity extends Activity {
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
-        scroll.setBackgroundColor(Color.rgb(11, 16, 29));
+        scroll.setBackgroundColor(Color.BLACK);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setGravity(Gravity.CENTER_HORIZONTAL);
-        root.setBackgroundColor(Color.rgb(11, 16, 29));
+        root.setBackgroundColor(Color.BLACK);
         root.setPadding(dp(24), dp(48), dp(24), dp(48));
 
         Bitmap splashBitmap = readSplash();
@@ -127,9 +130,9 @@ public final class MainActivity extends Activity {
             splashCard.setOrientation(LinearLayout.VERTICAL);
             splashCard.setGravity(Gravity.CENTER_HORIZONTAL);
             GradientDrawable bg = new GradientDrawable();
-            bg.setColor(Color.rgb(17, 25, 43));
+            bg.setColor(Color.BLACK);
             bg.setCornerRadius(dp(12));
-            bg.setStroke(dp(1), Color.rgb(38, 56, 89));
+            bg.setStroke(dp(1), Color.rgb(64, 64, 64));
             splashCard.setBackground(bg);
             splashCard.setPadding(dp(10), dp(10), dp(10), dp(10));
 
@@ -184,7 +187,7 @@ public final class MainActivity extends Activity {
         setContentView(scroll);
         try {
             setTaskDescription(new ActivityManager.TaskDescription(appName.isEmpty() ? "Converted IPA" : appName,
-                    iconBitmap, Color.rgb(11, 16, 29)));
+                    iconBitmap, Color.BLACK));
         } catch (Exception ignored) {
             // The launcher's package icon remains available even when recents icon metadata is unsupported.
         }

@@ -21,6 +21,24 @@ The native report is returned as JSON through `RuntimeBridge` and may be stored 
 
 Each symbol record carries the exact symbol name, source stream, dependency name, signed dylib ordinal encoded as a decimal string, bind address where available, weak-import flag, and resolved/unresolved status. Resolved records additionally name the shim library, adapter, and reserved guest callout address. No missing symbol is silently stubbed or counted as implemented. Weak unresolved imports also block execution.
 
+## Provider coverage
+
+Runtime reports may include an `importProviders` object. For the current Angry
+Birds v1.0 fixture it reports `sameNameNdkProviderCount: 181`,
+`concreteDarwinProviderCount: 73`, and `reviewedProviderCount: 254`. It also
+reports the complete reviewed NDK inventory, currently
+`fullNdkCandidateInventoryCount: 1229`. The first number is an exact fixture
+catalog of ARM32 wrappers/specialized NDK providers; the second is a typed Darwin
+compatibility catalog; the 1229-entry inventory is the broader candidate surface
+used by the mapper. These are registration/provider counts, not same-name
+Android export counts, IPA callsite rewrites, framework equivalence, or gameplay
+evidence. Runtime initialization fails closed if a catalog entry has no
+registered adapter or guest-data resolver. `typedNdkProviderCount` and
+`genericNdkProviderCount` split that full inventory by runtime binding kind;
+`boundedNdkFallbackCalloutCount`, `ndkFallbackCallsObserved`, and
+`genericNdkCallsObserved` are additional diagnostic counters. Specialized
+provider callouts are counted by their own adapter blocks.
+
 ## Loader statuses
 
 - `LOADED`: supported main image and its observed imports were processed; this does **not** mean the application is runnable or reached a menu.

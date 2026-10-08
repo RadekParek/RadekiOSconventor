@@ -18,6 +18,7 @@ library only; framework targets without an implemented ABI adapter are ``candida
 from __future__ import annotations
 
 from .api_implementations import _SUPPORTED as _COMPILED_COMPAT_IMPORTS
+from .compat_import_catalog import CONCRETE_DARWIN_COMPAT_PROVIDERS as _CONCRETE_DARWIN_PROVIDER_IDS
 
 KIND_LIBRARY = "native-library"
 KIND_PLATFORM = "platform-api"
@@ -263,6 +264,16 @@ IMPLEMENTED_C_API_SHIMS = {
     for symbol, (implementation, _selection_macro) in _COMPILED_COMPAT_IMPORTS.items()
 }
 
+#: Concrete, typed ARM32 compatibility providers for the Darwin-only import
+#: surface.  This is intentionally separate from IMPLEMENTED_C_API_SHIMS:
+#: the latter is a broad source/export catalogue used by the standalone host
+#: generator, while this table is the runtime evidence needed to say that the
+#: 73 non-same-name Angry Birds imports have an adapter.
+CONCRETE_DARWIN_COMPAT_PROVIDERS = {
+    symbol: f"libioscompat.so:{provider}"
+    for symbol, provider in _CONCRETE_DARWIN_PROVIDER_IDS.items()
+}
+
 #: Exact reviewed libc/libm/libdl name candidates. A same-name candidate is not
 #: proof that the Darwin ABI or its behavior can be linked safely.
 BIONIC_SYMBOL_CANDIDATES = frozenset(
@@ -482,9 +493,22 @@ def for_install_name(path: str) -> Provider | None:
 
 
 def for_symbol(symbol: str) -> str | None:
-    """Return an exact shim or triage hint; unknown lower-case names stay unknown."""
+    """Return an exact provider or triage hint; unknown names stay unknown.
+
+    The concrete Darwin catalog is checked before the broad standalone export
+    catalogue so reports retain the provider family that is actually registered
+    by compat-runtime-v1 instead of treating a generated fallback as proof.
+    """
     if runtime_candidate := compiler_runtime_candidate(symbol):
+        # An exact Darwin provider is stronger than the generic toolchain hint.
+        if symbol in CONCRETE_DARWIN_COMPAT_PROVIDERS:
+            return f"{CONCRETE_DARWIN_COMPAT_PROVIDERS[symbol]} ({runtime_candidate})"
         return runtime_candidate
+    if symbol in CONCRETE_DARWIN_COMPAT_PROVIDERS:
+        provider = CONCRETE_DARWIN_COMPAT_PROVIDERS[symbol]
+        if symbol.startswith("_objc_msgSend"):
+            return f"{provider} (Objective-C message dispatch)"
+        return provider
     if symbol in IMPLEMENTED_C_API_SHIMS:
         shim = IMPLEMENTED_C_API_SHIMS[symbol]
         bare = symbol.lstrip("_")

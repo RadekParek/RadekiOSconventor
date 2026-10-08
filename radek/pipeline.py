@@ -471,9 +471,12 @@ class Pipeline:
                 self.log(
                     "ANALYZING",
                     "Compatibility registry: "
-                    f'{self.report["compatRegistry"].get("verifiedImplementations", 0)} verified '
-                    f'implementation(s), {self.report["compatRegistry"].get("stubbedHandlers", 0)} '
-                    "explicit unimplemented stub handler(s) generated",
+                    f'{self.report["compatRegistry"].get("reviewedImportProviderCount", 0)}/'
+                    f'{self.report["compatRegistry"].get("totalObservedImports", 0)} reviewed import provider(s) '
+                    f'({self.report["compatRegistry"].get("importProviderCoveragePercent", 0)}%), '
+                    f'{self.report["compatRegistry"].get("concreteDarwinProviderCount", 0)} concrete Darwin '
+                    f'provider(s), {self.report["compatRegistry"].get("stubbedHandlers", 0)} '
+                    "explicit unimplemented resolution stub handler(s) generated",
                 )
                 # How far can this input actually be converted? The ledger walks the
                 # same gates as the fail-closed prover and names the first one that

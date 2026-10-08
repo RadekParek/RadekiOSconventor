@@ -11,16 +11,21 @@ namespace radek::compat_runtime {
 struct GuestFunction {
     GuestAddress entryPoint = 0;
     bool thumb = false;
-    std::uint64_t instructionLimit = 1000000;
-    std::uint64_t timeLimitMicros = 1000000;
+    // Zero means unlimited. The device game-runtime path deliberately does not
+    // stop a running game after an arbitrary instruction count or wall-clock
+    // interval; callers that need a finite diagnostic probe can opt in with
+    // setEntryBudget()/setMainThreadInstructionBudget().
+    std::uint64_t instructionLimit = 0;
+    std::uint64_t timeLimitMicros = 0;
     std::string origin;
 };
 
 struct PreparedGuestFunction {
     GuestAddress entryPoint = 0;
     bool thumb = false;
-    std::uint64_t instructionLimit = 1000000;
-    std::uint64_t timeLimitMicros = 1000000;
+    // Preserve the zero-is-unlimited execution policy across backend preparation.
+    std::uint64_t instructionLimit = 0;
+    std::uint64_t timeLimitMicros = 0;
     std::string backendName;
     std::string origin;
 };

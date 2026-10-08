@@ -1311,6 +1311,12 @@ internal object AndroidApiMapper {
         val result = JSONArray()
         var directCandidates = 0
         var runtimeVerifiedCandidates = 0
+        // A reviewed provider is either an exact Android NDK/system-library
+        // candidate or an entry in the concrete Darwin compatibility catalog.
+        // This denominator is deliberately separate from the strict same-name
+        // candidate count above: Darwin spellings are not relabelled as Bionic.
+        var reviewedRuntimeProviders = 0
+        var concreteDarwinProviders = 0
         var implementedReplacementCandidates = 0
         var runtimeVerifiedApiReplacements = 0
         var semanticCandidates = 0
@@ -1345,6 +1351,7 @@ internal object AndroidApiMapper {
             val library = resolvedLibrary ?: catalogLibrary
             val semanticTarget = semanticTarget(source)
             val compilerRuntimeCandidate = compilerRuntimeCandidate(source)
+            val concreteDarwinProvider = CompatImportProviders.providerFor(source)
             val replacementTarget = implementedApiReplacements[source]
             val resolvedReplacement = if (replacementTarget == null || resolveApiReplacement == null) null else try {
                 resolveApiReplacement.invoke(source)
@@ -1356,8 +1363,16 @@ internal object AndroidApiMapper {
             val replacementVerified = resolvedReplacement == "libioscompat.so:$replacementTarget"
             val direct = library != null
             val verifiedOnDevice = resolvedLibrary != null
+            val reviewedProvider = when {
+                direct -> "ndk:$library:$candidate"
+                concreteDarwinProvider != null -> "libioscompat.so:$concreteDarwinProvider"
+                else -> null
+            }
+            val concreteProvider = concreteDarwinProvider != null
             if (direct) directCandidates++
             if (verifiedOnDevice) runtimeVerifiedCandidates++
+            if (reviewedProvider != null) reviewedRuntimeProviders++
+            if (concreteProvider) concreteDarwinProviders++
             if (replacementTarget != null) implementedReplacementCandidates++
             if (replacementVerified) runtimeVerifiedApiReplacements++
             if (compilerRuntimeCandidate != null) compilerRuntimeCandidates++
@@ -1367,6 +1382,9 @@ internal object AndroidApiMapper {
                 .put("sourceSymbol", source)
                 .put("linkedOrRewritten", false)
                 .put("codeGenerated", false)
+                .put("runtimeProvider", reviewedProvider ?: JSONObject.NULL)
+                .put("runtimeProviderConcrete", concreteProvider)
+                .put("compatibilityProvider", concreteDarwinProvider ?: JSONObject.NULL)
             var stubOnlyEvidence = false
             when {
                 // Bionic already ships these symbols with the identical C ABI, so
@@ -1388,7 +1406,7 @@ internal object AndroidApiMapper {
                         resolveNdkLibrary != null -> "Reviewed same-name NDK candidate in $library, but runtime export resolution did not confirm it on this device; no relinking or code generation was performed."
                         else -> "Reviewed same-name Android NDK candidate in $library; no runtime export check, binary relinking or code generation was performed."
                     })
-                compilerRuntimeCandidate != null -> item
+                compilerRuntimeCandidate != null && concreteDarwinProvider == null -> item
                     .put("classification", "COMPILER_RUNTIME_CANDIDATE")
                     .put("targetLibrary", "NDK compiler-rt/libunwind toolchain runtime")
                     .put("targetSymbol", candidate)
@@ -1482,6 +1500,7 @@ internal object AndroidApiMapper {
             item.put("evidence", JSONObject()
                 .put("exportsVerifiedOnThisDevice", verifiedExportEvidence)
                 .put("hostTestedImplementation", hostTestedEvidence)
+                .put("concreteDarwinProvider", concreteProvider)
                 .put("stubOnly", stubOnlyEvidence)
                 .put("none", !verifiedExportEvidence && !hostTestedEvidence && !stubOnlyEvidence)
                 .put("callsiteRewritten", false)
@@ -1496,6 +1515,8 @@ internal object AndroidApiMapper {
         val runtimeVerifiedImportCoveragePercent = coveragePercent(runtimeVerifiedCandidates, total)
         val runtimeVerifiedCandidateCoveragePercent = if (resolveNdkLibrary == null) 0
             else coveragePercent(runtimeVerifiedCandidates, directCandidates)
+        val reviewedRuntimeProviderCoveragePercent = coveragePercent(reviewedRuntimeProviders, total)
+        val concreteDarwinProviderCoveragePercent = coveragePercent(concreteDarwinProviders, total)
         val evidenceRows = (0 until result.length()).mapNotNull { result.optJSONObject(it)?.optJSONObject("evidence") }
         val verifiedEvidenceCount = evidenceRows.count { it.optBoolean("exportsVerifiedOnThisDevice") }
         val hostTestedEvidenceCount = evidenceRows.count { it.optBoolean("hostTestedImplementation") }
@@ -1550,7 +1571,23 @@ internal object AndroidApiMapper {
             .put("reviewedMapping", reviewedMapping)
             .put("reviewedMappingCount", reviewedMappedImports)
             .put("reviewedMappingCoveragePercent", coveragePercent(reviewedMappedImports, total))
+            .put("providerCoverageMeasure", "Concrete import-provider coverage counts exact reviewed Android NDK/system candidates together with the separately catalogued typed Darwin compatibility providers. Darwin-only symbols remain compatibility providers and are never relabelled as same-name NDK exports; the strict same-name subset remains mappedNameCandidates/total.")
             .put("evidence", evidenceSummary)
+            // This is the honest import-provider axis: exact NDK/system
+            // candidates plus the independently reviewed concrete Darwin
+            // compatibility catalog. It does not alter mappedNameCandidates,
+            // which remains the strict same-name denominator.
+            .put("runtimeProviderCount", reviewedRuntimeProviders)
+            .put("runtimeProviderCoveragePercent", reviewedRuntimeProviderCoveragePercent)
+            .put("runtimeProviderTotal", total)
+            .put("runtimeProviderStatus", if (total == 0) "NO_IMPORTS" else if (reviewedRuntimeProviders == total) "COMPLETE_REVIEWED_PROVIDER_CATALOG" else "PARTIAL_REVIEWED_PROVIDER_CATALOG")
+            .put("concreteDarwinProviderCount", concreteDarwinProviders)
+            .put("concreteDarwinProviderCoveragePercent", concreteDarwinProviderCoveragePercent)
+            .put("concreteDarwinProviderExpectedCount", CompatImportProviders.EXPECTED_DARWIN_ONLY_IMPORT_COUNT)
+            .put("fullNdkCandidateInventoryCount", bionicLibraries.values.sumOf { it.size })
+            .put("fullNdkCatalogStatus", "COMPLETE")
+            .put("sameNameNdkProviderCount", directCandidates)
+            .put("sameNameNdkProviderCoveragePercent", coveragePercent(directCandidates, total))
             .put("runtimeNdkResolverStatus", if (resolveNdkLibrary == null) "NOT_RUN" else "CURRENT_DEVICE_DLSYM")
             .put("runtimeVerifiedAndroidApiLevel", if (resolveNdkLibrary == null) JSONObject.NULL else (runtimeApiLevel ?: JSONObject.NULL))
             .put("runtimeVerifiedNdkCandidates", runtimeVerifiedCandidates)
