@@ -261,7 +261,14 @@ class AndroidApiMapperTest {
         assertEquals(5, mapping.getInt("compilerRuntimeCandidateCount"))
         assertEquals(0, mapping.getInt("unmappedSymbolCount"))
         assertEquals(100, mapping.getInt("classificationCoveragePercent"))
-        assertTrue(decoded.all { it.getString("classification") == "COMPILER_RUNTIME_CANDIDATE" })
+        // divdi3 now has a concrete, host-tested compatibility body; the
+        // remaining compiler-runtime/unwind names stay honest toolchain
+        // candidates rather than being relabelled as direct NDK exports.
+        assertEquals(4, decoded.count { it.getString("classification") == "COMPILER_RUNTIME_CANDIDATE" })
+        assertEquals(1, decoded.count { it.getString("classification") == "IMPLEMENTED_API_REPLACEMENT_AVAILABLE" })
+        val divdi3 = decoded.single { it.getString("sourceSymbol") == "___divdi3" }
+        assertEquals("IMPLEMENTED_API_REPLACEMENT_AVAILABLE", divdi3.getString("classification"))
+        assertEquals("radek_compat___divdi3", divdi3.getString("targetSymbol"))
         assertTrue(decoded.all { !it.getBoolean("linkedOrRewritten") && !it.getBoolean("codeGenerated") })
         assertTrue(decoded.any { it.getString("reason").contains("does not provide a drop-in libgcc_s.so") })
     }
