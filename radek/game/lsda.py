@@ -65,9 +65,11 @@ class LSDA:
     end: int  # first byte past the action table
     callsites: list = field(default_factory=list)  # (lp_index, action_offset)
     actions: list = field(default_factory=list)  # (filter, disp, record_addr)
+    action_next: dict = field(default_factory=dict)  # record_addr -> next record
     lpstart_encoding: int = OMIT
     ttype_encoding: int = OMIT
     ttype_base: int | None = None  # TType address when present
+    action_base: int = 0  # first byte of the action table
     type_entries: dict = field(default_factory=dict)  # addr -> typeinfo ptr
     lpstart_addr: int | None = None  # address of absolute LPStart, if any
     byte_ranges: list = field(default_factory=list)  # (lo, hi): never pointers
@@ -119,6 +121,7 @@ def parse_lsda(image: macho.Image, address: int, limit: int) -> LSDA:
     # nonzero action offset is 1-based from the action-table start; a nonzero
     # displacement continues the chain relative to the displacement field.
     action_base = address + pos
+    lsda.action_base = action_base
     action_end = action_base
     seen_chains: set = set()
     for _, action in lsda.callsites:
@@ -136,7 +139,10 @@ def parse_lsda(image: macho.Image, address: int, limit: int) -> LSDA:
             lsda.actions.append((filt, disp, record_addr))
             action_end = max(action_end, address + after_disp)
             if disp == 0:
+                lsda.action_next[record_addr] = 0
                 break
+            next_record = address + after_filt + disp
+            lsda.action_next[record_addr] = next_record
             cursor = after_filt + disp
     lsda.byte_ranges.append((action_base, action_end))
     # Type table: absolute typeinfo pointers in the 4-aligned words between

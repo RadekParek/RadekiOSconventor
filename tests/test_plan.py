@@ -116,6 +116,28 @@ class PlanRealInputTest(unittest.TestCase):
             self.report["staticRecompilationPlan"]["staticallyRecompiledBytes"],
         )
 
+    def test_whole_game_bytecode_translation_is_emitted_before_packaging_blocker(self):
+        translation = self.report["bytecodeTranslation"]
+        self.assertEqual(translation["status"], "GENERATED_PORTABLE_C")
+        self.assertGreater(translation["translatedFunctionCount"], 1000)
+        self.assertEqual(translation["functionFailures"], 0)
+        self.assertEqual(translation["percent"], 100.0)
+        self.assertFalse(translation["linkedIntoGame"])
+        self.assertFalse(translation["apkProduced"])
+        job = self.root / "job"
+        for name in ("game_all.c", "rt_gen.c", "rt_gen.h", "rt_mem.bin", "rt_report.json"):
+            self.assertTrue((job / "bytecode-translation" / name).is_file(), name)
+        generated = json.loads((job / "bytecode-translation" / "rt_report.json").read_text())
+        self.assertEqual(generated["functions"], translation["translatedFunctionCount"])
+        self.assertEqual(generated["functionFailures"], 0)
+        self.assertEqual(generated["objcClasses"], 2)
+        self.assertEqual(generated["objcMethods"], 25)
+        self.assertEqual(generated["objcProblems"], 0)
+        self.assertEqual(generated["lsdaTables"], 558)
+        self.assertEqual(generated["lsdaSites"], 2907)
+        self.assertEqual(generated["lsdaActions"], 51)
+        self.assertEqual(generated["lsdaProblems"], 0)
+
 
 class PlanProvenSubsetTest(unittest.TestCase):
     """The bounded proven subset keeps its own artifact accounting."""

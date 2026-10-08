@@ -19,15 +19,36 @@ import os
 import re
 import zipfile
 
-from . import disasm, lift, macho
+from . import disasm, lift, lsda, macho, objc_meta
 from .lift import sanitize
 
 
 def _find_exec(zf: zipfile.ZipFile) -> str:
-    for n in zf.namelist():
-        if n.startswith("Payload/") and n.endswith(".app/AngryBirds"):
-            return n
-    raise ValueError("game executable not found in IPA")
+    """Find the bundle executable from Info.plist, not from a hard-coded name."""
+    names = set(zf.namelist())
+    infos = sorted(
+        name for name in names
+        if name.startswith("Payload/") and name.endswith(".app/Info.plist")
+    )
+    for info_name in infos:
+        try:
+            import plistlib
+
+            info = plistlib.loads(zf.read(info_name))
+            executable = info.get("CFBundleExecutable")
+        except (KeyError, OSError, ValueError, plistlib.InvalidFileException):
+            continue
+        if not isinstance(executable, str) or not executable or "/" in executable:
+            continue
+        candidate = info_name.rsplit("/", 1)[0] + "/" + executable
+        if candidate in names:
+            return candidate
+    # Keep the original Angry Birds path as a compatibility fallback for old
+    # fixtures that deliberately omit or use an unreadable plist.
+    for name in sorted(names):
+        if name.startswith("Payload/") and name.endswith(".app/AngryBirds"):
+            return name
+    raise ValueError("bundle executable could not be found from Info.plist")
 
 
 def load_ipa(ipa_path: str):
@@ -69,6 +90,11 @@ def _callsites(funcs, addrs) -> set[int]:
     sites = set()
     for a in addrs:
         for (x, m, _o, b) in funcs[a].instructions:
+            # The lifted backend also uses VRET_BIT for register/PC-relative
+            # dispatch continuations (not only BL/BLX). Mark every decoded
+            # instruction address so those continuations return to the C
+            # caller without weakening the range check to arbitrary memory.
+            sites.add(x)
             w = int.from_bytes(b, "little")
             if ((w >> 25) & 7) == 5 and (w >> 24) & 1:
                 sites.add(x)
@@ -79,10 +105,17 @@ def _callsites(funcs, addrs) -> set[int]:
 
 def generate(ipa_path: str, out_dir: str) -> dict:
     img, funcs, ctx = load_ipa(ipa_path)
+    objc = objc_meta.parse(img)
+    lsda_tables, lsda_inner, lsda_problems = lsda.parse_all(img)
     out, failures = lift.lift_all(ctx)
     assert not failures, failures[:5]
     addrs = sorted(out)
     shims = _collect_shims(ctx, out)
+    objc_methods = [
+        (owner, selector, imp)
+        for owner, selector, _types, imp in objc.methods
+        if not owner.startswith("proto:") and imp and imp in ctx.cname
+    ]
     os.makedirs(out_dir, exist_ok=True)
 
     # ---- game_all.c ----
@@ -212,6 +245,11 @@ def generate(ipa_path: str, out_dir: str) -> dict:
             if row:
                 f.write("    " + ",".join(row) + ",\n")
             f.write("};\n")
+        else:
+            # Keep the generated runtime linkable for a valid no-call image.
+            f.write("unsigned DT_CALL_LO = 0u;\n")
+            f.write("unsigned DT_CALL_HI = 0u;\n")
+            f.write("const unsigned char CALLSITE_MAP[] = {0};\n")
         f.write("static const char *SHIM_SYMS[] = {\n")
         for n in shims:
             sym = n[len("shim_"):]
@@ -250,6 +288,85 @@ def generate(ipa_path: str, out_dir: str) -> dict:
             f.write(f'    {{0x{a:x}u, "{esc}"}},\n')
         f.write("};\n")
         f.write(f"unsigned RT_NLASYM = {len(la_syms)};\n")
+        # Objective-C class/method metadata used by the bounded runtime
+        # dispatcher. Protocol declarations remain report-only; concrete
+        # class methods are emitted only when their IMP was lifted.
+        f.write("const RT_OBJC_CLASS RT_OBJC_CLASSES[] = {\n")
+        if objc.classes:
+            for class_addr, _meta_addr, class_name in objc.classes:
+                esc = class_name.replace("\\", "\\\\").replace('"', '\\"')
+                f.write(f'    {{0x{class_addr:x}u, "{esc}"}},\n')
+        else:
+            f.write("    {0u, \"\"},\n")
+        f.write("};\n")
+        f.write(f"unsigned RT_NOBJC_CLASSES = {len(objc.classes)};\n")
+        f.write("const RT_OBJC_METHOD RT_OBJC_METHODS[] = {\n")
+        if objc_methods:
+            for owner, selector, imp in objc_methods:
+                owner_esc = owner.replace("\\", "\\\\").replace('"', '\\"')
+                selector_esc = selector.replace("\\", "\\\\").replace('"', '\\"')
+                f.write(f'    {{"{owner_esc}", "{selector_esc}", 0x{imp:x}u}},\n')
+        else:
+            f.write("    {\"\", \"\", 0u},\n")
+        f.write("};\n")
+        f.write(f"unsigned RT_NOBJC_METHODS = {len(objc_methods)};\n")
+        f.write("const RT_LSDA_TABLE RT_LSDA_TABLES[] = {\n")
+        site_first = 0
+        if lsda_tables:
+            for table_addr, table in sorted(lsda_tables.items()):
+                f.write(
+                    f"    {{0x{table_addr:x}u, 0x{table.end:x}u, {site_first}u, "
+                    f"0x{table.action_base:x}u, "
+                    f"0x{(table.ttype_base or 0):x}u, {len(table.callsites)}u, "
+                    f"{len(table.actions)}u, {len(table.type_entries)}u}},\n"
+                )
+                site_first += len(table.callsites)
+        else:
+            f.write("    {0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u},\n")
+        f.write("};\n")
+        f.write(f"unsigned RT_NLSDA_TABLES = {len(lsda_tables)};\n")
+        f.write("const RT_LSDA_SITE RT_LSDA_SITES[] = {\n")
+        site_index = 0
+        if lsda_tables:
+            for table_addr, table in sorted(lsda_tables.items()):
+                for landing, action in table.callsites:
+                    f.write(
+                        f"    {{0x{table_addr:x}u, {site_index}u, "
+                        f"{landing}u, {action}u}},\n"
+                    )
+                    site_index += 1
+        else:
+            f.write("    {0u, 0u, 0u, 0u},\n")
+        f.write("};\n")
+        f.write(f"unsigned RT_NLSDA_SITES = {site_index};\n")
+        f.write("const RT_LSDA_ACTION RT_LSDA_ACTIONS[] = {\n")
+        action_index = 0
+        if lsda_tables:
+            for table_addr, table in sorted(lsda_tables.items()):
+                for filt, displacement, record_addr in table.actions:
+                    f.write(
+                        f"    {{0x{table_addr:x}u, 0x{record_addr:x}u, "
+                        f"0x{table.action_next.get(record_addr, 0):x}u, "
+                        f"{filt}, {displacement}}},\n"
+                    )
+                    action_index += 1
+        else:
+            f.write("    {0u, 0u, 0u, 0, 0},\n")
+        f.write("};\n")
+        f.write(f"unsigned RT_NLSDA_ACTIONS = {action_index};\n")
+        f.write("const RT_LSDA_TYPE RT_LSDA_TYPES[] = {\n")
+        wrote_lsda_type = False
+        for table_addr, table in sorted(lsda_tables.items()):
+            for slot, typeinfo in sorted(table.type_entries.items()):
+                f.write(f"    {{0x{table_addr:x}u, 0x{slot:x}u, 0x{typeinfo:x}u}},\n")
+                wrote_lsda_type = True
+        if not wrote_lsda_type:
+            f.write("    {0u, 0u, 0u},\n")
+        f.write("};\n")
+        f.write(
+            f"unsigned RT_NLSDA_TYPES = "
+            f"{sum(len(table.type_entries) for table in lsda_tables.values())};\n"
+        )
         # mod inits
         f.write("void (*RT_MODINITS[])(CPU *cpu) = {\n")
         for a in modinits:
@@ -273,6 +390,18 @@ def generate(ipa_path: str, out_dir: str) -> dict:
         f.write('typedef struct CPU CPU;\n')
         f.write("typedef struct { uint32_t addr; uint32_t len; uint32_t blob; int zero; } RT_REGION;\n")
         f.write("typedef struct { uint32_t addr; const char *sym; } RT_BIND;\n")
+        f.write("typedef struct { uint32_t addr; const char *name; } RT_OBJC_CLASS;\n")
+        f.write("typedef struct { const char *owner; const char *selector; uint32_t imp; } RT_OBJC_METHOD;\n")
+        f.write("typedef struct { uint32_t addr; uint32_t end; uint32_t site_first; uint32_t action_base; uint32_t ttype_base; unsigned callsites; unsigned actions; unsigned types; } RT_LSDA_TABLE;\n")
+        f.write("typedef struct { uint32_t table; unsigned index; unsigned landing; unsigned action; } RT_LSDA_SITE;\n")
+        f.write("typedef struct { uint32_t table; uint32_t record; uint32_t next; int filter; int displacement; } RT_LSDA_ACTION;\n")
+        f.write("typedef struct { uint32_t table; uint32_t slot; uint32_t typeinfo; } RT_LSDA_TYPE;\n")
+        f.write("extern const RT_OBJC_CLASS RT_OBJC_CLASSES[];\nextern unsigned RT_NOBJC_CLASSES;\n")
+        f.write("extern const RT_LSDA_TABLE RT_LSDA_TABLES[];\nextern unsigned RT_NLSDA_TABLES;\n")
+        f.write("extern const RT_LSDA_SITE RT_LSDA_SITES[];\nextern unsigned RT_NLSDA_SITES;\n")
+        f.write("extern const RT_LSDA_ACTION RT_LSDA_ACTIONS[];\nextern unsigned RT_NLSDA_ACTIONS;\n")
+        f.write("extern const RT_LSDA_TYPE RT_LSDA_TYPES[];\nextern unsigned RT_NLSDA_TYPES;\n")
+        f.write("extern const RT_OBJC_METHOD RT_OBJC_METHODS[];\nextern unsigned RT_NOBJC_METHODS;\n")
         f.write("extern void (*DT_FUNCS[])(CPU *cpu);\nextern unsigned DT_NFUNCS;\n")
         f.write("extern const uint32_t DT_ADDRS[];\n")
         f.write("extern void (*DT_SHIM_FUNCS[])(CPU *cpu);\n")
@@ -293,8 +422,15 @@ def generate(ipa_path: str, out_dir: str) -> dict:
         f.write("extern void (*RT_MAIN)(CPU *cpu);\nextern uint32_t RT_MAIN_ADDR;\n")
         f.write("#endif\n")
 
+    text_section = img.section_named("__TEXT", "__text")
+    executable_text_bytes = int(getattr(text_section, "size", 0) or 0)
+    translated_function_bytes = sum(
+        4 * len(funcs[address].instructions) for address in addrs
+    )
     report = {
+        "status": "GENERATED",
         "functions": len(addrs),
+        "functionFailures": 0,
         "shims": len(shims),
         "regions": len(regions),
         "blob_bytes": len(blob),
@@ -302,7 +438,26 @@ def generate(ipa_path: str, out_dir: str) -> dict:
         "nlsym": len(nl_syms),
         "lasym": len(la_syms),
         "modinits": len(modinits),
+        "objcClasses": len(objc.classes),
+        "objcMethods": len(objc_methods),
+        "objcProtocols": len(objc.protocols),
+        "objcBoundSymbols": len(objc.bound_symbols),
+        "objcProblems": len(objc.problems),
+        "lsdaTables": len(lsda_tables),
+        "lsdaInnerLabels": len(lsda_inner),
+        "lsdaSites": sum(len(table.callsites) for table in lsda_tables.values()),
+        "lsdaActions": sum(len(table.actions) for table in lsda_tables.values()),
+        "lsdaTypeEntries": sum(len(table.type_entries) for table in lsda_tables.values()),
+        "lsdaProblems": len(lsda_problems),
         "main_addr": main_addr,
+        "executableTextBytes": executable_text_bytes,
+        "translatedFunctionBytes": translated_function_bytes,
+        "translatedTextPercent": round(
+            min(100.0, 100.0 * translated_function_bytes / executable_text_bytes), 6
+        ) if executable_text_bytes else 0.0,
+        "translationBackend": "radek.game.lift -> portable C ARM32 state runtime",
+        "linkedIntoGame": False,
+        "apkProduced": False,
     }
     with open(os.path.join(out_dir, "rt_report.json"), "w") as f:
         json.dump(report, f, indent=2)

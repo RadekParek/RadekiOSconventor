@@ -39,6 +39,19 @@ registered adapter or guest-data resolver. `typedNdkProviderCount` and
 `genericNdkCallsObserved` are additional diagnostic counters. Specialized
 provider callouts are counted by their own adapter blocks.
 
+The host conversion report also has a separate `bytecodeTranslation` block when
+whole-game ARM lifting is possible. `GENERATED_PORTABLE_C` means the decoded
+functions were emitted into `game_all.c` with generated runtime tables and
+`rt_mem.bin`; it does **not** mean those sources are linked into an Android
+library, packaged in an APK, or device-tested. `linkedIntoGame`, `apkProduced`,
+and `completeGameConversion` remain false until those later gates are actually
+verified. The generated runtime tables may additionally contain parsed
+Objective-C class/method metadata, materialized import slots, and bounded
+SjLj/LSDA table descriptors; those tables make guest dispatch and loader
+metadata inspectable/executable in the host harness, but do not constitute an
+Android framework implementation or device evidence. A nonzero LSDA table
+count is metadata coverage, not evidence that a thrown exception was caught.
+
 ## Loader statuses
 
 - `LOADED`: supported main image and its observed imports were processed; this does **not** mean the application is runnable or reached a menu.

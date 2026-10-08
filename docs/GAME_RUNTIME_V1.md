@@ -203,8 +203,12 @@ imports also receive ARM32 provider bindings (specialized GLES/libSystem/C++
 providers plus bounded libc/POSIX/math/stdio/pthread/zlib/asset wrappers). The
 full reviewed NDK candidate inventory contains 1,229 names and is registered
 with typed adapters or explicit bounded provider boundaries, so an unimplemented
-candidate is visible as a named boundary rather than an unresolved import. The
-Darwin data/ctype/OpenAL subset lives in `native/src/compat_runtime/darwin_compat_shims.cpp`
+candidate is visible as a named boundary rather than an unresolved import. When
+complete-game proving stops on the Angry Birds metadata/API gates, the host
+pipeline still emits the whole-game ARM translation under `bytecode-translation/`
+(`game_all.c`, generated dispatch tables, and `rt_mem.bin`) instead of stopping
+before translation. This is portable-C host output only; it is not yet an
+Android-linked game library or APK. The Darwin data/ctype/OpenAL subset lives in `native/src/compat_runtime/darwin_compat_shims.cpp`
 (`darwin_compat::ShimAdapter`, callout window `0xf0050000`–`0xf0080000`):
 
 - **ctype sweep** (`__tolower`, `__toupper`, `__maskrune`): ASCII/C-locale
@@ -225,13 +229,19 @@ Darwin data/ctype/OpenAL subset lives in `native/src/compat_runtime/darwin_compa
 - **OpenAL** (14 `_al*` + 5 `_alc*` entries): state-only bookkeeping (generated
   buffer/source ids, and per-source int/float/queue state round-tripped through
   `_alGetSourcei`/`_alGetSourcef`). No audio is produced and the report says so.
-- **`_gxx_personality_sj0`**: an explicit fail-closed boundary — calling it
-  raises the guest exception path instead of pretending to unwind.
+- **`_gxx_personality_sj0`**: an explicit fail-closed boundary when the
+  personality itself is called as an unresolved import. The generated host
+  runtime nevertheless materializes the parsed ARM SjLj/LSDA call-site and
+  action tables, records bounded guest registration contexts, and can transfer
+  a proven catch-all or exact type match through the saved guest dispatch label.
+  An uncaught throw still stops at `cxa_throw` rather than being reported as a
+  successful game run.
 - **C++ ABI support** (`native/src/compat_runtime/cxxabi_shims.cpp`): bounded
   exception allocation/free, `__cxa_atexit`, guard variables, guest RTTI/vtable
   data bindings, and the compiler-runtime/SjLj registration boundary. The
   adapter never jumps a host exception through an arbitrary guest ARM stack;
-  catch search and landing-pad transfer remain explicit boundaries.
+  LSDA selection and landing-pad transfer use generated guest-state metadata,
+  with fail-closed behavior for unsupported typed matches.
 
 The Darwin adapter is counted (`boundSymbols`, `ctypeCalls`, `openalCalls`,
 `streamCells`, `personalityBoundaries`) and pinned by

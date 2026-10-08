@@ -14,6 +14,7 @@ from .gamepack import (
     complete_game_metadata,
     validate_complete_game,
 )
+from .game.codegen import generate as generate_full_game_translation
 from .api_implementations import generate as generate_api_replacements
 from .c_backend import emit as emit_c
 from .compat_layer import generate as generate_compat_registry
@@ -95,6 +96,20 @@ class Pipeline:
                     "No LLVM IR has been emitted; the optional leaf backend is limited to a closed integer subset."
                 ),
             },
+            "bytecodeTranslation": {
+                "status": "NOT_ATTEMPTED",
+                "translatedFunctionCount": 0,
+                "translatedTextBytes": 0,
+                "executableTextBytes": 0,
+                "percent": 0,
+                "artifacts": [],
+                "linkedIntoGame": False,
+                "apkProduced": False,
+                "completeGameConversion": False,
+                "message": (
+                    "The whole-game ARM translation stage has not run; no translated game source has been emitted."
+                ),
+            },
             "portProgress": {
                 "percent": 0,
                 "status": "NO_COMPLETE_GAME_CODE_EMITTED",
@@ -116,6 +131,70 @@ class Pipeline:
             },
         }
         self._last_save = None
+
+    def _record_bytecode_translation(self, ipa: Path) -> None:
+        """Emit the complete translated ARM game source after leaf proving stops.
+
+        The complete-game prover is intentionally stricter than the translator:
+        Objective-C metadata, initializers and API/lifecycle integration can block
+        APK packaging while the instruction lifter can still translate every
+        decoded function. Keep those facts separate. This stage writes the real
+        generated C/runtime tables into the job directory and never changes the
+        complete-game or APK gates.
+        """
+        destination = self.output / "bytecode-translation"
+        try:
+            result = generate_full_game_translation(str(ipa), str(destination))
+        except Exception as exc:  # noqa: BLE001 - translation is diagnostic and fail-closed
+            self.report["bytecodeTranslation"] = {
+                "status": "BLOCKED",
+                "translatedFunctionCount": 0,
+                "translatedTextBytes": 0,
+                "executableTextBytes": 0,
+                "percent": 0,
+                "artifacts": [],
+                "linkedIntoGame": False,
+                "apkProduced": False,
+                "completeGameConversion": False,
+                "message": f"Whole-game bytecode translation did not emit an artifact: {exc}",
+            }
+            self.log("BYTECODE_TRANSLATION", self.report["bytecodeTranslation"]["message"])
+            return
+
+        artifact_names = [
+            "game_all.c",
+            "rt_gen.c",
+            "rt_gen.h",
+            "rt_mem.bin",
+            "rt_report.json",
+        ]
+        present = [name for name in artifact_names if (destination / name).is_file()]
+        self.report["bytecodeTranslation"] = {
+            "status": "GENERATED_PORTABLE_C",
+            "translatedFunctionCount": result.get("functions", 0),
+            "functionFailures": result.get("functionFailures", 0),
+            "translatedTextBytes": result.get("translatedFunctionBytes", 0),
+            "executableTextBytes": result.get("executableTextBytes", 0),
+            "percent": result.get("translatedTextPercent", 0),
+            "translationBackend": result.get("translationBackend"),
+            "artifacts": [f"bytecode-translation/{name}" for name in present],
+            "runtimeReport": "bytecode-translation/rt_report.json",
+            "linkedIntoGame": False,
+            "apkProduced": False,
+            "completeGameConversion": False,
+            "message": (
+                f"Translated {result.get('functions', 0)} decoded ARM function(s) into portable C and "
+                "generated the ARM32 state-runtime tables. This is host translation output; it is not yet "
+                "linked into an Android game library or APK."
+            ),
+        }
+        port = self.report["portProgress"]
+        port["bytecodeTranslationStatus"] = self.report["bytecodeTranslation"]["status"]
+        port["translatedFunctions"] = self.report["bytecodeTranslation"]["translatedFunctionCount"]
+        port["translatedTextBytes"] = self.report["bytecodeTranslation"]["translatedTextBytes"]
+        port["translationArtifacts"] = self.report["bytecodeTranslation"]["artifacts"]
+        port["translationLinkedIntoGame"] = False
+        self.log("BYTECODE_TRANSLATION", self.report["bytecodeTranslation"]["message"])
 
     def _record_static_recompilation_plan(self, executable: Path) -> None:
         """Record how much of this slice the host lifter statically recompiles.
@@ -529,6 +608,7 @@ class Pipeline:
                             "(see the Conversion ceiling section of reconstruction.md)"
                         )
                     self._record_static_recompilation_plan(executable)
+                    self._record_bytecode_translation(ipa)
                     self.transition("BLOCKED", str(exc))
                     return self.report
                 # Emit a real, self-contained Android function artifact from the

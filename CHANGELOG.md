@@ -4,6 +4,17 @@ All notable changes to RadekiOSConventor. Every entry states what was verified a
 what was **not**: analysis, triage, name mappings and host static-recompilation
 coverage never mean a linked game, a playable conversion or a device-tested APK.
 
+## 2026-10-08 — Whole-game ARM translation emitted before APK gates
+
+The Angry Birds pipeline no longer stops at the complete-game leaf prover before
+emitting translated code. After the metadata/API gate correctly blocks complete
+APK conversion, it now runs the fail-closed ARM lifter across the decoded game
+functions and writes `bytecode-translation/game_all.c`, generated dispatch and
+shim tables, and the non-zero-fill memory image. The current fixture emits 2,837
+functions with zero lift failures and 100% of the measured executable text-byte
+coverage. These are host portable-C translation artifacts, not a linked Android
+library or playable APK.
+
 ## 2026-10-08 — Complete reviewed NDK inventory and bounded family adapters
 
 The native runtime now registers the complete 1,229-name reviewed Bionic/NDK
