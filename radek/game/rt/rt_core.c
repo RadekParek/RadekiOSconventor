@@ -1130,11 +1130,9 @@ static uint32_t rt_materialize_default_rune_locale(void) {
 
 static void rt_bind_loader(void) {
     unsigned i;
-    uint32_t default_rune_locale = 0;
     for (i = 0; i < RT_NNLSYM; i++)
         if (!strcmp(RT_NLSYM[i].sym, "__DefaultRuneLocale")) {
-            default_rune_locale = rt_materialize_default_rune_locale();
-            wr32(RT_NLSYM[i].addr, default_rune_locale);
+            wr32(RT_NLSYM[i].addr, rt_materialize_default_rune_locale());
             break;
         }
     for (i = 0; i < RT_NEXTREL; i++) {
