@@ -549,13 +549,15 @@ class Pipeline:
                 self.report["compatRegistry"] = generate_compat_registry(reconstruction, self.output)
                 self.log(
                     "ANALYZING",
-                    "Compatibility registry: "
+                    "Compatibility provider catalog: "
                     f'{self.report["compatRegistry"].get("reviewedImportProviderCount", 0)}/'
-                    f'{self.report["compatRegistry"].get("totalObservedImports", 0)} reviewed import provider(s) '
-                    f'({self.report["compatRegistry"].get("importProviderCoveragePercent", 0)}%), '
-                    f'{self.report["compatRegistry"].get("concreteDarwinProviderCount", 0)} concrete Darwin '
-                    f'provider(s), {self.report["compatRegistry"].get("stubbedHandlers", 0)} '
-                    "explicit unimplemented resolution stub handler(s) generated",
+                    f'{self.report["compatRegistry"].get("totalObservedImports", 0)} observed import names '
+                    f'({self.report["compatRegistry"].get("importProviderCoveragePercent", 0)}%) = '
+                    f'{self.report["compatRegistry"].get("sameNameNdkCandidateCount", 0)} strict same-name '
+                    f'NDK/system candidates + '
+                    f'{self.report["compatRegistry"].get("guestRuntimeAdapterCatalogCount", 0)} guest-adapter '
+                    f'catalog entries; {self.report["compatRegistry"].get("stubbedHandlers", 0)} '
+                    "explicit generated-registry stub handler(s). This is not runtime slot-link coverage.",
                 )
                 # How far can this input actually be converted? The ledger walks the
                 # same gates as the fail-closed prover and names the first one that

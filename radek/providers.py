@@ -264,13 +264,13 @@ IMPLEMENTED_C_API_SHIMS = {
     for symbol, (implementation, _selection_macro) in _COMPILED_COMPAT_IMPORTS.items()
 }
 
-#: Concrete, typed ARM32 compatibility providers for the Darwin-only import
-#: surface.  This is intentionally separate from IMPLEMENTED_C_API_SHIMS:
-#: the latter is a broad source/export catalogue used by the standalone host
-#: generator, while this table is the runtime evidence needed to say that the
-#: 73 non-same-name Angry Birds imports have an adapter.
+#: Guest-runtime adapter catalog entries for imports without a same-name NDK
+#: export. This is intentionally separate from IMPLEMENTED_C_API_SHIMS: the
+#: latter describes compiled libioscompat.so exports, while this table names
+#: ARM32 callouts/data bindings in libcompat_runtime_v1.so. Catalog membership
+#: is not proof of a per-image import-slot fixup or full API semantics.
 CONCRETE_DARWIN_COMPAT_PROVIDERS = {
-    symbol: f"libioscompat.so:{provider}"
+    symbol: f"libcompat_runtime_v1.so:{provider}"
     for symbol, provider in _CONCRETE_DARWIN_PROVIDER_IDS.items()
 }
 
@@ -495,9 +495,9 @@ def for_install_name(path: str) -> Provider | None:
 def for_symbol(symbol: str) -> str | None:
     """Return an exact provider or triage hint; unknown names stay unknown.
 
-    The concrete Darwin catalog is checked before the broad standalone export
-    catalogue so reports retain the provider family that is actually registered
-    by compat-runtime-v1 instead of treating a generated fallback as proof.
+    The guest-runtime adapter catalog is checked before the broad standalone
+    export catalogue so reports name the actual guest callout/data-provider
+    family rather than implying a direct Android export or generated link.
     """
     if runtime_candidate := compiler_runtime_candidate(symbol):
         # An exact Darwin provider is stronger than the generic toolchain hint.

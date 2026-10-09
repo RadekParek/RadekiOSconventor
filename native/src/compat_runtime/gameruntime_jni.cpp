@@ -58,18 +58,27 @@ void attachSurface(JNIEnv *env, jobject surface) {
     gAttachedWindow = window;
 }
 
-// The launcher extracts assets/bundle/** to its files directory and passes the
-// app directory here. Mounts mirror the host probe: the bundle payload is
-// read-only, and the two writable application directories are created by the
-// launcher next to it.
-void mountGuestPayload(const std::string &payloadDirectory) {
-    if (payloadDirectory.empty())
-        return;
+// Bundle assets are read-only; guest user data is mounted to the app-specific
+// Android/data/<package>/files tree created by the launcher. OBB storage is an
+// optional read-only mount: this package carries its bundle in APK assets and
+// therefore does not synthesize or require an expansion OBB.
+void mountGuestPayload(const std::string &payloadDirectory,
+                       const std::string &appDataDirectory,
+                       const std::string &obbDirectory) {
     auto &files = radek::compat_runtime::guestFileSystem();
-    files.mount(radek::compat_runtime::bundleGuestPath(), payloadDirectory, false);
-    const std::string home = payloadDirectory + "/../radek-home";
-    files.mount("/Documents", home + "/Documents", true);
-    files.mount("/Library", home + "/Library", true);
+    if (!payloadDirectory.empty())
+        files.mount(radek::compat_runtime::bundleGuestPath(), payloadDirectory, false);
+
+    const std::string dataRoot = !appDataDirectory.empty()
+        ? appDataDirectory
+        : payloadDirectory.empty() ? std::string() : payloadDirectory + "/../radek-home";
+    if (!dataRoot.empty()) {
+        files.mount("/Documents", dataRoot + "/Documents", true);
+        files.mount("/Library", dataRoot + "/Library", true);
+        files.mount("/tmp", dataRoot + "/tmp", true);
+    }
+    if (!obbDirectory.empty())
+        files.mount("/Android/obb", obbDirectory, false);
 }
 
 jstring jsonString(JNIEnv *env, const radek::Json &json) {
@@ -123,6 +132,8 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_dev_radek_gameruntime_GameBootActivity_runGameBootAttempt(JNIEnv *env, jobject,
                                                                jbyteArray mainBinary,
                                                                jstring payloadDirectory,
+                                                               jstring appDataDirectory,
+                                                               jstring obbDirectory,
                                                                jboolean authorizationConfirmed) {
     if (authorizationConfirmed != JNI_TRUE)
         return jsonString(env, blockedReport("User authorization was not confirmed.", false));
@@ -174,17 +185,23 @@ Java_dev_radek_gameruntime_GameBootActivity_runGameBootAttempt(JNIEnv *env, jobj
                 missing.front());
         }
 
-        std::string payload;
-        if (payloadDirectory != nullptr) {
-            const char *utf = env->GetStringUTFChars(payloadDirectory, nullptr);
+        const auto readJavaString = [env](jstring value) {
+            std::string result;
+            if (value == nullptr)
+                return result;
+            const char *utf = env->GetStringUTFChars(value, nullptr);
             if (utf != nullptr) {
-                payload = utf;
-                env->ReleaseStringUTFChars(payloadDirectory, utf);
+                result = utf;
+                env->ReleaseStringUTFChars(value, utf);
             }
-            if (env->ExceptionCheck())
-                return nullptr;
-        }
-        mountGuestPayload(payload);
+            return result;
+        };
+        const std::string payload = readJavaString(payloadDirectory);
+        const std::string appData = readJavaString(appDataDirectory);
+        const std::string obb = readJavaString(obbDirectory);
+        if (env->ExceptionCheck())
+            return nullptr;
+        mountGuestPayload(payload, appData, obb);
         auto &files = radek::compat_runtime::guestFileSystem();
 
         radek::compat_runtime::TrapShimAdapter traps;
@@ -192,6 +209,31 @@ Java_dev_radek_gameruntime_GameBootActivity_runGameBootAttempt(JNIEnv *env, jobj
         radek::compat_runtime::BootAttemptRunner runner(shims, *cpu, traps,
                                                        objcShims.lifecycleHooks());
         radek::Json report = runner.run(bytes, true);
+        {
+            radek::Json storage = radek::Json::object();
+            storage["appDataDirectory"] = appData;
+            storage["obbDirectory"] = obb.empty() ? radek::Json() : radek::Json(obb);
+            storage["bundleAssetsInApk"] = true;
+            storage["expansionObbRequired"] = false;
+            storage["guestWritableMounts"] = radek::Json::array();
+            for (const auto *path : {"/Documents", "/Library", "/tmp"})
+                storage["guestWritableMounts"].push(radek::Json(path));
+            storage["obbGuestMount"] = obb.empty() ? radek::Json() : radek::Json("/Android/obb (read-only)");
+            report["appStorage"] = std::move(storage);
+        }
+
+        // Runtime helper registration/call counters complement the import
+        // mapper's candidate count; they do not imply a static toolchain link.
+        {
+            radek::Json helpers = radek::Json::object();
+            helpers["registeredSymbolCount"] = static_cast<std::uint64_t>(compilerRuntime.registeredSymbolCount());
+            helpers["callsObserved"] = compilerRuntime.callCount();
+            helpers["note"] =
+                "The registered ARM32 compiler-runtime arithmetic helpers are guest callouts. "
+                "This does not provide a libgcc_s.so alias or static NDK/libunwind link; C++ "
+                "personality and landing-pad transfer remain separate runtime boundaries.";
+            report["compilerRuntime"] = std::move(helpers);
+        }
 
         // GL observability: which driver was found, whether the drawable was
         // handed to the platform, and every call the runtime had to refuse.
@@ -229,8 +271,8 @@ Java_dev_radek_gameruntime_GameBootActivity_runGameBootAttempt(JNIEnv *env, jobj
             report["gles"] = std::move(gles);
         }
 
-        // Darwin-only translation layer: names Android does not ship get an
-        // explicit, individually reported adapter instead of a trap.
+        // Non-same-name guest imports in the compat-runtime catalog get an
+        // explicit adapter/data binding instead of a trap where supported.
         {
             radek::Json compat = radek::Json::object();
             compat["boundSymbols"] = static_cast<std::uint64_t>(darwinShims.boundSymbolCount());
@@ -243,26 +285,35 @@ Java_dev_radek_gameruntime_GameBootActivity_runGameBootAttempt(JNIEnv *env, jobj
                 diagnostics.push(radek::Json(diagnostic));
             compat["diagnostics"] = std::move(diagnostics);
             compat["note"] =
-                "Darwin-only imports with no Android system export are served by explicit "
-                "minimal adapters: real process-stream cells, ASCII C-locale ctype, real "
-                "NSString EAGL keys, a guest errno cell, a state-only OpenAL subset and a "
-                "fail-closed SJLJ personality boundary; none of them is a same-name NDK export";
+                "Non-same-name imports in the guest adapter catalog are served by explicit "
+                "minimal adapters where supported: process-stream and errno cells, Darwin "
+                "ctype, Objective-C/EAGL data, state-only OpenAL and compiler-runtime "
+                "boundaries. Catalog registration is not proof of complete API semantics, "
+                "static Android linking, or successful per-image slot fixup.";
             report["darwinCompat"] = std::move(compat);
         }
 
-        // Provider observability is separate from the strict same-name NDK
-        // catalog. Registration was checked before the guest loader ran.
+        // Same-name NDK candidates and guest-runtime adapter catalog entries
+        // are separate provider inventories. Both were checked before loading.
         {
             radek::Json providers = radek::Json::object();
             providers["concreteDarwinProviderCount"] = static_cast<std::uint64_t>(
-                radek::compat_runtime::compat_import_catalog::kDarwinOnlyProviderCount);
+                radek::compat_runtime::compat_import_catalog::kGuestRuntimeAdapterProviderCount);
+            providers["guestRuntimeAdapterCatalogCount"] = static_cast<std::uint64_t>(
+                radek::compat_runtime::compat_import_catalog::kGuestRuntimeAdapterProviderCount);
+            providers["guestRuntimeAdapterRegistrationStatus"] = "COMPLETE";
             providers["sameNameNdkProviderCount"] = static_cast<std::uint64_t>(
                 radek::compat_runtime::ndk_import_catalog::kProviderCount);
+            providers["sameNameNdkRegistrationStatus"] = "COMPLETE";
+            providers["sameNameNdkRegistrationPercent"] = std::uint64_t{100};
             providers["fullNdkCandidateInventoryCount"] = static_cast<std::uint64_t>(
                 radek::compat_runtime::ndk_full_import_catalog::kProviderCount);
+            providers["fullNdkRegisteredProviderCount"] = static_cast<std::uint64_t>(
+                radek::compat_runtime::ndk_full_import_catalog::kProviderCount);
             providers["fullNdkCatalogStatus"] = "COMPLETE";
+            providers["fullNdkSemanticImplementationStatus"] = "PARTIAL_TYPED_AND_GENERIC_BOUNDARIES";
             providers["reviewedProviderCount"] = static_cast<std::uint64_t>(
-                radek::compat_runtime::compat_import_catalog::kDarwinOnlyProviderCount +
+                radek::compat_runtime::compat_import_catalog::kGuestRuntimeAdapterProviderCount +
                 radek::compat_runtime::ndk_import_catalog::kProviderCount);
             providers["boundedNdkFallbackCalloutCount"] = static_cast<std::uint64_t>(
                 ndkShims.registeredCalloutCount());
@@ -277,8 +328,16 @@ Java_dev_radek_gameruntime_GameBootActivity_runGameBootAttempt(JNIEnv *env, jobj
             providers["registrationStatus"] = "COMPLETE";
             providers["sameNameNdkCandidatesAreSeparate"] = true;
             providers["note"] =
-                "Darwin-only imports use typed compatibility adapters or guest-data bindings; "
-                "this is not a same-name NDK export or a game-linkage claim.";
+                "Registration is complete for the " +
+                std::to_string(radek::compat_runtime::ndk_import_catalog::kProviderCount) +
+                "-name strict same-name NDK catalog, the " +
+                std::to_string(radek::compat_runtime::compat_import_catalog::kGuestRuntimeAdapterProviderCount) +
+                "-name guest-runtime adapter catalog, and the " +
+                std::to_string(radek::compat_runtime::ndk_full_import_catalog::kProviderCount) +
+                "-name broad NDK candidate inventory. This is catalog registration, not API-semantic "
+                "completeness; generic bounded adapters remain for many NDK candidates. Guest adapter "
+                "catalog presence does not prove a per-image slot fixup. Actual bind/relocation results "
+                "and provider names appear separately under runtimeLinking.";
             report["importProviders"] = std::move(providers);
         }
 

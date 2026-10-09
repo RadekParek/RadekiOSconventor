@@ -113,6 +113,8 @@ void writeS0(CpuRegisterState &state, float value) {
 
 } // namespace
 
+std::size_t ShimAdapter::registeredSymbolCount() const { return registeredSymbols_; }
+
 std::uint64_t ShimAdapter::callCount() const { return calls_; }
 
 void ShimAdapter::registerBindings(ShimRegistry &registry) {
@@ -133,6 +135,7 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
             return invoke(registers);
         };
         registry.registerBinding(std::move(binding));
+        ++registeredSymbols_;
     };
 
     bind("___divsi3", "compiler-runtime-divsi3",

@@ -105,8 +105,12 @@ source generation selects these only when a resolved reconstructed call path con
 entry to a supported import. The mapper does not rewrite Mach-O bindings or link the shim to the
 standalone entry. The native C frame-clock service is driven by the converted launcher's Android
 Choreographer bridge, but it is not the Objective-C `CADisplayLink` ABI and has no IPA callsite.
-`libgcc_s.1.dylib` is only triaged to compiler-rt/libunwind candidates, not a library alias or link;
-unsupported entry-reachable APIs remain blockers, and no general playable conversion is claimed.
+The game-runtime loader can install guest provider addresses into supported Mach-O import/fixup
+slots; its `runtimeLinking` report records those runtime binds and explicitly reports zero static
+game-code callsite rewrites. `libgcc_s.1.dylib` has no Android library alias or generated static
+link: a bounded set of ARM32 helper callouts exists in the guest runtime, while compiler-rt/libunwind
+integration and full exception landing-pad semantics remain incomplete. Unsupported entry-reachable
+APIs remain blockers, and no general playable conversion is claimed.
 
 ## Validation and status codes
 

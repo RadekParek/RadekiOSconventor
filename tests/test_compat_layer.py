@@ -44,9 +44,12 @@ class CompatLayerTests(unittest.TestCase):
             report = generate({"images": [{"slices": [{}]}]}, Path(directory))
             self.assertEqual(report["status"], "NO_OBSERVED_IMPORTS")
             self.assertEqual(report["handlerResolutionCoveragePercent"], 0)
+            self.assertEqual(report["guestRuntimeAdapterCatalogCount"], 0)
+            self.assertEqual(report["guestRuntimeSlotFixupsStatus"], "NOT_RUN")
+            self.assertEqual(report["staticGameCallsitesRewritten"], 0)
 
-    def test_angry_birds_provider_ledger_is_181_ndk_plus_73_darwin(self):
-        """The full fixture split reaches 100% without changing strict NDK coverage."""
+    def test_angry_birds_provider_ledger_is_181_ndk_plus_73_guest_adapters(self):
+        """The exact catalogs partition the fixture without implying runtime links."""
         native_catalog = (
             Path(__file__).resolve().parent.parent
             / "native/include/compat_runtime/ndk_import_catalog.hpp"
@@ -61,7 +64,13 @@ class CompatLayerTests(unittest.TestCase):
         self.assertEqual(report["totalObservedImports"], 254)
         self.assertEqual(report["sameNameNdkCandidateCount"], 181)
         self.assertEqual(report["sameNameNdkProviderCount"], 181)
-        self.assertEqual(report["concreteDarwinProviderCount"], 73)
+        self.assertEqual(report["concreteDarwinProviderCount"], 73)  # legacy alias
+        self.assertEqual(report["guestRuntimeAdapterCatalogCount"], 73)
+        self.assertEqual(report["guestRuntimeAdapterCatalogInventoryCount"], 73)
+        self.assertAlmostEqual(report["guestRuntimeAdapterCatalogCoveragePercent"], 28.7402)
+        self.assertEqual(report["guestRuntimeAdapterCatalogStatus"], "CATALOG_ONLY_NOT_RUNTIME_LINKED")
+        self.assertEqual(report["guestRuntimeSlotFixupsStatus"], "NOT_RUN")
+        self.assertEqual(report["staticGameCallsitesRewritten"], 0)
         self.assertEqual(report["reviewedImportProviderCount"], 254)
         self.assertEqual(report["importProviderCoveragePercent"], 100.0)
         self.assertEqual(report["importProviderStatus"], "COMPLETE")
@@ -135,6 +144,13 @@ class CompatLayerTests(unittest.TestCase):
             names = [entry["sourceSymbol"] for entry in entries]
             self.assertEqual(sorted(names), sorted(observed))
             self.assertEqual(len(names), len(set(names)))
+            by_name = {entry["sourceSymbol"]: entry for entry in entries}
+            guest_entry = by_name["_OBJC_CLASS_$_UIView"]
+            self.assertEqual(guest_entry["providerKind"], "guest-runtime-adapter-catalogued")
+            self.assertEqual(guest_entry["guestRuntimeProviderLibrary"], "libcompat_runtime_v1.so")
+            self.assertIsNotNone(guest_entry["guestRuntimeProvider"])
+            self.assertFalse(guest_entry["staticGameCallsiteRewritten"])
+            self.assertEqual(report["guestRuntimeSlotFixupsStatus"], "NOT_RUN")
             for entry in entries:
                 self.assertIn(entry["classification"], ("verified", "stubbed-unimplemented"))
                 self.assertEqual(

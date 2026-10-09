@@ -178,8 +178,8 @@ class ProviderTests(unittest.TestCase):
                 }
                 self.assertEqual(provider.status, status_values[status])
 
-    def test_concrete_darwin_provider_catalog_is_explicit_and_matches_kotlin(self):
-        """Darwin-only names must have a typed provider, not a relabelled NDK hit."""
+    def test_guest_runtime_adapter_catalog_is_explicit_and_matches_kotlin(self):
+        """Non-same-name imports have catalogued guest adapters, not fake NDK hits."""
         self.assertEqual(CONCRETE_DARWIN_COMPAT_IMPORT_COUNT, 73)
         self.assertEqual(len(CONCRETE_DARWIN_COMPAT_PROVIDERS), 73)
         kotlin = (ROOT / "app/src/main/java/dev/radek/conventor/CompatImportProviders.kt").read_text(
@@ -192,7 +192,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(CONCRETE_DARWIN_COMPAT_PROVIDERS, pairs)
         for symbol, provider in CONCRETE_DARWIN_COMPAT_PROVIDERS.items():
             with self.subTest(symbol=symbol):
-                self.assertEqual(providers.CONCRETE_DARWIN_COMPAT_PROVIDERS[symbol], "libioscompat.so:" + provider)
+                self.assertEqual(providers.CONCRETE_DARWIN_COMPAT_PROVIDERS[symbol], "libcompat_runtime_v1.so:" + provider)
                 self.assertIn(provider, providers.for_symbol(symbol))
 
     def test_ndk_name_candidate_catalogs_match_between_kotlin_and_host(self):

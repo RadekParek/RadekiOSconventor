@@ -126,23 +126,24 @@ These grades describe provider categories, not the imported game's execution. Ho
 
 An earlier analysis exposed only nlist `description`/`n_desc` and did not decode its high-byte library ordinal, leaving every dependency edge with zero associated imports. The native full and compact analyzers now emit the ordinal, and the host graph retains a fallback decoder for older analyzer output. In this run, all 254 import symbols are associated with the 12 dependency ordinals (association status `COMPLETE`); the per-edge counts above sum to 254. This corrects the evidence index, **not** the Python compatibility implementation database.
 
-The native compatibility provider ledger now covers all 254 observed imports without changing the strict same-name denominator: 181 exact Android NDK/system candidates plus 73 concrete typed Darwin compatibility providers. The broader reviewed NDK inventory contains 1,229 candidate names from the mapper; the native runtime registers every one with a specialized adapter where the ABI is known and an explicitly named bounded provider boundary for the remaining Android framework/driver APIs. The 73 Darwin entries are pinned in the host, Kotlin and C++ catalogs; the 181-entry same-name catalog, 1,229-entry inventory, and bounded NDK adapter are pinned in C++. Every runtime path registers both catalogs and refuses to start if any catalog has a missing binding. The concrete providers include Objective-C class/metaclass data and dispatch, AudioSession state, Foundation search paths and UIKit lifecycle, Darwin errno/ctype/stream/data cells, EAGL keys, stateful OpenAL, ARM compiler-runtime arithmetic, bounded C++ ABI/SjLj entry points, ARM32 wrappers for libc/POSIX/math/stdio/pthread imports, self-contained libm operations, zlib checksums, and virtual bundle assets. A provider means a registered ABI adapter or guest-data materialization; it does not mean full Apple framework equivalence, a host audio device, or completed guest exception landing-pad transfer. C++ throw, SjLj resume, personality, Objective-C mutation, pthread callback creation, and process-control exits still stop at explicit runtime boundaries rather than silently returning through an invalid guest stack.
+The import-provider catalog partitions the fixture's 254 distinct names into 181 strict same-name Android NDK/system candidates and 73 non-same-name `compat-runtime-v1` guest-adapter entries. Thus `73/254` is the count of catalogued compatibility names outside the strict NDK subset; it is not 73 direct NDK exports, 73 static links, or proof that every API is semantically complete. The broader reviewed NDK inventory contains 1,229 candidate names from the mapper; the native runtime registers every one with a specialized adapter where the ABI is known and an explicitly named bounded provider boundary for the remaining Android framework/driver APIs. The 73-entry guest-adapter catalog is pinned in the host, Kotlin and C++ catalogs; the 181-entry same-name catalog, 1,229-entry inventory, and bounded NDK adapter are pinned in C++. Runtime startup checks that each catalog name has a registry binding. The guest adapters include Objective-C class/metaclass data and dispatch, AudioSession state, Foundation search paths and UIKit lifecycle, Darwin errno/ctype/stream/data cells, EAGL keys, stateful OpenAL, ARM compiler-runtime arithmetic, and bounded C++ ABI/SjLj boundaries; the NDK wrappers include libc/POSIX/math/stdio/pthread imports, self-contained libm operations, zlib checksums, and virtual bundle assets. A catalog entry means a registered ABI adapter or guest-data materialization; it does not mean full Apple framework equivalence, a host audio device, or completed guest exception landing-pad transfer. C++ throw, SjLj resume, personality, Objective-C mutation, pthread callback creation, and process-control exits still stop at explicit runtime boundaries rather than silently returning through an invalid guest stack. Per-image import-slot fixups are reported separately in `runtimeLinking` and are not static Android callsite rewriting.
 
-The generated registry continues to report its legacy resolution-target/stub split separately from this provider ledger. The current trap-mode loader resolves 171 records and binds 407 unsupported records to traps; the old 39-record/first-unresolved-import figures are retained only as historical pre-lifecycle evidence. These adapters are not evidence of a complete playable IPA conversion. No IPA callsite is rewritten; linked game calls and recompiled game bytes remain zero. The pipeline generates no entry-reachable API replacements because the recovered `start` graph does not resolve its indirect dyld handoff.
+The generated `libioscompat` registry continues to report its resolution-target/stub split separately from the guest-adapter catalog. The current trap-mode loader resolves 171 records and binds 407 unsupported records to traps; the old 39-record/first-unresolved-import figures are retained only as historical pre-lifecycle evidence. The native loader installs ARM32 guest addresses into Mach-O import/fixup slots; the per-image `runtimeLinking` block records those actual binds, traps, and unresolved slots. That is runtime guest binding, not static Android game-callsite rewriting or a statically linked game object. These adapters are not evidence of a complete playable IPA conversion; statically linked game calls and recompiled game bytes remain zero. The pipeline generates no entry-reachable API replacements because the recovered `start` graph does not resolve its indirect dyld handoff.
 
-The separate `compat-runtime-v1` smoke database now has one `staticEvidence` record containing the top recovered direct-call imports, exact `_main` call/register trace, and the historical host-loader first-missing-import observation. It deliberately keeps `apps` and `gamesUnblocked` empty because no on-device smoke was performed; its validator rejects any static record that claims guest execution or a smoke status. The remaining C++ priority is complete guest catch/landing-pad transfer; the exact 181/73 provider implementation is now host-tested but is not a game-unblocking result.
+The separate `compat-runtime-v1` smoke database now has one `staticEvidence` record containing the top recovered direct-call imports, exact `_main` call/register trace, and the historical host-loader first-missing-import observation. It deliberately keeps `apps` and `gamesUnblocked` empty because no on-device smoke was performed; its validator rejects any static record that claims guest execution or a smoke status. The remaining C++ priority is complete guest catch/landing-pad transfer; catalog registration and adapter behavior across the 181/73 inventories are host-tested, but do not constitute a game-unblocking result or a static NDK link.
 
 ## Strict same-name subset: 181/254 (71.26%) is the honest ceiling for this binary
 
 The question "is the strict same-name NDK subset really implemented — and can it be
 100% for Angry Birds?" has a measurable answer. Re-running the app's own classification
-(catalog + precedence: same-name catalog match first, then compiler-runtime, then
-concrete compat implementation, then semantic target) over the IPA's 254 undefined
-symbols reproduces the on-device figure exactly: **181 direct same-name matches =
-71.26%** — libc 92, GLESv2 27, GLESv1_CM 24, libm 24, libc++_shared 14.
+(catalog + precedence: same-name catalog match first, compiler-runtime candidates without
+a guest adapter, then guest-runtime catalog entries, compiled compat exports, and semantic
+targets) over the IPA's 254 undefined symbols reproduces the on-device strict figure:
+**181 direct same-name matches = 71.26%** — libc 92, GLESv2 27, GLESv1_CM 24, libm 24,
+libc++_shared 14.
 
-The remaining 73 imports have no same-name export in any Android system library,
-but each has a concrete typed provider in `compat-runtime-v1`:
+The other 73 imports have no exact same-name Android system export and each has an entry
+in the `compat-runtime-v1` guest-adapter catalog:
 
 - **24 Objective-C providers**: 15 class objects, 2 metaclass objects, the two
   empty runtime data cells, and `objc_msgSend`/`objc_msgSendSuper2`/
@@ -175,8 +176,13 @@ Audit against AOSP bionic's current symbol maps (`aosp-mirror/platform_bionic`
   absent from bionic entirely.
 - `__divdi3`, `__udivdi3`, `__floatdidf`, `__floatdisf` **are** in bionic libc, but
   only in the `arm x86` (32-bit) map entries; they do not exist on the arm64 target
-  this converter builds for, so counting them would produce candidates no current
-  device can resolve (the device export check would drop to 181/185).
+  this converter builds for, so a same-name arm64 `dlsym` check cannot resolve them
+  (the hypothetical strict export denominator would be 181/185). The current mapper
+  independently counts eight compiler-runtime/unwind candidates in the IPA; all
+  eight also have guest-runtime adapter catalog entries. That permits runtime guest
+  slot binding to an ARM32 callout where implemented, not a static compiler-rt,
+  libunwind, or `libgcc_s.so` link. `runtimeLinking` must still confirm per-image
+  fixups when the game is loaded.
 - OpenAL, EAGL, AudioToolbox-family and UIKit/Foundation names have no Android
   provider at all — the catalog deliberately keeps them out so they stay with the
   compiled compat implementations (asserted by `tests/test_providers.py`).
@@ -213,9 +219,10 @@ A provider is not a claim that the full Apple or Android framework is equivalent
 OpenAL is still state-only, variadic stdio formatting is literal-only, pthread
 creation is a bounded scheduler boundary, and non-local C++/Objective-C
 exception transfer still stops because a host callback cannot jump through guest
-ARM frames. No IPA callsite is rewritten or linked. The tracked fixture's loader
-and startup-chain counts remain host/runtime evidence only; they do not establish
-a playable game session.
+ARM frames. The runtime loader can bind guest import/fixup slots, as reported in
+`runtimeLinking`; it does not rewrite static Android game-code callsites or link
+recompiled game objects. The tracked fixture's loader and startup-chain counts
+remain host/runtime evidence only; they do not establish a playable game session.
 
 ## Next three shim families to prioritize
 

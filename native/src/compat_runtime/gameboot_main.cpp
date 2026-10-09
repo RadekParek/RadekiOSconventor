@@ -142,7 +142,8 @@ int main(int argc, char **argv) {
         // implemented helpers.
         {
             radek::Json helpers = radek::Json::object();
-            helpers["implementedSymbols"] = static_cast<std::uint64_t>(9);
+            helpers["implementedSymbols"] = static_cast<std::uint64_t>(compilerRuntime.registeredSymbolCount());
+            helpers["registeredSymbolCount"] = static_cast<std::uint64_t>(compilerRuntime.registeredSymbolCount());
             helpers["calls"] = compilerRuntime.callCount();
             helpers["basis"] =
                 "ARM EABI compiler-runtime helpers (__divsi3/__modsi3/__udivsi3/__umodsi3, "
@@ -151,19 +152,27 @@ int main(int argc, char **argv) {
             report["compilerRuntime"] = std::move(helpers);
         }
 
-        // Provider observability: the strict Darwin-only catalog is checked at
-        // startup, independently of the loader's later import resolution.
+        // Provider observability: same-name NDK and guest-adapter catalogs
+        // are checked at startup, independently of per-image import fixups.
         {
             radek::Json providers = radek::Json::object();
             providers["concreteDarwinProviderCount"] = static_cast<std::uint64_t>(
-                radek::compat_runtime::compat_import_catalog::kDarwinOnlyProviderCount);
+                radek::compat_runtime::compat_import_catalog::kGuestRuntimeAdapterProviderCount);
+            providers["guestRuntimeAdapterCatalogCount"] = static_cast<std::uint64_t>(
+                radek::compat_runtime::compat_import_catalog::kGuestRuntimeAdapterProviderCount);
+            providers["guestRuntimeAdapterRegistrationStatus"] = "COMPLETE";
             providers["sameNameNdkProviderCount"] = static_cast<std::uint64_t>(
                 radek::compat_runtime::ndk_import_catalog::kProviderCount);
+            providers["sameNameNdkRegistrationStatus"] = "COMPLETE";
+            providers["sameNameNdkRegistrationPercent"] = std::uint64_t{100};
             providers["fullNdkCandidateInventoryCount"] = static_cast<std::uint64_t>(
                 radek::compat_runtime::ndk_full_import_catalog::kProviderCount);
+            providers["fullNdkRegisteredProviderCount"] = static_cast<std::uint64_t>(
+                radek::compat_runtime::ndk_full_import_catalog::kProviderCount);
             providers["fullNdkCatalogStatus"] = "COMPLETE";
+            providers["fullNdkSemanticImplementationStatus"] = "PARTIAL_TYPED_AND_GENERIC_BOUNDARIES";
             providers["reviewedProviderCount"] = static_cast<std::uint64_t>(
-                radek::compat_runtime::compat_import_catalog::kDarwinOnlyProviderCount +
+                radek::compat_runtime::compat_import_catalog::kGuestRuntimeAdapterProviderCount +
                 radek::compat_runtime::ndk_import_catalog::kProviderCount);
             providers["boundedNdkFallbackCalloutCount"] = static_cast<std::uint64_t>(
                 ndkShims.registeredCalloutCount());
@@ -178,8 +187,14 @@ int main(int argc, char **argv) {
             providers["registrationStatus"] = "COMPLETE";
             providers["sameNameNdkCandidatesAreSeparate"] = true;
             providers["note"] =
-                "Darwin-only providers are typed compatibility adapters or guest-data bindings; "
-                "they are not relabelled Android NDK exports and do not prove game linkage.";
+                "Catalog registration is complete for the " +
+                std::to_string(radek::compat_runtime::ndk_import_catalog::kProviderCount) +
+                " strict same-name NDK names, the " +
+                std::to_string(radek::compat_runtime::compat_import_catalog::kGuestRuntimeAdapterProviderCount) +
+                " guest-runtime adapter names, and the " +
+                std::to_string(radek::compat_runtime::ndk_full_import_catalog::kProviderCount) +
+                " broad NDK candidates. Catalog registration is not semantic completeness or static "
+                "linking. Runtime per-image binds are reported separately under runtimeLinking.";
             report["importProviders"] = std::move(providers);
         }
 

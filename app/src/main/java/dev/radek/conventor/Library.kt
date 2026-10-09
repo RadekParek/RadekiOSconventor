@@ -490,7 +490,7 @@ class Library(private val context: Context) {
                 .put("analysisErrors", analysisErrors).put("analyzedImageCount", nodes.length()).put("failedImageCount", analysisErrors.length()))
             report.put("machO", JSONObject().put("slices", compactSlices(macho.optJSONArray("slices")))
                 .put("sliceCount", macho.optJSONArray("slices")?.length() ?: 0))
-            val verifiedApiReplacements = apiMapping.optInt("concreteDarwinProviderCount", 0)
+            val availableApiReplacements = apiMapping.optInt("implementedApiReplacementCount", 0)
             val importSymbolCount = apiMapping.optInt("distinctImportSymbols", 0)
             val ndkNameCandidateCount = apiMapping.optInt("mappedNameCandidates", 0)
             val verifiedNdkExportCount = apiMapping.optInt("runtimeVerifiedNdkCandidates", 0)
@@ -498,18 +498,18 @@ class Library(private val context: Context) {
             val verifiedNdkImportPercent = apiMapping.optInt("runtimeVerifiedImportCoveragePercent", 0)
             val unimplementedCompatStubCount = apiMapping.optInt("compatStubHandlerCount", 0)
             report.put("apiImplementationGeneration", JSONObject()
-                .put("status", if (verifiedApiReplacements > 0) "RUNTIME_PROVIDER_CATALOG_PRESENT_NOT_LINKED" else "NO_API_REPLACEMENT_LINKED")
+                .put("status", if (availableApiReplacements > 0) "COMPAT_EXPORTS_AVAILABLE_NOT_LINKED" else "NO_API_REPLACEMENT_LINKED")
                 .put("attempted", false)
                 .put("generatedApiReplacements", 0)
-                .put("implementedRuntimeReplacements", verifiedApiReplacements)
+                .put("implementedRuntimeReplacements", availableApiReplacements)
                 .put("linkedApiReplacements", 0)
                 .put("codeGenerated", false)
                 .put("linkedIntoGame", false)
                 .put("completeGameConversion", false)
-                .put("message", if (verifiedApiReplacements > 0)
-                    "$verifiedApiReplacements typed concrete Darwin compatibility provider(s) are catalogued in libioscompat.so; no IPA callsite was rewritten and none was linked into a game."
+                .put("message", if (availableApiReplacements > 0)
+                    "$availableApiReplacements imported symbol(s) have concrete libioscompat.so implementation exports available; no IPA callsite was rewritten and none was linked into a game."
                 else
-                    "The analyzer runtime contains concrete compatibility exports, but no matching import was verified on this device and no game API replacement was linked."))
+                    "The analyzer contains compatibility implementations, but this IPA has no matching libioscompat.so implementation export; no game API replacement was linked."))
             if (deviceProven) {
                 report.put("portProgress", JSONObject()
                     .put("percent", deviceRecompilation.optInt("coveragePercent", 100))
@@ -527,8 +527,39 @@ class Library(private val context: Context) {
             val reviewedMappingCount = apiMapping.optInt("reviewedMappingCount", ndkNameCandidateCount)
             val reviewedMappingPercent = apiMapping.optInt("reviewedMappingCoveragePercent", 0)
             val mappingBreakdown = apiMapping.optJSONObject("reviewedMapping")?.optJSONObject("breakdown")
-            log(ConversionState.ANALYZING,
-                "Inventoried $importSymbolCount API symbols; reviewed Android mappings cover $reviewedMappingCount/$importSymbolCount ($reviewedMappingPercent%) = $ndkNameCandidateCount same-name NDK/system exports + ${mappingBreakdown?.optInt("concreteCompatImplementation", 0) ?: 0} compiled compatibility implementations + ${mappingBreakdown?.optInt("compilerRuntimeToolchain", 0) ?: 0} toolchain-runtime candidates + ${mappingBreakdown?.optInt("reviewedSemanticApiTarget", 0) ?: 0} semantic API targets; the strict same-name NDK subset is $ndkNameCandidateCount/$importSymbolCount ($verifiedNdkCandidatePercent% of it verified by device export lookup, $verifiedNdkExportCount/$importSymbolCount imports matched overall). Also found $verifiedApiReplacements concrete compatibility exports (not linked), $unimplementedCompatStubCount unimplemented compat stubs, and ${apiMapping.getInt("semanticRewriteCandidates")} semantic rewrite candidates. Mapping is triage, not linked code.", 50)
+            val guestRuntimeAdapterCount = mappingBreakdown?.optInt("guestRuntimeAdapterCatalogued")
+                ?: apiMapping.optInt("guestRuntimeProviderCount", 0)
+            val compiledCompatImplementationCount = mappingBreakdown?.optInt("concreteCompatImplementation", 0) ?: 0
+            val compilerRuntimeMappingKindCount = mappingBreakdown?.optInt("compilerRuntimeToolchain", 0) ?: 0
+            val compilerRuntimeCandidateCount = apiMapping.optInt(
+                "compilerRuntimeCandidateCount",
+                compilerRuntimeMappingKindCount,
+            )
+            val compilerRuntimeGuestProviderCount = apiMapping.optInt("compilerRuntimeGuestProviderCount", 0)
+            val semanticTargetCount = mappingBreakdown?.optInt("reviewedSemanticApiTarget", 0) ?: 0
+            val deviceNdkVerificationSummary = if (apiMapping.optString("runtimeNdkResolverStatus") == "CURRENT_DEVICE_DLSYM") {
+                "Device export lookup resolved $verifiedNdkExportCount/$ndkNameCandidateCount candidates " +
+                    "($verifiedNdkCandidatePercent%) and $verifiedNdkExportCount/$importSymbolCount imports " +
+                    "($verifiedNdkImportPercent%)."
+            } else {
+                "Device NDK export lookup was not run."
+            }
+            val apiMappingSummary =
+                "Inventoried $importSymbolCount API symbols; reviewed Android mappings cover " +
+                    "$reviewedMappingCount/$importSymbolCount ($reviewedMappingPercent%) = " +
+                    "$ndkNameCandidateCount strict same-name NDK/system candidates + " +
+                    "$guestRuntimeAdapterCount compat-runtime guest-adapter catalog entries + " +
+                    "$compiledCompatImplementationCount compiled libioscompat.so implementations + " +
+                    "$compilerRuntimeMappingKindCount compiler-runtime-only mapping kinds + " +
+                    "$semanticTargetCount semantic targets. Separate compiler-runtime candidate axis: " +
+                    "$compilerRuntimeCandidateCount candidate(s), $compilerRuntimeGuestProviderCount with " +
+                    "guest-adapter catalog entries. Strict same-name NDK subset: $ndkNameCandidateCount/$importSymbolCount. " +
+                    "$deviceNdkVerificationSummary " +
+                    "$availableApiReplacements libioscompat.so implementation export(s) are available but not linked; " +
+                    "$unimplementedCompatStubCount compat handlers are stubs. Guest catalog entries are not per-image " +
+                    "slot-fixup results: import-slot binds appear in runtimeLinking after game launch. No static IPA " +
+                    "callsite was rewritten, and mapping is triage, not linked game code."
+            log(ConversionState.ANALYZING, apiMappingSummary, 50)
             val apiBlocker = if (importSymbolCount > 0) {
                 " API triage found $importSymbolCount imported symbols; $unimplementedCompatStubCount have only explicitly unimplemented compat handlers. Export hits and stubs do not rewrite or link those callsites."
             } else ""

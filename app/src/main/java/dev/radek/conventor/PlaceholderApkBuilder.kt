@@ -128,6 +128,9 @@ internal class PlaceholderApkBuilder(private val context: Context) {
                 AndroidApiMapper.coveragePercent(runtimeVerifiedNdkCandidates, directApiCandidates)
             val verifiedImportCoveragePercent =
                 AndroidApiMapper.coveragePercent(runtimeVerifiedNdkCandidates, distinctImportSymbols)
+            val guestRuntimeAdapterCount = apiMapping.optInt("guestRuntimeProviderCount", 0).coerceAtLeast(0)
+            val compilerRuntimeCandidates = apiMapping.optInt("compilerRuntimeCandidateCount", 0).coerceAtLeast(0)
+            val compilerRuntimeGuestProviders = apiMapping.optInt("compilerRuntimeGuestProviderCount", 0).coerceAtLeast(0)
             val semanticApiCandidates = apiMapping.optInt("semanticRewriteCandidates", 0).coerceAtLeast(0)
             val unmappedApiSymbols = apiMapping.optInt("unmappedSymbolCount", 0).coerceAtLeast(0)
             val compatStubHandlers = apiMapping.optInt("compatStubHandlerCount", 0).coerceAtLeast(0)
@@ -137,8 +140,11 @@ internal class PlaceholderApkBuilder(private val context: Context) {
                     "($verifiedImportCoveragePercent% overall)"
             } else "device export check not run"
             val analysisSummary = "Static analysis only: $classifiedImportSymbols/$distinctImportSymbols symbols triaged ($classificationCoveragePercent%); " +
-                "$candidateCoveragePercent% ($directApiCandidates/$distinctImportSymbols) same-name NDK candidates; $apiLevelNote; $semanticApiCandidates semantic targets; " +
-                "$compatStubHandlers compat stubs (unimplemented); $unmappedApiSymbols unmapped. No game code or API implementation was statically recompiled."
+                "$candidateCoveragePercent% ($directApiCandidates/$distinctImportSymbols) strict same-name NDK candidates; " +
+                "$guestRuntimeAdapterCount compat-runtime guest-adapter catalog entries (not per-image slot fixups); " +
+                "$compilerRuntimeCandidates compiler-runtime candidates ($compilerRuntimeGuestProviders have guest adapters, no static NDK link); " +
+                "$apiLevelNote; $semanticApiCandidates semantic targets; $compatStubHandlers compat stubs (unimplemented); " +
+                "$unmappedApiSymbols unmapped. No game code or API implementation was statically recompiled."
             // Static-analysis details stay machine-readable in the artifact but
             // are deliberately not displayed by the generated launcher.
             val analysisStats = analysisSummary
@@ -152,6 +158,11 @@ internal class PlaceholderApkBuilder(private val context: Context) {
                 .put("runtimeVerifiedAndroidApiLevel", runtimeVerifiedAndroidApiLevel)
                 .put("candidateCoveragePercent", candidateCoveragePercent)
                 .put("directApiCandidates", directApiCandidates)
+                .put("guestRuntimeProviderCount", guestRuntimeAdapterCount)
+                .put("guestRuntimeProviderCatalogStatus", apiMapping.optString("guestRuntimeProviderCatalogStatus", "NOT_REPORTED"))
+                .put("guestRuntimeProviderInventoryCount", apiMapping.optInt("guestRuntimeProviderInventoryCount", 0))
+                .put("compilerRuntimeCandidateCount", compilerRuntimeCandidates)
+                .put("compilerRuntimeGuestProviderCount", compilerRuntimeGuestProviders)
                 .put("compatStubHandlers", compatStubHandlers)
                 .put("semanticApiCandidates", semanticApiCandidates)
                 .put("unmappedApiSymbols", unmappedApiSymbols)
@@ -169,14 +180,17 @@ internal class PlaceholderApkBuilder(private val context: Context) {
                 .toString().toByteArray(Charsets.UTF_8)
 
             setProgress(52, "BUILDING", "Packaging aligned Android resources and an honest non-playable preview screen")
-            val splashBytes = SplashExtractor.extractSplashPng(File(dir, "source.ipa"))
+            val splashFrames = SplashExtractor.extractSplashPngs(File(dir, "source.ipa"))
+            val splashPaths = splashFrames.indices.map { index ->
+                if (index == 0) "assets/splash.png" else "assets/splash-${index + 1}.png"
+            }
             val dexNames = templateEntries.dexes.map { it.first }.toSet()
             val expectedEntries = buildSet {
                 add("AndroidManifest.xml")
                 add("resources.arsc")
                 add(iconEntryPath)
                 add("assets/ipa-icon.png")
-                if (splashBytes != null) add("assets/splash.png")
+                addAll(splashPaths)
                 add("assets/placeholder-info.json")
                 addAll(dexNames)
             }
@@ -185,7 +199,7 @@ internal class PlaceholderApkBuilder(private val context: Context) {
                 put("resources.arsc", AlignedApkZip.ALIGNMENT)
                 put(iconEntryPath, AlignedApkZip.ALIGNMENT)
                 put("assets/ipa-icon.png", AlignedApkZip.ALIGNMENT)
-                if (splashBytes != null) put("assets/splash.png", AlignedApkZip.ALIGNMENT)
+                splashPaths.forEach { put(it, AlignedApkZip.ALIGNMENT) }
                 dexNames.forEach { put(it, AlignedApkZip.ALIGNMENT) }
             }
             AlignedApkZip.write(
@@ -196,8 +210,8 @@ internal class PlaceholderApkBuilder(private val context: Context) {
                         add(AlignedApkZip.Entry("resources.arsc", customizedResources))
                         add(AlignedApkZip.Entry(iconEntryPath, iconBytes))
                         add(AlignedApkZip.Entry("assets/ipa-icon.png", iconBytes))
-                        if (splashBytes != null) {
-                            add(AlignedApkZip.Entry("assets/splash.png", splashBytes))
+                        splashFrames.forEachIndexed { index, bytes ->
+                            add(AlignedApkZip.Entry(splashPaths[index], bytes))
                         }
                         add(AlignedApkZip.Entry("assets/placeholder-info.json", infoJson, compressed = true))
                     },

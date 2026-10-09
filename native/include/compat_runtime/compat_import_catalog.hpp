@@ -1,8 +1,9 @@
 #pragma once
 
-// Exact non-same-name Darwin imports with a concrete compat-runtime-v1 provider.
-// Keep this table in parity with radek/compat_import_catalog.py and
-// app/.../CompatImportProviders.kt; it is used as a runtime registration guard.
+// Exact imports without a same-name NDK match that have a compat-runtime-v1
+// guest adapter/data-provider catalog entry. Catalog registration is not static
+// linking or proof of full API semantics. Keep parity with the host and Kotlin
+// catalogs; this table is also used as a runtime registration guard.
 
 #include "compat_runtime/shim_registry.hpp"
 
@@ -95,6 +96,9 @@ inline constexpr std::array<Provider, 73> kDarwinOnlyProviders{{
 }};
 
 inline constexpr std::size_t kDarwinOnlyProviderCount = kDarwinOnlyProviders.size();
+// Clearer aliases; the legacy names above remain for existing report consumers.
+inline constexpr const auto &kGuestRuntimeAdapterProviders = kDarwinOnlyProviders;
+inline constexpr std::size_t kGuestRuntimeAdapterProviderCount = kDarwinOnlyProviderCount;
 
 inline std::vector<std::string> missingProviders(const ShimRegistry &registry) {
     std::vector<std::string> missing;

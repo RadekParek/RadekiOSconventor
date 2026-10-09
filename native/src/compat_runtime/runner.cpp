@@ -42,8 +42,11 @@ radek::Json registerReport(const CpuRegisterState &registers) {
 void appendImportArrays(radek::Json &report, const radek::Json &loader) {
     const auto resolved = loader.fields.find("resolvedSymbols");
     const auto unresolved = loader.fields.find("unresolvedSymbols");
+    const auto linking = loader.fields.find("runtimeLinking");
     report["resolvedSymbols"] = resolved == loader.fields.end() ? radek::Json::array() : resolved->second;
     report["unresolvedSymbols"] = unresolved == loader.fields.end() ? radek::Json::array() : unresolved->second;
+    if (linking != loader.fields.end())
+        report["runtimeLinking"] = linking->second;
 }
 
 // Maps a fresh 8 MiB boot stack and lays out a minimal Darwin-style

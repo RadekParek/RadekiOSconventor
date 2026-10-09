@@ -4,6 +4,7 @@
 #include <array>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <utility>
@@ -345,6 +346,7 @@ radek::Json makeSymbolRecord(const std::string &symbol, const std::string &statu
     if (binding) {
         record["shimLibrary"] = binding->library;
         record["adapter"] = binding->adapterName;
+        record["bindingKind"] = binding->resolveGuestAddress ? "guest-data-provider" : "guest-callout";
         record["guestAddress"] = static_cast<std::uint64_t>(binding->guestAddress);
     }
     if (!reason.empty())
@@ -1290,6 +1292,122 @@ radek::Json MachOLoadReport::toJson() const {
         report["trappedSymbols"].push(symbol);
     for (const auto &symbol : unboundNlistSymbols)
         report["unboundNlistSymbols"].push(symbol);
+
+    // Expose the work performed by the runtime import linker separately from
+    // static code rewriting. Each record in resolvedSymbols represents an
+    // import pointer/relocation slot whose 32-bit guest address was installed;
+    // it is not an Android-native game callsite or a gameplay claim.
+    struct LinkAggregate {
+        bool resolved = false;
+        bool trapped = false;
+        bool unresolved = false;
+        bool nlistOnly = false;
+        std::uint64_t fixupCount = 0;
+        std::string adapter;
+        std::string providerLibrary;
+        std::string bindingKind;
+        radek::Json guestAddress;
+        std::set<std::string> sources;
+    };
+    const auto stringField = [](const radek::Json &record, const char *key) -> std::string {
+        const auto found = record.fields.find(key);
+        return found == record.fields.end() ? std::string() : found->second.value;
+    };
+    std::map<std::string, LinkAggregate> linkMap;
+    std::set<std::string> distinctImports;
+    const auto collect = [&](const std::vector<radek::Json> &records, const char *kind) {
+        for (const auto &record : records) {
+            const auto symbol = stringField(record, "symbol");
+            if (symbol.empty())
+                continue;
+            distinctImports.insert(symbol);
+            auto &entry = linkMap[symbol];
+            if (std::string(kind) == "resolved")
+                entry.resolved = true;
+            else if (std::string(kind) == "trapped")
+                entry.trapped = true;
+            else if (std::string(kind) == "unbound-nlist")
+                entry.nlistOnly = true;
+            else
+                entry.unresolved = true;
+            if (std::string(kind) != "unbound-nlist")
+                ++entry.fixupCount;
+            const auto source = stringField(record, "source");
+            if (!source.empty())
+                entry.sources.insert(source);
+            const auto adapter = stringField(record, "adapter");
+            if (!adapter.empty())
+                entry.adapter = adapter;
+            const auto providerLibrary = stringField(record, "shimLibrary");
+            if (!providerLibrary.empty())
+                entry.providerLibrary = providerLibrary;
+            const auto bindingKind = stringField(record, "bindingKind");
+            if (!bindingKind.empty())
+                entry.bindingKind = bindingKind;
+            const auto address = record.fields.find("guestAddress");
+            if (address != record.fields.end())
+                entry.guestAddress = address->second;
+        }
+    };
+    collect(resolvedSymbols, "resolved");
+    collect(trappedSymbols, "trapped");
+    collect(unresolvedSymbols, "unresolved");
+    collect(unboundNlistSymbols, "unbound-nlist");
+
+    constexpr std::size_t kMaximumLinkMapRecords = 4096;
+    radek::Json linking = radek::Json::object();
+    linking["mechanism"] = "Mach-O dyld bind, indirect-symbol, and external-relocation fixups to guest callout/data-provider addresses";
+    linking["guestImageImportSlotsRelinked"] = static_cast<std::uint64_t>(resolvedSymbols.size());
+    linking["guestImageImportSlotsTrapped"] = static_cast<std::uint64_t>(trappedSymbols.size());
+    linking["guestImageImportSlotsUnresolved"] = static_cast<std::uint64_t>(unresolvedSymbols.size());
+    linking["unboundNlistSymbolCount"] = static_cast<std::uint64_t>(unboundNlistSymbols.size());
+    linking["distinctResolvedImportSymbols"] = static_cast<std::uint64_t>(
+        std::count_if(linkMap.begin(), linkMap.end(), [](const auto &item) {
+            return item.second.resolved;
+        }));
+    linking["distinctImportSymbols"] = static_cast<std::uint64_t>(distinctImports.size());
+    linking["translatedGuestCodeCallsitesRewritten"] = std::uint64_t{0};
+    linking["staticallyLinkedNativeGameObjects"] = std::uint64_t{0};
+    linking["guestImageCodeStaticallyRecompiled"] = false;
+    linking["status"] = !mapped ? "NOT_LOADED"
+        : (unresolvedSymbols.size() > 0 ? "PARTIAL_UNRESOLVED"
+           : (trappedSymbols.size() > 0 || unboundNlistSymbols.size() > 0
+                  ? "BOUND_WITH_RUNTIME_TRAPS_OR_NLIST_ONLY"
+                  : (distinctImports.empty() ? "NO_IMPORTS" : "COMPLETE")));
+    radek::Json linkEntries = radek::Json::array();
+    std::size_t emitted = 0;
+    for (const auto &item : linkMap) {
+        if (emitted >= kMaximumLinkMapRecords)
+            break;
+        const auto &aggregate = item.second;
+        const std::string state = aggregate.resolved && (aggregate.trapped || aggregate.unresolved)
+            ? "MIXED_FIXUP_STATUS"
+            : aggregate.resolved ? "RELINKED_TO_GUEST_PROVIDER"
+            : aggregate.trapped ? "BOUND_TO_ABORT_ON_CALL_TRAP"
+            : aggregate.unresolved ? "UNRESOLVED"
+            : "UNBOUND_NLIST_ONLY";
+        radek::Json entry = radek::Json::object();
+        entry["symbol"] = item.first;
+        entry["status"] = state;
+        entry["fixupCount"] = aggregate.fixupCount;
+        entry["adapter"] = aggregate.adapter.empty() ? radek::Json() : radek::Json(aggregate.adapter);
+        entry["providerLibrary"] = aggregate.providerLibrary.empty()
+            ? radek::Json() : radek::Json(aggregate.providerLibrary);
+        entry["bindingKind"] = aggregate.bindingKind.empty()
+            ? radek::Json() : radek::Json(aggregate.bindingKind);
+        entry["guestAddress"] = aggregate.guestAddress;
+        entry["sources"] = radek::Json::array();
+        for (const auto &source : aggregate.sources)
+            entry["sources"].push(radek::Json(source));
+        linkEntries.push(std::move(entry));
+        ++emitted;
+    }
+    linking["providerLinkMap"] = std::move(linkEntries);
+    linking["providerLinkMapTruncated"] = linkMap.size() > kMaximumLinkMapRecords;
+    linking["note"] =
+        "The runtime loader installs guest addresses in Mach-O import/fixup slots. This is runtime guest binding, not static Android relinking or rewriting of game code; trap and nlist-only records are not implementations.";
+    report["runtimeLinking"] = std::move(linking);
+
     if (!error.empty())
         report["error"] = error;
     return report;

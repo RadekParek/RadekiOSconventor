@@ -1,13 +1,13 @@
-"""Concrete compatibility-runtime providers for non-NDK Darwin imports.
+"""Guest-runtime adapter catalog for imports without an exact NDK name match.
 
 The Android mapper deliberately keeps this inventory separate from the reviewed
-same-name Bionic/NDK catalog.  A name in this table has a typed adapter in the
-ARM32 compatibility runtime (or a materialized guest-data binding); it is not a
-claim that an Android system library exports the Darwin spelling.
+same-name Bionic/NDK catalog. A name here has a registered ARM32 guest-callout
+adapter or guest-data binding in ``compat-runtime-v1``; it is not a same-name
+Android export, a static NDK link, or proof of complete API semantics.
 
-The table is fixture-independent.  The Angry Birds v1.0 import set currently
-contains 181 same-name NDK candidates plus these 73 Darwin-only imports.  Tests
-pin that split so a provider cannot be made to appear by changing a denominator.
+The table is fixture-independent. The checked-in Angry Birds v1.0 import set
+contains 181 same-name NDK candidates and 73 names from this catalog. Tests pin
+the exact, disjoint split so changing a denominator cannot inflate either count.
 """
 
 from __future__ import annotations

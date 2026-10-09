@@ -155,9 +155,10 @@ and digest against the report.
 267 bundle files):
 
 - Loader: `LOADED_WITH_TRAPS`, 171 resolved / 407 trapped / 0 unresolved. The
-  Darwin-only imports that Android has no same-name export for are now bound
-  through the translation layer described below (stream cells, ctype sweep,
-  EAGL keys, errno cell, rune locale, CoreFoundation class token, OpenAL).
+  native loader has begun binding ARM32 guest import/fixup slots to registered
+  guest providers or explicit traps. `runtimeLinking` reports those per-image
+  slot results; this is runtime guest binding, not static Android callsite
+  rewriting or a linked native game object.
 - Boot: the previous host diagnostic run reached **2,000,000 guest
   instructions** only because it used the old bounded probe policy. The device
   runner now uses zero for both limits (unlimited) and therefore does not stop
@@ -193,16 +194,17 @@ and digest against the report.
   forward to, so nothing is rendered there; on Android the same calls are
   forwarded to the platform GLES/EGL driver (see the GL forwarding section).
 
-## Darwin-only translation layer (`darwin_compat`)
+## Non-same-name ARM32 guest-adapter catalog (`darwin_compat`)
 
-Android ships no system library that exports the Apple-spelled names the old
-Mach-O images import (`__tolower`, `___error`, `__stdoutp`, `__DefaultRuneLocale`,
-`kEAGLColorFormatRGB565`, `_gxx_personality_sj0`, OpenAL's `_alc*`/`_al*`, ...).
-Those imports are **not** added to the Android catalogs — inventing same-name
-Darwin NDK exports would be lying about the platform. Instead they get explicit
-typed providers in the compat runtime. The exact 73-symbol source/provider
+Android has no same-name system export for the Apple-spelled Darwin imports
+that motivate this layer (for example `__tolower`, `___error`, `__stdoutp`,
+`__DefaultRuneLocale`, `kEAGLColorFormatRGB565`, `_gxx_personality_sj0`, and
+OpenAL's `_alc*`/`_al*`). The exact 73-symbol catalog also includes ARM32
+compiler-runtime/unwind names. These entries stay outside the strict same-name
+Android catalog and identify guest-runtime adapters/data providers instead; they
+are not static NDK exports or proof of complete semantics. The source/provider
 catalog is shared by Python, Kotlin, and C++; the 181 observed same-name NDK
-imports also receive ARM32 provider bindings (specialized GLES/libSystem/C++
+imports also receive ARM32 guest-provider bindings (specialized GLES/libSystem/C++
 providers plus bounded libc/POSIX/math/stdio/pthread/zlib/asset wrappers). The
 full reviewed NDK candidate inventory contains 1,229 names and is registered
 with typed adapters or explicit bounded provider boundaries, so an unimplemented
@@ -263,9 +265,12 @@ relocation) was refused as unresolved.
 ### Same-name NDK subset after this layer
 
 The translation layer changes what *runs*, not what *same-name* means: the
-honest same-name subset for this image stays **181/254 = 71.26%**, because the
-73 Darwin-only imports are served by typed compat providers, not same-name NDK
-exports. The separate reviewed-provider ledger is **254/254 = 100%** (181 exact
-NDK/system candidates with ARM32 wrappers plus 73 concrete Darwin providers);
-the provider wrappers are not raw arm64 system pointers and do not claim IPA
-callsite rewriting, full Apple framework equivalence, or a playable game.
+strict subset stays **181/254 = 71.26%**. The other **73/254** are non-same-name
+`compat-runtime-v1` guest-adapter catalog entries (Darwin data/framework/OpenAL
+adapters plus ARM32 compiler-runtime and unwind boundaries), not direct NDK
+exports. The combined **254/254** reviewed-provider figure is catalog coverage,
+not proof that every image's slots were fixed up or every API's semantics are
+implemented. The runtime report's `runtimeLinking` block records actual per-image
+bind/relocation results; those are guest-address slot fixups, not static Android
+callsite rewriting. Provider addresses are guest ARM32 addresses, not raw arm64
+system pointers, and none of these counts claims a playable game.

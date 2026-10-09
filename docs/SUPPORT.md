@@ -26,8 +26,9 @@ calls, and linked recompiled bytes explicitly at zero.
 | ARM64 reconstruction | BOUNDED SUBSET | A restricted closed-integer entry leaf (MOV-immediate, MOVK, register MOV, immediate ADD/SUB, RET) can be statically recompiled into `recompiled-entry.bin`, `recompiled-entry.c`, and a minimal ARM64 ET_DYN shared object. If the whole executable is exactly that import-free routine and has no unsupported metadata, the bounded complete-game builder links it into a signed APK; this is not a general game port |
 | ARM64e | BLOCKED | PAC/ABI adaptation is not proven |
 | ARMv6/ARMv7/v7s/Thumb/Thumb-2 | PARTIAL | Selected immediate arithmetic, register-copy and return instruction subsets can be lowered to ARMv7 and emitted in the same isolated ET_DYN format. It is not linked into a game; no 32-bit game APK is emitted |
-| Compatibility registry source | PARTIAL | `ioscompat/libioscompat.cpp` gives every observed Darwin import a resolution target: host-tested time/C/POSIX/limited CoreFoundation implementations or explicitly unimplemented stub handlers. Stub counts are resolution coverage, never implementation coverage (`compatRegistry.symbolResolution` reports verified/stubbed/unresolved with `linkedIntoGame: 0`) |
-| `libgcc_s.1.dylib` mapping | CANDIDATE ONLY | Compiler helpers are triaged to NDK compiler-rt builtins; unwind/personality symbols to NDK libunwind/libc++abi candidates. Android has no drop-in `libgcc_s.so` alias, and no toolchain link or ABI validation is performed |
+| Compatibility registry source | PARTIAL | `ioscompat/libioscompat.cpp` gives observed imports a generated-source implementation or explicit stub resolution target; this source is not linked into the game. `compatRegistry.guestRuntimeAdapterCatalogCount` separately counts compat-runtime-v1 ARM32 callout/data-provider catalog entries (legacy alias `concreteDarwinProviderCount`); catalog membership is neither static linkage nor per-image fixup coverage |
+| Runtime guest import-slot binding | PARTIAL | The game loader writes guest provider/trap addresses into supported Mach-O bind, indirect-symbol and external-relocation slots. Per-image `runtimeLinking` records actual bound/trapped/unresolved slots; this is not static Android callsite rewriting or a native game-object link. Unsupported chained fixups remain blocked |
+| `libgcc_s.1.dylib` mapping | CANDIDATE / PARTIAL RUNTIME ADAPTERS | Android has no drop-in `libgcc_s.so` alias and no static compiler-rt/libunwind link is generated. A bounded set of ARM32 arithmetic helpers and unwind boundaries are registered as guest-runtime callouts; full SjLj/personality/landing-pad semantics remain incomplete |
 | `libstdc++.6.dylib` mapping | CANDIDATE ONLY | GNU libstdc++ and LLVM libc++ have different C++ ABIs and mangling. Low-level symbol overlap is not a drop-in runtime, compatible exception model, or completed link |
 | Darwin framework dependency grades | EVIDENCE-GRADED | `provided` is a reviewed Android system ABI target; `compatibility` marks a bounded tested implementation; `candidate` is a semantic/API target with no linked ABI adapter; `no-execution-path-yet` means no provider is identified. Dependency imports are associated by dylib ordinal; evidence counts never claim an IPA callsite link or runtime call |
 | Dynamic stub hook registration | SUPPORTED (registration only) | `libioscompat.so` registry registers unmapped symbols at runtime and resolves them to counted stub trampolines. Registration is not implementation and rewrites no IPA callsites |
@@ -55,15 +56,18 @@ calls, and linked recompiled bytes explicitly at zero.
 ## Why symbol substitutions are not API implementations
 
 The app may report 100% **symbol classification/triage** when every observed import has been
-categorized as a name candidate, semantic-rewrite candidate, implemented-shim export, compat stub
-handler, or unmapped. That is deliberately separate from direct NDK candidates and actual
-linked-implementation coverage. The headline is **reviewed Android mapping coverage**: every import
-gets exactly one mapping kind (same-name NDK/system export, NDK compiler-rt/libunwind toolchain
-symbol, concrete `libioscompat.so` implementation export, or reviewed semantic target), so a fully
-triaged IPA reaches 100% — with the per-kind counts shown next to it and the strict *same-name NDK
-candidate subset* reported separately (that one is divided by all distinct imports and stays smaller,
-because Apple-only frameworks and Objective-C APIs have no same-name Android export). Neither number
-is a rewrite, a link, or generated code.
+categorized as a name candidate, guest-runtime adapter catalog entry, compiled shim export,
+semantic-rewrite target, compat stub handler, or unmapped. That is separate from strict direct NDK
+name matches, per-image runtime slot fixups, and statically linked implementation coverage. The
+headline is **reviewed Android mapping coverage**: every import gets exactly one mapping kind
+(same-name NDK/system candidate, compiler-runtime candidate, `libcompat_runtime_v1.so` guest-adapter
+catalog entry, compiled `libioscompat.so` implementation export, or reviewed semantic target), so a
+fully triaged IPA can reach 100%. The per-kind counts remain visible; for the Angry Birds v1.0
+fixture, 181/254 are strict same-name NDK/system candidates and 73/254 are non-same-name guest
+adapter catalog entries. Those 73 are not NDK exports or proof of per-image binding. The loader's
+`runtimeLinking` block is the source for actual guest import-slot bind/relocation results. None of
+these figures represents a static Android callsite rewrite, a linked game object, or generated game
+code.
 Current-device `dlopen`/`dlsym` results are reported with two explicit denominators: exact NDK exports
 verified among the NDK name candidates, and verified exports among all imports. For example,
 167/264 imports is 63%, not 65%; if 172 names were candidates, 167/172 would separately be 97% of

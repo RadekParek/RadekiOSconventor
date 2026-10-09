@@ -125,20 +125,38 @@ public final class GameBootActivityTest {
     }
 
     @Test
-    public void splashFramesAdvanceOnceAndStayOnTheLastOne() {
+    public void splashFramesAdvanceEvery900MillisThenRevealTheGameSurface() {
         GameBootActivity activity = Robolectric.buildActivity(GameBootActivity.class).create().get();
         ShadowLooper mainLooper = Shadows.shadowOf(Looper.getMainLooper());
         mainLooper.idle();
 
-        activity.installSyntheticSplashFramesForTest(3);
-        assertEquals(3, activity.installedSplashFrameCount());
+        activity.installSyntheticSplashFramesForTest(5);
+        assertEquals("the launcher caps recovered frames at three", 3, activity.installedSplashFrameCount());
         assertEquals(0, activity.currentSplashFrameIndex());
+        assertFalse(activity.gameSurfaceVisibleForTest());
+        assertFalse(activity.splashSequenceCompleteForTest());
 
-        mainLooper.idleFor(1, TimeUnit.SECONDS);
+        mainLooper.idleFor(899, TimeUnit.MILLISECONDS);
+        assertEquals(0, activity.currentSplashFrameIndex());
+        mainLooper.idleFor(1, TimeUnit.MILLISECONDS);
         assertEquals(1, activity.currentSplashFrameIndex());
 
-        // Past the end of the recovered frames the boot screen stays on the last
-        // frame instead of cycling back to the first one.
+        mainLooper.idleFor(899, TimeUnit.MILLISECONDS);
+        assertEquals(1, activity.currentSplashFrameIndex());
+        mainLooper.idleFor(1, TimeUnit.MILLISECONDS);
+        assertEquals(2, activity.currentSplashFrameIndex());
+        assertFalse(activity.gameSurfaceVisibleForTest());
+
+        // The final frame also receives its full 900 ms; guest rendering is
+        // released only after that interval, rather than running under a black
+        // SurfaceView while the splash is on screen.
+        mainLooper.idleFor(899, TimeUnit.MILLISECONDS);
+        assertFalse(activity.splashSequenceCompleteForTest());
+        mainLooper.idleFor(1, TimeUnit.MILLISECONDS);
+        assertTrue(activity.splashSequenceCompleteForTest());
+        assertTrue(activity.gameSurfaceVisibleForTest());
+
+        // The sequence is once-through and never wraps to the first frame.
         mainLooper.idleFor(5, TimeUnit.SECONDS);
         assertEquals(2, activity.currentSplashFrameIndex());
         assertFalse(activity.isFinishing());

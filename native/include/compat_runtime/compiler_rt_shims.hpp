@@ -2,6 +2,7 @@
 
 #include "compat_runtime/shim_registry.hpp"
 
+#include <cstddef>
 #include <cstdint>
 
 namespace radek::compat_runtime::compiler_rt {
@@ -31,6 +32,7 @@ namespace radek::compat_runtime::compiler_rt {
  */
 class ShimAdapter {
     std::uint64_t calls_ = 0;
+    std::size_t registeredSymbols_ = 0;
     GuestAddress nextCallout_ = 0xf0012000;
 
   public:
@@ -38,6 +40,8 @@ class ShimAdapter {
 
     void registerBindings(ShimRegistry &registry);
 
+    /** Number of exact helper symbols registered in the guest callout registry. */
+    std::size_t registeredSymbolCount() const;
     /** Number of helper calls served; observability, never gameplay evidence. */
     std::uint64_t callCount() const;
 };

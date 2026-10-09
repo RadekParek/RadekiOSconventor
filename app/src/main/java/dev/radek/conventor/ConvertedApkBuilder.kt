@@ -230,6 +230,10 @@ internal class ConvertedApkBuilder(private val context: Context) {
             } else null
             val launcherIcon = recoveredIcon ?: templateFallbackIcon
             val launcherIconSha = if (recoveredIcon != null) sha256(recoveredIcon) else ""
+            val splashFrames = SplashExtractor.extractSplashPngs(File(dir, "source.ipa"))
+            val splashPaths = splashFrames.indices.map { index ->
+                if (index == 0) "assets/splash.png" else "assets/splash-${index + 1}.png"
+            }
 
             val metadata = JSONObject()
                 .put("contract", CONTRACT)
@@ -238,6 +242,10 @@ internal class ConvertedApkBuilder(private val context: Context) {
                 .put("targetAbi", "arm64-v8a")
                 .put("launchMessage", launchMessage)
                 .put("applicationName", appName)
+                .put("splash", JSONObject()
+                    .put("frameCount", splashFrames.size)
+                    .put("frameIntervalMillis", 900)
+                    .put("framesAreLaunchOnly", true))
                 .put("source", JSONObject()
                     .put("sha256", sourceHash)
                     .put("originalName", source.optString("originalName"))
@@ -302,6 +310,9 @@ internal class ConvertedApkBuilder(private val context: Context) {
             entries += AlignedApkZip.Entry("assets/conversion.json", metadata.toString().toByteArray(Charsets.UTF_8), compressed = true)
             if (recoveredIcon != null) {
                 entries += AlignedApkZip.Entry("assets/ipa-icon.png", recoveredIcon, compressed = true)
+            }
+            splashFrames.forEachIndexed { index, bytes ->
+                entries += AlignedApkZip.Entry(splashPaths[index], bytes, compressed = true)
             }
             for ((relative, payload) in resourceEntries) {
                 entries += AlignedApkZip.Entry.stream("assets/bundle/$relative", payload, compressed = true)
@@ -415,18 +426,18 @@ internal class ConvertedApkBuilder(private val context: Context) {
                     .put("warnings", JSONArray().apply { audit.warnings.forEach { put(it) } }))
                 .put("completedAt", java.time.Instant.now().toString())
             report.put("deviceConversion", conversion)
-            val verifiedApiReplacements = report.optJSONObject("apiMapping")
-                ?.optInt("concreteDarwinProviderCount", 0)?.coerceAtLeast(0) ?: 0
+            val availableApiReplacements = report.optJSONObject("apiMapping")
+                ?.optInt("implementedApiReplacementCount", 0)?.coerceAtLeast(0) ?: 0
             report.put("apiImplementationGeneration", (report.optJSONObject("apiImplementationGeneration") ?: JSONObject())
                 .put("status", "RUNTIME_LIBRARY_LINKED_NO_CALLSITE_REWRITES")
                 .put("runtimeLibraryLinked", true)
                 .put("linkedRuntimeLibraries", JSONArray().put(CompatibilityRuntime.SONAME))
                 .put("linkedApiReplacements", 0)
                 .put("linkedIntoGame", false)
-                .put("message", if (verifiedApiReplacements > 0) {
-                    "$verifiedApiReplacements typed concrete Darwin provider(s) are catalogued and ${CompatibilityRuntime.SONAME} is linked into the APK through DT_NEEDED. The bounded executable has no imports, so no individual IPA API callsite was rewritten or counted as a linked API replacement."
+                .put("message", if (availableApiReplacements > 0) {
+                    "$availableApiReplacements imported symbol(s) have concrete libioscompat.so implementation exports available, and ${CompatibilityRuntime.SONAME} is linked into the APK through DT_NEEDED. The bounded executable has no imports, so no individual IPA API callsite was rewritten or counted as a linked API replacement."
                 } else {
-                    "${CompatibilityRuntime.SONAME} is bundled and linked into the APK through DT_NEEDED. No imported API matched the runtime verification, and the bounded executable has no imports, so no individual IPA callsite was rewritten or counted as a linked API replacement; runtime execution was not tested."
+                    "${CompatibilityRuntime.SONAME} is bundled and linked into the APK through DT_NEEDED. No matching libioscompat.so implementation export was identified, and the bounded executable has no imports, so no individual IPA callsite was rewritten or counted as a linked API replacement; runtime execution was not tested."
                 }))
             // Expose the artifact through the same attachment contract used for
             // host conversions so install/share/provider paths work unchanged.

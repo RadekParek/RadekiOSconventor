@@ -1761,6 +1761,48 @@ void testLegacyExternalRelocationBindsGuestData() {
     CHECK(unresolved.unresolvedSymbols[0].fields.at("dylibOrdinal").value == "1");
 }
 
+void testRuntimeLinkReportCountsOnlyInstalledProviders() {
+    MachOptions options;
+    options.includeDataSegment = true;
+    options.includeDependency = true;
+    options.includeIndirectFunctionPointer = true;
+    options.indirectSymbolName = "_runtimeLinked";
+    const auto bytes = makeMachO(options);
+
+    ShimRegistry shims;
+    shims.registerBinding(testBinding("_runtimeLinked", 0xf0002340));
+    GuestAddressSpace memory;
+    const auto loaded = MachOLoader().load(bytes, memory, shims);
+    CHECK(loaded.status == "LOADED");
+    const auto linked = loaded.toJson().fields.at("runtimeLinking");
+    CHECK(linked.fields.at("status").value == "COMPLETE");
+    CHECK(linked.fields.at("guestImageImportSlotsRelinked").value == "1");
+    CHECK(linked.fields.at("distinctResolvedImportSymbols").value == "1");
+    CHECK(linked.fields.at("translatedGuestCodeCallsitesRewritten").value == "0");
+    CHECK(linked.fields.at("providerLinkMap").items.size() == 1);
+    CHECK(linked.fields.at("providerLinkMap").items[0].fields.at("symbol").value ==
+          "_runtimeLinked");
+    CHECK(linked.fields.at("providerLinkMap").items[0].fields.at("status").value ==
+          "RELINKED_TO_GUEST_PROVIDER");
+    CHECK(linked.fields.at("providerLinkMap").items[0].fields.at("adapter").value ==
+          "host-tested-test-adapter");
+
+    GuestAddressSpace trappedMemory;
+    ShimRegistry emptyRegistry;
+    TrapShimAdapter traps;
+    const auto trapped = MachOLoader().loadWithTraps(bytes, trappedMemory, emptyRegistry, traps);
+    CHECK(trapped.status == "LOADED_WITH_TRAPS");
+    const auto trappedLinking = trapped.toJson().fields.at("runtimeLinking");
+    CHECK(trappedLinking.fields.at("status").value ==
+          "BOUND_WITH_RUNTIME_TRAPS_OR_NLIST_ONLY");
+    CHECK(trappedLinking.fields.at("guestImageImportSlotsRelinked").value == "0");
+    CHECK(trappedLinking.fields.at("guestImageImportSlotsTrapped").value == "1");
+    CHECK(trappedLinking.fields.at("providerLinkMap").items[0].fields.at("status").value ==
+          "BOUND_TO_ABORT_ON_CALL_TRAP");
+    CHECK(trappedLinking.fields.at("providerLinkMap").items[0].fields.at("adapter").kind ==
+          radek::Json::Null);
+}
+
 void testRunnerReportsFirstMissingImport() {
     MachOptions options;
     options.includeDataSegment = true;
@@ -1777,6 +1819,8 @@ void testRunnerReportsFirstMissingImport() {
     CHECK(report.fields.at("reportArtifactName").value == "compat-runtime-v1-report.json");
     CHECK(report.fields.at("runtimeLibrary").value == "libcompat_runtime_v1.so");
     CHECK(report.fields.at("cpu").fields.at("status").value == "BLOCKED_BY_UNRESOLVED_IMPORT");
+    CHECK(report.fields.at("runtimeLinking").fields.at("status").value == "PARTIAL_UNRESOLVED");
+    CHECK(report.fields.at("runtimeLinking").fields.at("translatedGuestCodeCallsitesRewritten").value == "0");
 
     const auto unauthorized = GuestRunner(shims, *cpu).runMainBinary(bytes, false);
     CHECK(unauthorized.fields.at("status").value == "not_runnable");
@@ -1953,6 +1997,7 @@ int main() {
     testNlistFatAndThreadState();
     testLegacyIndirectSymbolPointerBindsCallout();
     testLegacyExternalRelocationBindsGuestData();
+    testRuntimeLinkReportCountsOnlyInstalledProviders();
     testRunnerReportsFirstMissingImport();
     testRunnerReportsTimeLimitWithoutClaimingCompatibility();
     testGuestFunctionReachesImportedCalloutAndReturns();

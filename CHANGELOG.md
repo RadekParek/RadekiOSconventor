@@ -4,6 +4,26 @@ All notable changes to RadekiOSConventor. Every entry states what was verified a
 what was **not**: analysis, triage, name mappings and host static-recompilation
 coverage never mean a linked game, a playable conversion or a device-tested APK.
 
+## 2026-10-09 — Provider-catalog counts separated from NDK and runtime links
+
+The checked-in Angry Birds v1.0 executable was parsed directly: it has 254 distinct import names,
+partitioned into **181 strict same-name NDK/system candidates** and **73 non-same-name guest-runtime
+adapter catalog entries** (no overlap). The app now reports the 73 as catalog entries for
+`libcompat_runtime_v1.so`, never as direct NDK exports or compiled `libioscompat.so` implementations.
+All eight compiler-runtime/unwind candidates in this fixture are separately counted and happen to
+have guest-adapter catalog entries; this is still not a static compiler-rt/libunwind or `libgcc_s.so`
+link. Current-device export lookups, catalog registration, and actual per-image runtime slot fixups
+remain separate fields. The native loader's `runtimeLinking` report counts guest bind/fixup slots and
+explicitly reports zero static Android game-code callsite rewrites. Host-generated registry fields
+now carry the same caveat, and the report no longer uses the 73-entry adapter count as an
+`implementedApiReplacementCount`.
+
+The native runtime reports catalog registration counts and actual runtime-link results separately;
+compiler-runtime helper registration is now counted from successful registrations rather than a
+hard-coded report constant. Added mapper/registry tests for guest-adapter classification and count
+partitioning. Android/native build and device-run verification is still required before treating the
+launcher, splash, storage, or Angry Birds black-screen work as validated.
+
 ## 2026-10-08 — Whole-game ARM translation emitted before APK gates
 
 The Angry Birds pipeline no longer stops at the complete-game leaf prover before

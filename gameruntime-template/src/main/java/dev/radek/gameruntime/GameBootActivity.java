@@ -14,6 +14,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.Surface;
 import android.view.SurfaceHolder;
@@ -43,6 +44,8 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32;
 import java.util.zip.DataFormatException;
 import java.util.zip.Inflater;
@@ -54,10 +57,10 @@ import java.util.zip.Inflater;
  * This activity runs in fullscreen and plays the recovered bundle splash screen
  * (supporting standard PNG/JPEG, Apple CgBI PNGs, and sprite-sheet descriptors
  * such as SPLASHES.png + SPLASHES.dat) as an automatically advancing boot
- * animation while running the real guest boot through libcompat_runtime_v1.so.
- * The splash never needs a touch: it advances on its own while the guest boots
- * and stops on a stable frame when the boot attempt ends. The device runner has
- * no arbitrary instruction or wall-clock budget, so a game loop is allowed to
+ * sequence before starting the real guest boot through libcompat_runtime_v1.so.
+ * The splash never needs a touch: it advances on its own for 900 ms per frame,
+ * then reveals the Android game surface and releases the guest boot worker. The
+ * device runner has no arbitrary instruction or wall-clock budget, so a game loop is allowed to
  * remain alive for gameplay; it stops only for a real runtime boundary or setup
  * failure. When that happens, the fullscreen diagnostic panel stays open with
  * the exact stop reason instead of crashing.
@@ -80,12 +83,22 @@ public final class GameBootActivity extends Activity {
     private static final int DEFAULT_VIEWPORT_HEIGHT = 320;
     /** Automatic boot-animation interval between recovered splash frames. */
     private static final long SPLASH_FRAME_INTERVAL_MS = 900L;
+    private static final int MAX_SPLASH_FRAMES = 3;
+    private static final long MAX_PERSISTENT_LOG_BYTES = 2L * 1024L * 1024L;
+    private static final long MAX_RUNTIME_REPORT_BYTES = 16L * 1024L * 1024L;
+    private static final String LOG_TAG = "RadekGameBoot";
     private static final byte[] PNG_SIGNATURE = new byte[] {
         (byte) 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
     };
     private static final byte[] CGBI_CHUNK_TYPE = new byte[] { 0x43, 0x67, 0x42, 0x49 };
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final CountDownLatch splashSequenceFinished = new CountDownLatch(1);
+    private final CountDownLatch gameSurfaceReady = new CountDownLatch(1);
+    private final Object persistentLogLock = new Object();
+    private File appExternalFilesDir;
+    private File appObbDirectory;
+    private File persistentLogFile;
     private TextView titleView;
     private TextView logView;
     private ScrollView scroller;
@@ -100,33 +113,30 @@ public final class GameBootActivity extends Activity {
     private final List<SplashFrame> activeSplashFrames = new ArrayList<>();
     private int currentSplashIndex = 0;
     private boolean splashAnimationRunning = false;
-    private boolean bootFinished = false;
+    private boolean splashSequenceComplete = false;
+    private volatile boolean bootFinished = false;
     private volatile boolean destroyed = false;
 
     private final Runnable splashAdvance = new Runnable() {
         @Override
         public void run() {
-            if (destroyed || bootFinished || activeSplashFrames.size() <= 1) {
-                splashAnimationRunning = false;
+            if (destroyed || bootFinished) {
+                finishSplashSequenceOnMainThread();
                 return;
             }
-            // Every recovered splash frame is shown once and the sequence then
-            // stays on the last frame: the boot screen never cycles back.
-            if (currentSplashIndex >= activeSplashFrames.size() - 1) {
-                splashAnimationRunning = false;
-                return;
-            }
-            showSplashFrame(currentSplashIndex + 1);
-            if (currentSplashIndex < activeSplashFrames.size() - 1) {
+            // Give every selected frame one full interval, including the final
+            // frame, then reveal the game surface and release the boot worker.
+            if (currentSplashIndex + 1 < activeSplashFrames.size()) {
+                showSplashFrame(currentSplashIndex + 1);
                 mainHandler.postDelayed(this, SPLASH_FRAME_INTERVAL_MS);
             } else {
-                splashAnimationRunning = false;
+                finishSplashSequenceOnMainThread();
             }
         }
     };
 
     private static native String runGameBootAttempt(byte[] mainBinary, String payloadDirectory,
-            boolean authorizationConfirmed);
+            String appDataDirectory, String obbDirectory, boolean authorizationConfirmed);
 
     /**
      * Hands the on-screen surface to the runtime so the guest's EAGL drawable can
@@ -137,6 +147,7 @@ public final class GameBootActivity extends Activity {
 
     private void publishGameSurface(Surface surface) {
         latestGameSurface = surface;
+        if (surface != null && surface.isValid()) gameSurfaceReady.countDown();
         try {
             setGameSurface(surface);
         } catch (Throwable ignored) {
@@ -205,7 +216,106 @@ public final class GameBootActivity extends Activity {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
+    private void initializeAppSpecificStorage() {
+        File external = getExternalFilesDir(null);
+        File root = external != null ? external : new File(getFilesDir(), "game-data");
+        try {
+            mkdirsOrThrow(root);
+            for (String relative : new String[] {
+                    "Documents", "Library", "Library/Caches", "tmp", "diagnostics"}) {
+                mkdirsOrThrow(new File(root, relative));
+            }
+        } catch (IOException error) {
+            Log.e(LOG_TAG, "Could not create external game-data directories; using private app storage", error);
+            root = new File(getFilesDir(), "game-data");
+            try {
+                mkdirsOrThrow(root);
+                for (String relative : new String[] {
+                        "Documents", "Library", "Library/Caches", "tmp", "diagnostics"}) {
+                    mkdirsOrThrow(new File(root, relative));
+                }
+            } catch (IOException fallbackError) {
+                Log.e(LOG_TAG, "Could not create private game-data directories", fallbackError);
+            }
+        }
+        appExternalFilesDir = root;
+        persistentLogFile = new File(new File(root, "diagnostics"), "boot.log");
+        try {
+            appObbDirectory = getObbDir();
+            if (appObbDirectory != null) mkdirsOrThrow(appObbDirectory);
+        } catch (Throwable error) {
+            appObbDirectory = null;
+            Log.w(LOG_TAG, "App-specific OBB directory is unavailable", error);
+        }
+        writeStorageManifest();
+        appendLine("App data directory: " + root.getAbsolutePath());
+        appendLine("Persistent boot log: " + persistentLogFile.getAbsolutePath());
+        appendLine(appObbDirectory == null
+                ? "App-specific OBB directory unavailable; current game assets are embedded in the APK."
+                : "App-specific OBB directory: " + appObbDirectory.getAbsolutePath()
+                        + " (created; no expansion OBB is required for this packaged bundle).");
+    }
+
+    private void writeStorageManifest() {
+        try {
+            JSONObject storage = new JSONObject()
+                    .put("appDataDirectory", appExternalFilesDir != null
+                            ? appExternalFilesDir.getAbsolutePath() : "")
+                    .put("obbDirectory", appObbDirectory != null
+                            ? appObbDirectory.getAbsolutePath() : JSONObject.NULL)
+                    .put("source", "Context.getExternalFilesDir(null), with private-storage fallback")
+                    .put("directories", new JSONArray()
+                            .put("Documents").put("Library").put("Library/Caches")
+                            .put("tmp").put("diagnostics"))
+                    .put("bundleAssetsInApk", true)
+                    .put("expansionObbRequired", false);
+            File target = new File(new File(appExternalFilesDir, "diagnostics"), "storage.json");
+            try (FileOutputStream output = new FileOutputStream(target, false)) {
+                output.write(storage.toString(2).getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (Throwable error) {
+            Log.w(LOG_TAG, "Could not persist the game storage manifest", error);
+        }
+    }
+
+    private void persistLogLine(String line) {
+        File target = persistentLogFile;
+        if (target == null) return;
+        synchronized (persistentLogLock) {
+            try {
+                if (target.length() > MAX_PERSISTENT_LOG_BYTES) {
+                    File previous = new File(target.getParentFile(), "boot.log.1");
+                    if (previous.exists()) previous.delete();
+                    if (target.exists()) target.renameTo(previous);
+                }
+                try (FileOutputStream output = new FileOutputStream(target, true)) {
+                    String record = System.currentTimeMillis() + " " + line + "\n";
+                    output.write(record.getBytes(StandardCharsets.UTF_8));
+                }
+            } catch (IOException error) {
+                Log.w(LOG_TAG, "Could not append the persistent boot log", error);
+            }
+        }
+    }
+
+    private void persistRuntimeReport(String reportText) {
+        if (reportText == null || reportText.length() > MAX_RUNTIME_REPORT_BYTES) {
+            appendLine("Runtime report was not saved because it exceeded the report-size limit.");
+            return;
+        }
+        if (appExternalFilesDir == null) return;
+        File target = new File(new File(appExternalFilesDir, "diagnostics"), "runtime-report.json");
+        try (FileOutputStream output = new FileOutputStream(target, false)) {
+            output.write(reportText.getBytes(StandardCharsets.UTF_8));
+            appendLine("Detailed runtime report saved: " + target.getAbsolutePath());
+        } catch (IOException error) {
+            appendLine("Runtime report could not be saved: " + error);
+        }
+    }
+
     private void appendLine(final String line) {
+        Log.i(LOG_TAG, line);
+        persistLogLine(line);
         mainHandler.post(new Runnable() {
             @Override
             public void run() {
@@ -232,11 +342,14 @@ public final class GameBootActivity extends Activity {
      */
     private void showTerminalState(final String title, final String detail) {
         bootFinished = true;
+        splashSequenceFinished.countDown();
+        gameSurfaceReady.countDown();
         mainHandler.post(new Runnable() {
             @Override
             public void run() {
                 if (destroyed || titleView == null || logView == null) return;
                 splashAnimationRunning = false;
+                splashSequenceComplete = true;
                 mainHandler.removeCallbacks(splashAdvance);
                 // The attempt is over: turn the device back to portrait and show
                 // the diagnostics the guest produced.
@@ -300,6 +413,58 @@ public final class GameBootActivity extends Activity {
                         .append(loader.optInt("unresolvedSymbolCount", 0)).append(" unresolved)");
             }
             summary.append("\n");
+            JSONObject linking = report.optJSONObject("runtimeLinking");
+            if (linking == null && loader != null) linking = loader.optJSONObject("runtimeLinking");
+            if (linking != null) {
+                summary.append("Guest import-slot fixups (runtime, not static Android linking): ")
+                        .append(linking.optString("status", "?"))
+                        .append(" · ")
+                        .append(linking.optInt("guestImageImportSlotsRelinked", 0))
+                        .append(" provider slot(s) bound · ")
+                        .append(linking.optInt("guestImageImportSlotsTrapped", 0))
+                        .append(" trap slot(s) · ")
+                        .append(linking.optInt("guestImageImportSlotsUnresolved", 0))
+                        .append(" unresolved · static game callsites rewritten: ")
+                        .append(linking.optInt("translatedGuestCodeCallsitesRewritten", 0))
+                        .append("\n");
+            }
+            JSONObject importProviders = report.optJSONObject("importProviders");
+            if (importProviders != null) {
+                summary.append("Registered provider catalogs: ")
+                        .append(importProviders.optInt("sameNameNdkProviderCount", 0))
+                        .append(" strict same-name NDK/system names · ")
+                        .append(importProviders.optInt("guestRuntimeAdapterCatalogCount", 0))
+                        .append(" guest-adapter catalog names · ")
+                        .append(importProviders.optInt("fullNdkCandidateInventoryCount", 0))
+                        .append(" broad NDK candidates; registration is not semantic completeness or a link result\n");
+            }
+            JSONObject compilerRuntime = report.optJSONObject("compilerRuntime");
+            if (compilerRuntime != null) {
+                summary.append("Compiler-runtime helpers: ")
+                        .append(compilerRuntime.optInt("registeredSymbolCount", 0))
+                        .append(" ARM32 callouts registered · ")
+                        .append(compilerRuntime.optLong("callsObserved", compilerRuntime.optLong("calls", 0)))
+                        .append(" calls observed; not a static compiler-rt/libunwind link\n");
+            }
+            JSONObject appStorage = report.optJSONObject("appStorage");
+            if (appStorage != null) {
+                summary.append("App-specific data: ")
+                        .append(appStorage.optString("appDataDirectory", "unavailable"))
+                        .append(" · expansion OBB required: ")
+                        .append(appStorage.optBoolean("expansionObbRequired", false) ? "yes" : "no")
+                        .append("\n");
+            }
+            JSONObject gles = report.optJSONObject("gles");
+            if (gles != null) {
+                summary.append("Renderer: drawable ")
+                        .append(gles.optBoolean("drawableReady", false) ? "ready" : "not ready")
+                        .append(" · ")
+                        .append(gles.optInt("drawableWidth", 0)).append("×")
+                        .append(gles.optInt("drawableHeight", 0))
+                        .append(" · frames presented: ")
+                        .append(gles.optInt("framesPresented", 0))
+                        .append("\n");
+            }
             long executed = 0;
             String executionStatus = "";
             if (execution != null) {
@@ -450,28 +615,26 @@ public final class GameBootActivity extends Activity {
         // forced game APK look like a diagnostic shell.
         root.setBackgroundColor(Color.BLACK);
 
-        splashImageView = new ImageView(this);
-        splashImageView.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        splashImageView.setContentDescription("Recovered game splash screen");
-        root.addView(splashImageView, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER));
-
         // The guest's frames land on this surface (the runtime attaches the
-        // EAGL drawable to it through EGL). It sits above the splash so the game
-        // covers the boot screen as soon as it renders.
+        // EAGL drawable to it through EGL). It starts hidden and uses the normal
+        // SurfaceView layer so Android can composite the splash over it; putting
+        // the surface Z-order on top previously allowed its black buffer to hide
+        // every recovered launch frame.
         gameSurfaceView = new SurfaceView(this);
         gameSurfaceView.setBackgroundColor(Color.BLACK);
         gameSurfaceView.setContentDescription("Guest game surface");
-        gameSurfaceView.setZOrderOnTop(true);
+        gameSurfaceView.setVisibility(View.GONE);
         gameSurfaceView.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override
             public void surfaceCreated(SurfaceHolder holder) {
                 publishGameSurface(holder.getSurface());
+                appendLine("Android game surface created; waiting for splash sequence completion.");
             }
 
             @Override
             public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
                 publishGameSurface(holder.getSurface());
+                appendLine("Android game surface size: " + width + "×" + height + ".");
             }
 
             @Override
@@ -482,6 +645,12 @@ public final class GameBootActivity extends Activity {
         root.addView(gameSurfaceView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
                 Gravity.CENTER));
+
+        splashImageView = new ImageView(this);
+        splashImageView.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        splashImageView.setContentDescription("Recovered game splash screen");
+        root.addView(splashImageView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER));
 
         LinearLayout overlay = new LinearLayout(this);
         overlay.setOrientation(LinearLayout.VERTICAL);
@@ -546,8 +715,7 @@ public final class GameBootActivity extends Activity {
         overlayView.setVisibility(View.GONE);
 
         setContentView(root);
-
-        preloadSplashFromAssets();
+        initializeAppSpecificStorage();
 
         String appName = "";
         JSONObject metadata = null;
@@ -568,22 +736,26 @@ public final class GameBootActivity extends Activity {
         new Thread(new Runnable() {
             @Override
             public void run() {
+                List<SplashFrame> discovered = Collections.emptyList();
                 try {
-                    List<SplashFrame> discovered = discoverSplashFramesFromInventory(getAssets(), finalMetadata);
-                    if (!discovered.isEmpty()) {
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                if (!destroyed && (activeSplashFrames.isEmpty()
-                                        || discovered.size() > activeSplashFrames.size())) {
-                                    installSplashFrames(discovered);
-                                }
-                            }
-                        });
-                    }
+                    discovered = discoverSplashFramesFromInventory(getAssets(), finalMetadata);
                 } catch (Throwable ignored) {
                     // Splash discovery is non-fatal to the guest boot attempt.
                 }
+                final List<SplashFrame> recoveredFrames = discovered;
+                mainHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (destroyed) {
+                            splashSequenceFinished.countDown();
+                        } else if (activeSplashFrames.isEmpty() && !recoveredFrames.isEmpty()) {
+                            installSplashFrames(recoveredFrames);
+                        } else if (activeSplashFrames.isEmpty()) {
+                            appendLine("No decodable launch splash found; starting directly on the game surface.");
+                            finishSplashSequenceOnMainThread();
+                        }
+                    }
+                });
 
                 try {
                     try {
@@ -610,27 +782,57 @@ public final class GameBootActivity extends Activity {
                     showTerminalState("Executable unavailable", "The boot attempt could not continue; the diagnostic screen will remain open.");
                     return;
                 }
-                appendLine("Executable loaded: " + executable.length + " byte(s). Mapping and binding traps...");
+                appendLine("Executable loaded: " + executable.length + " byte(s). Preparing the bundle and runtime providers...");
                 final String payloadDirectory = ensurePayloadExtracted(executable);
+                if (!awaitSplashSequenceAndSurface()) return;
+                appendLine("Splash sequence finished and the Android game surface is ready; starting guest execution.");
+                final String appDataDirectory = appExternalFilesDir != null
+                        ? appExternalFilesDir.getAbsolutePath() : "";
+                final String obbDirectory = appObbDirectory != null
+                        ? appObbDirectory.getAbsolutePath() : "";
                 final String reportText;
                 try {
-                    reportText = runGameBootAttempt(executable, payloadDirectory, true);
+                    reportText = runGameBootAttempt(
+                            executable, payloadDirectory, appDataDirectory, obbDirectory, true);
                 } catch (Throwable error) {
                     appendLine("Boot attempt failed inside the runtime: " + error);
                     showTerminalState("Guest boot failed", "The runtime could not complete the boot attempt; diagnostics will remain visible.");
                     return;
                 }
+                persistRuntimeReport(reportText);
                 displayBootResult(reportText);
             }
         }, "game-boot").start();
+    }
+
+    private boolean awaitSplashSequenceAndSurface() {
+        try {
+            splashSequenceFinished.await();
+            if (destroyed || bootFinished) return false;
+            if (!gameSurfaceReady.await(10, TimeUnit.SECONDS)) {
+                appendLine("Android did not create a valid game surface within 10 seconds; guest rendering was not started.");
+                showTerminalState(
+                        "Game surface unavailable",
+                        "The guest was not started without a valid Android rendering surface.");
+                return false;
+            }
+            return !destroyed && !bootFinished;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            if (!destroyed) {
+                appendLine("Game boot worker was interrupted while waiting for the splash or rendering surface.");
+                showTerminalState("Boot attempt interrupted", "The guest was not started.");
+            }
+            return false;
+        }
     }
 
     /**
      * Extracts the bundled game payload (`assets/bundle/**`) into the app's files
      * directory so the runtime can serve the guest's own file reads from it, and
      * returns the app directory — or null when this artifact has no payload.
-     * The writable application directories the runtime mounts are created next to
-     * it. Extraction is versioned by the embedded executable, so a new artifact
+     * Writable user directories live in Android's app-specific data area instead
+     * of next to the read-only bundle. Extraction is versioned by the executable, so a new artifact
      * never reuses a stale payload directory.
      */
     private String ensurePayloadExtracted(byte[] executable) {
@@ -640,7 +842,8 @@ public final class GameBootActivity extends Activity {
             if (root == null || root.length == 0) return null;
             File bundleRoot = new File(getFilesDir(), "bundle");
             File appDirectory = new File(bundleRoot, "App.app");
-            File home = new File(bundleRoot, "radek-home");
+            File home = appExternalFilesDir != null
+                    ? appExternalFilesDir : new File(bundleRoot, "radek-home");
             File marker = new File(bundleRoot, PAYLOAD_MARKER_PREFIX + payloadVersion(executable));
             mkdirsOrThrow(new File(home, "Documents"));
             mkdirsOrThrow(new File(home, "Library"));
@@ -715,33 +918,42 @@ public final class GameBootActivity extends Activity {
         return extracted;
     }
 
-    private void preloadSplashFromAssets() {
-        try {
-            List<SplashFrame> preloaded = discoverSplashFramesFromAssets(getAssets());
-            if (!preloaded.isEmpty()) {
-                installSplashFrames(preloaded);
-            }
-        } catch (Throwable ignored) {
-            // Non-fatal; worker thread will also scan resourceInventory.
-        }
-    }
-
     /**
-     * Install recovered splash frames and start the automatic boot animation.
-     * The animation is driven only by the launcher: touches never cycle frames,
-     * and the sequence stops on a stable frame when the boot attempt ends.
+     * Install at most three recovered frames. Every frame is shown for 900 ms;
+     * only after the final interval does the activity reveal the game surface
+     * and let the boot worker enter guest code.
      */
     private void installSplashFrames(List<SplashFrame> frames) {
-        if (frames == null || frames.isEmpty() || destroyed) return;
-        boolean wasEmpty = activeSplashFrames.isEmpty();
-        activeSplashFrames.clear();
-        activeSplashFrames.addAll(frames);
-        currentSplashIndex = 0;
-        showSplashFrame(0);
-        if (wasEmpty && !bootFinished && activeSplashFrames.size() > 1 && !splashAnimationRunning) {
-            splashAnimationRunning = true;
-            mainHandler.postDelayed(splashAdvance, SPLASH_FRAME_INTERVAL_MS);
+        if (destroyed || splashSequenceComplete) return;
+        if (frames == null || frames.isEmpty()) {
+            finishSplashSequenceOnMainThread();
+            return;
         }
+        mainHandler.removeCallbacks(splashAdvance);
+        activeSplashFrames.clear();
+        activeSplashFrames.addAll(frames.subList(0, Math.min(MAX_SPLASH_FRAMES, frames.size())));
+        currentSplashIndex = 0;
+        splashSequenceComplete = false;
+        if (splashImageView != null) splashImageView.setVisibility(View.VISIBLE);
+        if (gameSurfaceView != null) gameSurfaceView.setVisibility(View.GONE);
+        showSplashFrame(0);
+        splashAnimationRunning = true;
+        mainHandler.postDelayed(splashAdvance, SPLASH_FRAME_INTERVAL_MS);
+    }
+
+    private void finishSplashSequenceOnMainThread() {
+        if (splashSequenceComplete) {
+            splashSequenceFinished.countDown();
+            return;
+        }
+        splashSequenceComplete = true;
+        splashAnimationRunning = false;
+        mainHandler.removeCallbacks(splashAdvance);
+        if (!destroyed && !bootFinished) {
+            if (splashImageView != null) splashImageView.setVisibility(View.GONE);
+            if (gameSurfaceView != null) gameSurfaceView.setVisibility(View.VISIBLE);
+        }
+        splashSequenceFinished.countDown();
     }
 
     /** Test hook: number of recovered splash frames currently installed. */
@@ -752,6 +964,16 @@ public final class GameBootActivity extends Activity {
     /** Test hook: index of the splash frame the boot screen currently shows. */
     int currentSplashFrameIndex() {
         return currentSplashIndex;
+    }
+
+    /** Test hook: whether the splash sequence released the guest boot worker. */
+    boolean splashSequenceCompleteForTest() {
+        return splashSequenceComplete;
+    }
+
+    /** Test hook: true when the guest SurfaceView is visible. */
+    boolean gameSurfaceVisibleForTest() {
+        return gameSurfaceView != null && gameSurfaceView.getVisibility() == View.VISIBLE;
     }
 
     /** Test hook: true while the diagnostic panel is on screen. */
@@ -767,8 +989,13 @@ public final class GameBootActivity extends Activity {
      */
     void installSyntheticSplashFramesForTest(int count) {
         bootFinished = false;
+        splashSequenceComplete = false;
         mainHandler.removeCallbacks(splashAdvance);
         splashAnimationRunning = false;
+        activeSplashFrames.clear();
+        if (splashImageView != null) splashImageView.setVisibility(View.VISIBLE);
+        if (gameSurfaceView != null) gameSurfaceView.setVisibility(View.GONE);
+        if (overlayView != null) overlayView.setVisibility(View.GONE);
         List<SplashFrame> frames = new ArrayList<>();
         for (int index = 0; index < count; index++) {
             frames.add(new SplashFrame("frame " + index, "test",
@@ -1089,6 +1316,7 @@ public final class GameBootActivity extends Activity {
                     viewportBitmap,
                     entry.width,
                     entry.height));
+            if (result.size() >= MAX_SPLASH_FRAMES) break;
         }
         return result;
     }
@@ -1112,6 +1340,7 @@ public final class GameBootActivity extends Activity {
             "bundle/SPLASHES.dat"
         };
         for (String datAsset : datCandidates) {
+            if (frames.size() >= MAX_SPLASH_FRAMES) break;
             byte[] datBytes = readOptionalAssetBytes(assets, datAsset, 256 * 1024);
             if (datBytes == null) continue;
             SplashSheetDescriptor descriptor = parseSplashSheetDescriptor(datBytes);
@@ -1141,6 +1370,7 @@ public final class GameBootActivity extends Activity {
             "bundle/data/MENU.png"
         };
         for (String candidate : launchCandidates) {
+            if (frames.size() >= MAX_SPLASH_FRAMES) break;
             byte[] bytes = readOptionalAssetBytes(assets, candidate, MAX_SPLASH_IMAGE_BYTES);
             Bitmap bmp = decodeBitmapOrCgbi(bytes);
             if (bmp != null) {
@@ -1244,6 +1474,8 @@ public final class GameBootActivity extends Activity {
     protected void onDestroy() {
         destroyed = true;
         splashAnimationRunning = false;
+        splashSequenceFinished.countDown();
+        gameSurfaceReady.countDown();
         mainHandler.removeCallbacks(splashAdvance);
         super.onDestroy();
     }

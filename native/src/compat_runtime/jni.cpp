@@ -114,14 +114,22 @@ Java_dev_radek_compat_runtime_RuntimeBridge_runAuthorizedMainBinary(JNIEnv *env,
         radek::Json report = runner.runMainBinary(bytes, true);
         report["importProviders"] = radek::Json::object();
         report["importProviders"]["concreteDarwinProviderCount"] = static_cast<std::uint64_t>(
-            radek::compat_runtime::compat_import_catalog::kDarwinOnlyProviderCount);
+            radek::compat_runtime::compat_import_catalog::kGuestRuntimeAdapterProviderCount);
+        report["importProviders"]["guestRuntimeAdapterCatalogCount"] = static_cast<std::uint64_t>(
+            radek::compat_runtime::compat_import_catalog::kGuestRuntimeAdapterProviderCount);
+        report["importProviders"]["guestRuntimeAdapterRegistrationStatus"] = "COMPLETE";
         report["importProviders"]["sameNameNdkProviderCount"] = static_cast<std::uint64_t>(
             radek::compat_runtime::ndk_import_catalog::kProviderCount);
+        report["importProviders"]["sameNameNdkRegistrationStatus"] = "COMPLETE";
+        report["importProviders"]["sameNameNdkRegistrationPercent"] = std::uint64_t{100};
         report["importProviders"]["fullNdkCandidateInventoryCount"] = static_cast<std::uint64_t>(
             radek::compat_runtime::ndk_full_import_catalog::kProviderCount);
+        report["importProviders"]["fullNdkRegisteredProviderCount"] = static_cast<std::uint64_t>(
+            radek::compat_runtime::ndk_full_import_catalog::kProviderCount);
         report["importProviders"]["fullNdkCatalogStatus"] = "COMPLETE";
+        report["importProviders"]["fullNdkSemanticImplementationStatus"] = "PARTIAL_TYPED_AND_GENERIC_BOUNDARIES";
         report["importProviders"]["reviewedProviderCount"] = static_cast<std::uint64_t>(
-            radek::compat_runtime::compat_import_catalog::kDarwinOnlyProviderCount +
+            radek::compat_runtime::compat_import_catalog::kGuestRuntimeAdapterProviderCount +
             radek::compat_runtime::ndk_import_catalog::kProviderCount);
         report["importProviders"]["boundedNdkFallbackCalloutCount"] = static_cast<std::uint64_t>(
             ndkShims.registeredCalloutCount());
@@ -136,8 +144,13 @@ Java_dev_radek_compat_runtime_RuntimeBridge_runAuthorizedMainBinary(JNIEnv *env,
         report["importProviders"]["registrationStatus"] = "COMPLETE";
         report["importProviders"]["sameNameNdkCandidatesAreSeparate"] = true;
         report["importProviders"]["note"] =
-            "Typed Darwin compatibility providers are separate from same-name Android NDK exports; "
-            "registration is not a claim of game linkage or playability.";
+            "The " + std::to_string(radek::compat_runtime::compat_import_catalog::kGuestRuntimeAdapterProviderCount) +
+            " guest-runtime adapter names are a separate catalog from the " +
+            std::to_string(radek::compat_runtime::ndk_import_catalog::kProviderCount) +
+            " strict same-name Android NDK candidates and the " +
+            std::to_string(radek::compat_runtime::ndk_full_import_catalog::kProviderCount) +
+            " broad NDK inventory. Registration is not API-semantic completeness, a static link, or "
+            "a playability claim; actual per-image import-slot results are in runtimeLinking.";
         return jsonString(env, report);
     } catch (const std::exception &error) {
         const std::string detail = std::string("Runtime initialization failed closed: ") + error.what();

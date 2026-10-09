@@ -266,19 +266,20 @@ class MainActivity : Activity() {
         val breakdown = mapping.optJSONObject("reviewedMapping")?.optJSONObject("breakdown")
         val kinds = if (breakdown == null) emptyList() else listOf(
             breakdown.optInt("sameNameNdkOrSystemExport", 0) to "same-name NDK/system exports",
+            breakdown.optInt("guestRuntimeAdapterCatalogued", 0) to "compat-runtime guest adapter catalog entries",
             breakdown.optInt("concreteCompatImplementation", 0) to "compiled compat implementations",
             breakdown.optInt("compilerRuntimeToolchain", 0) to "toolchain-runtime candidates",
             breakdown.optInt("reviewedSemanticApiTarget", 0) to "semantic API targets",
         ).filter { it.first > 0 }.map { "${it.first} ${it.second}" }
-        return "Concrete import providers: $providerPercent% ($providers/$total = exact NDK/system candidates plus typed Darwin compatibility providers)" +
+        return "Catalogued import providers: $providerPercent% ($providers/$total = exact NDK/system candidates plus compat-runtime guest adapter entries)" +
             " · Reviewed Android mappings: $reviewedPercent% ($reviewed/$total" +
             (if (kinds.isEmpty()) "" else " = ${kinds.joinToString(" + ")}") + ")" +
             " · strict same-name NDK subset (smaller by design, its own measure): $directPercent% ($direct/$total)"
     }
 
     /**
-     * Explains the 71% headline shown for Angry Birds instead of making it look
-     * like the mapper dropped 29% of the imports. Same-name NDK coverage is an
+     * Explains a strict same-name headline below 100% instead of making it look
+     * like the mapper dropped imports. Same-name NDK coverage is an
      * exact-name catalog test; reviewed compat, semantic, and compiler-runtime
      * targets deliberately stay outside that denominator.
      */
@@ -289,6 +290,7 @@ class MainActivity : Activity() {
         val remaining = total - direct
         val breakdown = mapping.optJSONObject("reviewedMapping")?.optJSONObject("breakdown")
         val reasons = if (breakdown == null) emptyList() else listOf(
+            breakdown.optInt("guestRuntimeAdapterCatalogued", 0) to "compat-runtime guest adapter catalog entries",
             breakdown.optInt("concreteCompatImplementation", 0) to "compatibility implementations",
             breakdown.optInt("reviewedSemanticApiTarget", 0) to "semantic API targets",
             breakdown.optInt("compilerRuntimeToolchain", 0) to "compiler-runtime or unwind targets",
@@ -393,18 +395,15 @@ class MainActivity : Activity() {
                 val triage = mapping.optInt("classificationCoveragePercent", 0)
                 val unmapped = mapping.optInt("unmappedSymbolCount", 0)
                 val verified = mapping.optInt("runtimeVerifiedNdkCandidates", 0)
-                // The legacy dlsym field counts the broad generated export
-                // catalogue. The UI uses the strict concrete Darwin provider
-                // ledger so a generated fallback cannot inflate implementation
-                // coverage.
+                // Legacy report key: count guest-adapter catalog matches, not
+                // per-image runtime bindings or semantic API implementations.
                 val compatCount = mapping.optInt("concreteDarwinProviderCount", 0)
-                val compatPercent = AndroidApiMapper.coveragePercent(compatCount, total)
                 val providerCount = mapping.optInt("runtimeProviderCount", 0)
                 val providerPercent = AndroidApiMapper.coveragePercent(providerCount, total)
-                val providerSummary = "import providers: $providerCount/$total ($providerPercent%)"
+                val providerSummary = "catalogued import providers: $providerCount/$total ($providerPercent%)"
                 val totalVerifiedDevice = mapping.optJSONObject("evidence")
-                    ?.optInt("exportsVerifiedOnThisDevice", maxOf(verified, compatCount))
-                    ?: maxOf(verified, compatCount)
+                    ?.optInt("exportsVerifiedOnThisDevice", verified)
+                    ?: verified
                 val verifiedPercent = AndroidApiMapper.coveragePercent(totalVerifiedDevice, total)
                 val verifiedCandidateCount = mapping.optInt("runtimeVerifiedCandidateCount", mapped)
                 val verifiedCandidatePercent = AndroidApiMapper.coveragePercent(verified, verifiedCandidateCount)
@@ -413,14 +412,17 @@ class MainActivity : Activity() {
                 val runtimeSummary = if (runtimeStatus == "CURRENT_DEVICE_DLSYM")
                     "Android API $runtimeApi exact exports: $verified/$verifiedCandidateCount NDK candidates ($verifiedCandidatePercent%); $totalVerifiedDevice/$total imports ($verifiedPercent%)"
                 else "device export check not run"
-                val compatStatus = mapping.optString("runtimeApiReplacementResolverStatus", "NOT_RUN")
                 val runtimeLinked = report.optJSONObject("apiImplementationGeneration")?.optBoolean("runtimeLibraryLinked", false) == true
+                val guestRuntimeProviders = mapping.optInt("guestRuntimeProviderCount", compatCount)
+                val guestRuntimeCatalogStatus = mapping.optString("guestRuntimeProviderCatalogStatus", "NOT_REPORTED")
+                val compilerRuntimeGuestProviders = mapping.optInt("compilerRuntimeGuestProviderCount", 0)
                 val compatSummary = when {
                     runtimeLinked -> "libioscompat.so runtime linked; individual IPA callsites were not rewritten"
-                    compatStatus == "CURRENT_DEVICE_COMPAT_DLSYM" -> "$compatCount/$total ($compatPercent%) typed concrete compatibility provider(s) catalogued; APK linking has not run"
-                    else -> "compatibility export check not run"
+                    guestRuntimeProviders > 0 -> "$guestRuntimeProviders/$total guest-runtime adapter catalog name match(es); actual import-slot binding is reported at game launch"
+                    guestRuntimeCatalogStatus == "NO_MATCHES" -> "no guest-runtime adapter catalog names matched this IPA"
+                    else -> "guest-runtime adapter catalog status unavailable"
                 }
-                val compilerSummary = if (compilerRuntime > 0) " · compiler-rt/libunwind candidates: $compilerRuntime (not linked)" else ""
+                val compilerSummary = if (compilerRuntime > 0) " · compiler-rt/libunwind candidates: $compilerRuntime ($compilerRuntimeGuestProviders have guest-runtime adapter entries; no static NDK link)" else ""
                 val generated = report.optJSONObject("hostConversion")?.optInt("generatedApiReplacements", 0) ?: 0
                 val stubs = mapping.optInt("compatStubHandlerCount", 0)
                 val stubSummary = if (stubs > 0) "$stubs compat stub handlers (unimplemented; not API bodies) · " else ""
@@ -581,14 +583,13 @@ class MainActivity : Activity() {
             val triage = mapping.optInt("classificationCoveragePercent", 0)
             val unmapped = mapping.optInt("unmappedSymbolCount", 0)
             val verified = mapping.optInt("runtimeVerifiedNdkCandidates", 0)
-            val implemented = mapping.optInt("concreteDarwinProviderCount", 0)
-            val implementedPercent = AndroidApiMapper.coveragePercent(implemented, total)
+            val legacyDarwinProviderCatalogCount = mapping.optInt("concreteDarwinProviderCount", 0)
             val providerCount = mapping.optInt("runtimeProviderCount", 0)
             val providerPercent = AndroidApiMapper.coveragePercent(providerCount, total)
-            val providerSummary = " · import providers: $providerCount/$total ($providerPercent%)"
+            val providerSummary = " · catalogued import providers: $providerCount/$total ($providerPercent%)"
             val totalVerifiedDevice = mapping.optJSONObject("evidence")
-                ?.optInt("exportsVerifiedOnThisDevice", maxOf(verified, implemented))
-                ?: maxOf(verified, implemented)
+                ?.optInt("exportsVerifiedOnThisDevice", verified)
+                ?: verified
             val verifiedPercent = AndroidApiMapper.coveragePercent(totalVerifiedDevice, total)
             val verifiedCandidateCount = mapping.optInt("runtimeVerifiedCandidateCount", mapped)
             val verifiedCandidatePercent = AndroidApiMapper.coveragePercent(verified, verifiedCandidateCount)
@@ -597,14 +598,17 @@ class MainActivity : Activity() {
             val runtimeSummary = if (runtimeStatus == "CURRENT_DEVICE_DLSYM")
                 " · Android API $runtimeApi exact exports: $verified/$verifiedCandidateCount NDK candidates ($verifiedCandidatePercent%); $totalVerifiedDevice/$total imports ($verifiedPercent%)"
             else ""
-            val compatStatus = mapping.optString("runtimeApiReplacementResolverStatus", "NOT_RUN")
             val runtimeLinked = report.optJSONObject("apiImplementationGeneration")?.optBoolean("runtimeLibraryLinked", false) == true
+            val guestRuntimeProviders = mapping.optInt("guestRuntimeProviderCount", legacyDarwinProviderCatalogCount)
+            val guestRuntimeCatalogStatus = mapping.optString("guestRuntimeProviderCatalogStatus", "NOT_REPORTED")
+            val compilerRuntimeGuestProviders = mapping.optInt("compilerRuntimeGuestProviderCount", 0)
             val compatSummary = when {
                 runtimeLinked -> " · libioscompat.so runtime linked; no individual IPA callsites rewritten"
-                compatStatus == "CURRENT_DEVICE_COMPAT_DLSYM" -> " · $implemented/$total ($implementedPercent%) typed concrete compatibility provider(s) catalogued; APK linking has not run"
+                guestRuntimeProviders > 0 -> " · $guestRuntimeProviders/$total guest-runtime adapter catalog name match(es); actual import-slot binding appears at game launch"
+                guestRuntimeCatalogStatus == "NO_MATCHES" -> " · no guest-runtime adapter catalog names matched this IPA"
                 else -> ""
             }
-            val compilerSummary = if (compilerRuntime > 0) " · compiler-rt/libunwind candidates (not linked): $compilerRuntime" else ""
+            val compilerSummary = if (compilerRuntime > 0) " · compiler-rt/libunwind candidates: $compilerRuntime ($compilerRuntimeGuestProviders have guest-runtime adapter entries; no static NDK link)" else ""
             val stubs = mapping.optInt("compatStubHandlerCount", 0)
             val verifiedHandlers = mapping.optInt("compatVerifiedHandlerCount", 0)
             val stubSummary = buildString {
@@ -624,8 +628,9 @@ class MainActivity : Activity() {
             val mappingDisclosure = when {
                 generated > 0 -> "The on-device mapper generated no per-game code; an attached complete-game host conversion reports $generated generated API replacement(s). Runtime behavior is not device-tested. $triageNote"
                 runtimeLinked -> "$triageNote The packaged libioscompat.so runtime is linked through DT_NEEDED. The proven executable has no imports, so no individual IPA API callsite was rewritten or counted as a linked replacement. Other candidates are not implementations."
-                implemented > 0 -> "$triageNote $implemented imported API symbol(s) resolve to concrete libioscompat.so compatibility exports on this device, but no IPA callsite was rewritten or linked into a game APK. Other candidates are not implementations."
-                else -> "$triageNote The analyzer runtime contains concrete compatibility exports, but no matching export was verified for this IPA; no per-game replacement was linked. Other candidates do not predict gameplay compatibility or stability."
+                guestRuntimeProviders > 0 -> "$triageNote $guestRuntimeProviders imported symbol(s) match the compat-runtime guest-adapter catalog. This is not proof the game's slots were bound, calls were linked, or full API semantics are implemented; inspect runtimeLinking after launch."
+                legacyDarwinProviderCatalogCount > 0 -> "$triageNote A legacy report field records $legacyDarwinProviderCatalogCount compatibility catalog name match(es); it does not establish per-image slot binding, callsite rewriting, or a game link."
+                else -> "$triageNote The analyzer runtime contains compatibility exports, but no matching provider was verified for this IPA; no per-game replacement was linked. Other candidates do not predict gameplay compatibility or stability."
             }
             text(mapping.optString("measure") + " $mappingDisclosure", 13f, muted, parent = mappingCard)
             mapping.optJSONObject("evidence")?.let { evidence ->

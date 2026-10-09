@@ -110,14 +110,21 @@ future conversion targeting; they do not imply that an APK was generated.
 The Android mapper reports same-named NDK symbols and semantic rewrite targets (for example,
 `UIView` → `android.view.View`) as **candidates only**. Two coverage figures are reported separately
 and are never interchangeable. *Reviewed Android mapping coverage* counts every observed import the
-classifier assigned exactly one reviewed mapping kind to (same-name NDK/system export, NDK
-compiler-rt/libunwind toolchain symbol, concrete `libioscompat.so` implementation export, or
-reviewed semantic target) and therefore reaches 100% for a fully triaged IPA. The *same-name NDK
-candidate subset* is the strict count of symbols whose name exists in the reviewed Android catalog;
-it is deliberately smaller and is divided by all distinct imports. Device `dlsym` export
-verification is shown both as a fraction of those candidates and as a fraction of all imports
-(167/264 is 63%, not 65%). This is evidence for the current device/API only.
-A name resolving at runtime does not prove Darwin/Android ABI compatibility or link the imported code.
+classifier assigned exactly one reviewed mapping kind to (same-name NDK/system export, compiler-runtime
+candidate, `libcompat_runtime_v1.so` guest-adapter catalog entry, compiled `libioscompat.so`
+implementation export, or reviewed semantic target) and therefore reaches 100% for a fully triaged
+IPA. The *same-name NDK candidate subset* is the strict count of symbols whose exact name exists in
+the reviewed Android catalog; it is divided by all distinct imports and excludes Darwin spellings
+and guest-runtime adapters. The provider-catalog count is another, separate measure: in the checked-in
+Angry Birds v1.0 fixture, `181/254` are strict same-name candidates and `73/254` have non-same-name
+guest-runtime adapter catalog entries. Those 73 are not static NDK links, per-image fixup results, or
+proof of full API semantics. The eight compiler-runtime/unwind candidates are reported on their own
+axis, and all eight happen to have guest-adapter catalog entries in this fixture; that is not a static
+NDK compiler-rt/libunwind link or proof those imports were bound for a loaded image. At runtime, the
+game report's `runtimeLinking` block records actual import-slot bind/relocation
+results. Device `dlsym` export verification is shown both as a fraction of same-name candidates and
+of all imports (167/264 is 63%, not 65%); it is evidence for the current device/API only. A name
+resolving at runtime does not prove Darwin/Android ABI compatibility or link the imported code.
 Dependency grades are deliberately distinct: `provided` means a reviewed Android system ABI is a
 possible target; `compatibility` is reserved for bounded, tested implementation subsets;
 `candidate` means only a semantic/API target exists; `no-execution-path-yet` means no Android
@@ -140,9 +147,10 @@ still claims no per-callsite API replacement.
 
 A native C frame-callback service is driven by Android `Choreographer` in the bounded launcher's
 lifecycle. It is not the Objective-C `CADisplayLink` class/selector ABI, and no game callsite uses
-it yet. The `libgcc_s.1.dylib` mapping is only triage: Android has no drop-in `libgcc_s.so`; compiler
-helpers and unwind/personality symbols need NDK compiler-rt/libunwind toolchain integration and ABI
-validation before a link can be claimed. GNU `libstdc++.6.dylib` is also only a candidate: LLVM
+it yet. The `libgcc_s.1.dylib` mapping is not a drop-in `libgcc_s.so` alias: some ARM32 arithmetic
+helpers and unwind boundaries have guest-runtime adapters, while static NDK compiler-rt/libunwind
+linking and full SjLj/personality/landing-pad semantics remain separate and unclaimed. GNU
+`libstdc++.6.dylib` is also only a candidate: LLVM
 `libc++_shared.so` is not a drop-in GNU C++ ABI substitute, and low-level symbol overlap is not
 proof of compatible C++ objects, exceptions, or linkage.
 

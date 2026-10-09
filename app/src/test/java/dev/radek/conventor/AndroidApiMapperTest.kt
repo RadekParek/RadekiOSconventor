@@ -341,6 +341,47 @@ class AndroidApiMapperTest {
         assertFalse(item.getBoolean("codeGenerated"))
     }
 
+    @Test fun guestRuntimeAdapterCatalogIsSeparateFromStrictNdkAndCompilerRuntimeLinking() {
+        val imports = JSONArray()
+            .put(JSONObject().put("name", "_OBJC_CLASS_" + '$' + "_NSObject"))
+            .put(JSONObject().put("name", "___divdi3"))
+            .put(JSONObject().put("name", "__Unwind_SjLj_Register"))
+            .put(JSONObject().put("name", "_malloc"))
+        val nodes = JSONArray().put(JSONObject().put("analysis", JSONObject()
+            .put("slices", JSONArray().put(JSONObject().put("imports", imports)))))
+
+        val mapping = AndroidApiMapper.analyze(nodes)
+        val symbols = mapping.getJSONArray("symbols")
+        val guestRows = (0 until symbols.length())
+            .map { symbols.getJSONObject(it) }
+            .filter { it.optBoolean("guestRuntimeProviderCatalogued") }
+
+        assertEquals(4, mapping.getInt("distinctImportSymbols"))
+        assertEquals(1, mapping.getInt("sameNameNdkProviderCount"))
+        assertEquals(25, mapping.getInt("sameNameNdkProviderCoveragePercent"))
+        assertEquals(3, mapping.getInt("guestRuntimeProviderCount"))
+        assertEquals(3, mapping.getInt("guestRuntimeAdapterCataloguedCount"))
+        assertEquals(73, mapping.getInt("guestRuntimeAdapterCatalogInventoryCount"))
+        assertEquals("libcompat_runtime_v1.so", mapping.getString("guestRuntimeProviderLibrary"))
+        assertEquals("CATALOG_ONLY_NOT_RUNTIME_LINKED", mapping.getString("guestRuntimeProviderCatalogStatus"))
+        assertEquals(2, mapping.getInt("compilerRuntimeCandidateCount"))
+        assertEquals(2, mapping.getInt("compilerRuntimeGuestProviderCount"))
+        assertEquals(4, mapping.getInt("runtimeProviderCount"))
+        assertEquals(3, guestRows.size)
+        assertTrue(guestRows.all { it.getString("classification") == "GUEST_RUNTIME_ADAPTER_CATALOGUED" })
+        assertTrue(guestRows.all { it.getString("targetLibrary").contains("libcompat_runtime_v1.so") })
+        assertTrue(guestRows.all { it.getString("staticRecompilationStrategy").contains("no static Android code-callsite rewrite") })
+        assertEquals(0, mapping.getInt("runtimeVerifiedNdkCandidates"))
+        assertEquals(1, mapping.getInt("runtimeVerifiedCandidateCount"))
+        assertEquals(0, mapping.getInt("linkedImplementationCount"))
+        val breakdown = mapping.getJSONObject("reviewedMapping").getJSONObject("breakdown")
+        assertEquals(3, breakdown.getInt("guestRuntimeAdapterCatalogued"))
+        assertEquals(1, breakdown.getInt("sameNameNdkOrSystemExport"))
+        assertEquals(0, breakdown.getInt("compilerRuntimeToolchain"))
+        assertEquals(4, breakdown.getInt("kindCountsSum"))
+        assertTrue(mapping.getString("measure").contains("actual bind/relocation results"))
+    }
+
     @Test fun reviewedAndroidMappingCoverageCountsEveryMappingKindButNeverImplementation() {
         // One direct same-name export, one compiled compatibility implementation,
         // one reviewed semantic target and one explicit unimplemented stub handler.

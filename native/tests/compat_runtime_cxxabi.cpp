@@ -79,11 +79,20 @@ void testAllDarwinProvidersAreRegistered() {
     const auto missing = compat_import_catalog::missingProviders(harness.registry);
     CHECK(missing.empty());
     CHECK(compat_import_catalog::kDarwinOnlyProviderCount == 73);
-    for (const auto &provider : compat_import_catalog::kDarwinOnlyProviders) {
+    CHECK(compat_import_catalog::kGuestRuntimeAdapterProviderCount == 73);
+    CHECK(harness.compiler.registeredSymbolCount() == 9);
+    for (const char *symbol : {"___divsi3", "___modsi3", "___udivsi3", "___umodsi3",
+                               "___divdi3", "___moddi3", "___floatdidf", "___floatdisf", "___fixdfdi"}) {
+        CHECK(harness.registry.resolve(symbol).has_value());
+    }
+    CHECK(ndk_import_catalog::kProviderCount == 181);
+    for (const auto &provider : compat_import_catalog::kGuestRuntimeAdapterProviders) {
         const auto binding = harness.registry.resolve(provider.symbol);
         CHECK(binding.has_value());
         CHECK(binding->adapterName.size() > 0);
         CHECK(binding->library.size() > 0);
+        for (const auto &ndkProvider : ndk_import_catalog::kProviders)
+            CHECK(std::string(provider.symbol) != ndkProvider.symbol);
     }
 }
 
