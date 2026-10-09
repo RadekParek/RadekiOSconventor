@@ -19,6 +19,14 @@ android {
                     "-DRADEK_BUILD_COMPAT_RUNTIME=ON",
                     "-DRADEK_FETCH_UNICORN=ON",
                 )
+                // Reuse the pinned Unicorn checkout prepared by the host build
+                // (or a previous CI run) instead of cloning it a second time.
+                // Local builds without the env var keep the default behavior.
+                System.getenv("RADEK_FETCHCONTENT_BASE_DIR")?.let { baseDir ->
+                    if (baseDir.isNotEmpty()) {
+                        arguments += listOf("-DFETCHCONTENT_BASE_DIR=$baseDir")
+                    }
+                }
                 // Opt-in compiler cache for CI and repeat local builds; without
                 // RADEK_USE_CCACHE=1 nothing changes for existing environments.
                 if (System.getenv("RADEK_USE_CCACHE") == "1") {

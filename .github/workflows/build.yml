@@ -27,6 +27,16 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+      # Unicorn is fetched by two CMake consumers (the host compat-runtime
+      # tests and the Gradle NDK build of compat-runtime-v1). Both point
+      # FETCHCONTENT_BASE_DIR at this shared directory, so the pinned checkout
+      # happens once and is then reused from cache: on a hit neither consumer
+      # talks to the network or re-clones the ~full unicorn history.
+      - name: Cache pinned Unicorn sources
+        uses: actions/cache@v6
+        with:
+          path: .local/unicorn-fetch
+          key: radek-unicorn-fetch-v1-8028ec436f2d9376525352dd38ed9ed6b9f6be10
       # Reuse the pinned SDK components between runs. On a hit nothing is
       # downloaded; sdkmanager below then finds every package already installed
       # and returns immediately. Keyed by the exact pinned versions, so a version
@@ -83,8 +93,11 @@ jobs:
           if [ "${RADEK_USE_CCACHE:-0}" = "1" ]; then
             launcher="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
           fi
-          cmake -S native -B .local/native-cmake -DRADEK_BUILD_COMPAT_RUNTIME=ON -DRADEK_FETCH_UNICORN=ON $launcher
-          cmake --build .local/native-cmake --parallel 2
+          # Share the cached pinned Unicorn checkout with the Gradle NDK build.
+          echo "RADEK_FETCHCONTENT_BASE_DIR=$PWD/.local/unicorn-fetch" >> "$GITHUB_ENV"
+          cmake -S native -B .local/native-cmake -DRADEK_BUILD_COMPAT_RUNTIME=ON -DRADEK_FETCH_UNICORN=ON \
+            -DFETCHCONTENT_BASE_DIR="$PWD/.local/unicorn-fetch" $launcher
+          cmake --build .local/native-cmake --parallel "$(nproc)"
           ctest --test-dir .local/native-cmake --output-on-failure
       - name: Validate compat-runtime-v1 smoke database
         run: |

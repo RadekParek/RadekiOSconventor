@@ -132,6 +132,7 @@ compat_sources = [
     root / "native/src/compat_runtime/ndk_compat_shims.cpp",
     root / "native/src/compat_runtime/virtual_file_system.cpp",
     root / "native/src/compat_runtime/darwin_compat_shims.cpp",
+    root / "native/src/compat_runtime/openal_backend.cpp",
 ]
 subprocess.run(
     [
@@ -205,6 +206,30 @@ subprocess.run(
     check=True,
 )
 subprocess.run([str(out / "compat-runtime-darwin-compat-tests")], check=True)
+subprocess.run(
+    [
+        compiler,
+        *flags,
+        *map(str, compat_sources),
+        str(root / "native/tests/openal_backend.cpp"),
+        "-o",
+        str(out / "compat-runtime-openal-tests"),
+    ],
+    check=True,
+)
+subprocess.run([str(out / "compat-runtime-openal-tests")], check=True)
+subprocess.run(
+    [
+        compiler,
+        *flags,
+        *map(str, compat_sources),
+        str(root / "native/tests/macho_chained_fixups.cpp"),
+        "-o",
+        str(out / "compat-runtime-chained-fixups-tests"),
+    ],
+    check=True,
+)
+subprocess.run([str(out / "compat-runtime-chained-fixups-tests")], check=True)
 subprocess.run(
     [
         compiler,

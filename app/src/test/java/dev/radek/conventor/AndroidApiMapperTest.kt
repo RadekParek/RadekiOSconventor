@@ -205,7 +205,13 @@ class AndroidApiMapperTest {
         assertEquals(2, mapping.getInt("runtimeVerifiedApiReplacementCount"))
         assertEquals("CURRENT_DEVICE_COMPAT_DLSYM", mapping.getString("runtimeApiReplacementResolverStatus"))
         assertEquals(0, mapping.getInt("generatedApiImplementationCount"))
-        assertEquals(0, mapping.getInt("linkedImplementationCount"))
+        // Both shim exports were resolved from the shipped libioscompat.so on
+        // this device, so the aggregate counts them as real linked
+        // implementations. That is an export-level fact: the per-symbol rows
+        // below still report linkedOrRewritten=false because no IPA callsite
+        // is rewritten.
+        assertEquals(2, mapping.getInt("linkedImplementationCount"))
+        assertEquals(100, mapping.getInt("linkedImplementationCoveragePercent"))
         val items = mapping.getJSONArray("symbols")
         val time = items.getJSONObject(0)
         assertEquals("IMPLEMENTED_API_REPLACEMENT_AVAILABLE", time.getString("classification"))
