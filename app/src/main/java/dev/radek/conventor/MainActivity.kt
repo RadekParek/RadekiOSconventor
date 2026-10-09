@@ -647,7 +647,7 @@ class MainActivity : Activity() {
             }
             if (total > 0) {
                 button("List this IPA's unimplemented / unresolved NDK needs", parent = mappingCard) {
-                    showText("Android compatibility needs", ApiNeedReport.format(mapping))
+                    showText("Unimplemented / unresolved NDK needs", ApiNeedReport.format(mapping))
                 }
             }
             val generated = report.optJSONObject("hostConversion")?.optInt("generatedApiReplacements", 0) ?: 0

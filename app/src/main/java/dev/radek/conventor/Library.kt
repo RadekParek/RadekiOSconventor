@@ -421,15 +421,18 @@ class Library(private val context: Context) {
                         }
                         graph.put(edge)
                     }
-                    val metadata = slice.optJSONArray("metadata") ?: JSONArray()
-                    // Having imports is the normal case for a real app and is
-                    // never by itself a conversion blocker - it is what the API
-                    // triage below exists to measure. Treating "has imports" as
-                    // incompatibility made BLOCKED unconditional, so an IPA
-                    // could report 100% triage coverage and still be blocked.
-                    // Only undecodable bindings and chained fixups block here.
-                    if (metadata.length() > 0 || slice.has("chainedFixups") || !slice.optBoolean("bindDecodingComplete", true)) {
-                        if (metadata.length() > 0) blockIncompatible("Mach-O metadata requires unsupported linker features")
+                    // The analyzer's "metadata" list (ObjC class/selector/super
+                    // references, __objc_imageinfo, C++ __mod_init_func, unwind
+                    // tables) is consumed by the guest runtime's own image loader
+                    // at boot - initializeImage reads __objc_classlist and the
+                    // runtime reports BLOCKED_RUNTIME_METADATA if it truly rejects
+                    // a mapped section. Pre-emptively blocking on metadata presence
+                    // therefore made every real Objective-C app (Angry Birds
+                    // included) BLOCKED even though the boot path handles those
+                    // sections. Only genuinely undecodable bind information and
+                    // chained fixups block at analysis time; everything else is
+                    // left to the boot attempt, which surfaces its own verdict.
+                    if (slice.has("chainedFixups") || !slice.optBoolean("bindDecodingComplete", true)) {
                         if (slice.has("chainedFixups")) blockIncompatible("chained fixups require unsupported linker implementations")
                         if (!slice.optBoolean("bindDecodingComplete", true)) blockIncompatible("dyld binding information could not be fully decoded")
                     }
@@ -625,7 +628,7 @@ class Library(private val context: Context) {
                     "This bundle needs work that is not implemented: $evidence.$apiBlocker The analysis itself completed."
                 }
                 deviceProven -> "The executable is fully covered by the proven closed-integer subset. Force convert builds a real signed APK whose statically recompiled entry routine runs through JNI; general games remain unsupported."
-                else -> "Analysis completed, but complete iOS-to-Android game-code static recompilation, API replacement, and packaging are not implemented for this input. Force can build a separate branded preview shell."
+                else -> "Analysis completed; this executable is not in the statically-proven single-routine subset, so no complete static game conversion is generated. Force convert builds a game-runtime boot-attempt APK that runs the original 32-bit ARM executable and bundle through the guest runtime with no artificial instruction/time cutoff, stopping only at a real runtime boundary; a source-free preview shell remains available as a fallback."
             }
             report.put("blockers", JSONArray().put(reason)).put("hostCommand", "python3 -m radek analyze input.ipa --authorized --output workspace/analysis")
             val terminalState = if (encrypted || incompatible || !hasCandidate) ConversionState.BLOCKED else ConversionState.PARTIAL
