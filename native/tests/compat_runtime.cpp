@@ -1043,6 +1043,7 @@ void testFoundationSearchPathsReturnGuestNSStringArray() {
     CHECK(memory.read(registers.r[0], path.data(), path.size()));
     CHECK(std::string(path.data()) == "/Documents");
 
+    std::vector<GuestAddress> foundationPathObjects;
     const auto assertFoundationPath = [&](const ShimBinding &binding,
                                           const std::string &expectedPath) {
         CpuRegisterState pathRegisters;
@@ -1051,6 +1052,7 @@ void testFoundationSearchPathsReturnGuestNSStringArray() {
               GuestCalloutResult::Returned);
         const auto pathObject = pathRegisters.r[0];
         CHECK(pathObject != 0);
+        foundationPathObjects.push_back(pathObject);
         pathRegisters = {};
         pathRegisters.r[0] = pathObject;
         pathRegisters.r[1] = selectorMemory + 48;
@@ -1060,8 +1062,26 @@ void testFoundationSearchPathsReturnGuestNSStringArray() {
         CHECK(memory.read(pathRegisters.r[0], actualPath.data(), actualPath.size()));
         CHECK(std::string(actualPath.data()) == expectedPath);
     };
+    const auto pushPool = registry.resolve("_objc_autoreleasePoolPush");
+    const auto popPool = registry.resolve("_objc_autoreleasePoolPop");
+    CHECK(pushPool.has_value() && pushPool->invoke);
+    CHECK(popPool.has_value() && popPool->invoke);
+    CpuRegisterState poolRegisters;
+    CHECK(registry.invokeCallout(pushPool->guestAddress, poolRegisters, memory, reason) ==
+          GuestCalloutResult::Returned);
+    const auto foundationPool = poolRegisters.r[0];
+    CHECK(foundationPool != 0);
+
     assertFoundationPath(*homeDirectory, "/");
     assertFoundationPath(*temporaryDirectory, "/tmp");
+
+    poolRegisters = {};
+    poolRegisters.r[0] = foundationPool;
+    CHECK(registry.invokeCallout(popPool->guestAddress, poolRegisters, memory, reason) ==
+          GuestCalloutResult::Returned);
+    CHECK(poolRegisters.r[0] == 0);
+    for (const auto pathObject : foundationPathObjects)
+        CHECK(!memory.contains(pathObject, sizeof(std::uint32_t)));
 
     registers.r[0] = directoryString;
     registers.r[1] = selectorMemory + 64;
