@@ -104,6 +104,60 @@ new package rule. Verified by Python simulation of the exact Kotlin logic
   runtime linking COMPLETE, **254/254 imports resolved, 0 unresolved, 0
   trapped**, 578 fixup slots relinked (`/tmp/ab_boot.json`).
 
+### H. Chained fixups relinker — the modern dyld format **[T]**
+* `macho_loader.cpp`: `LC_DYLD_CHAINED_FIXUPS` no longer throws. A new
+  `applyChainedFixups()` decodes the payload exactly per
+  `include/mach-o/fixup-chains.h` (cross-checked against Apple's dyld sources):
+  header, the three import-table formats (`DYLD_CHAINED_IMPORT`,
+  `+ADDEND`, `+ADDEND64`), uncompressed symbol strings, per-segment starts with
+  the `DYLD_CHAINED_PTR_32` (format **3**) pointer layout — including
+  `DYLD_CHAINED_PTR_START_MULTI` pages where the secondary chain starts live in
+  the same `page_start[]` array at absolute indices and terminate with
+  `DYLD_CHAINED_PTR_START_LAST`. Bind nodes route through the same `bindAt()`
+  as the classic opcode stream (shim registry, trap writer, load report all see
+  them identically, tagged `chained-bind`); rebase nodes install
+  `target + slide` like `applyRebases()`. Unsupported pointer formats,
+  compressed symbol pools, and malformed tables fail closed with explicit
+  errors. The `runtimeLinking` mechanism now lists chained fixups.
+* `macho.cpp` analyzer: chained payloads get `pointerTraversal:
+  implemented-ptr32` and `decodable: true` when every segment uses PTR_32 with
+  a supported page size and uncompressed symbols.
+* `Library.kt` gate: only *undecodable* chained fixups block at analysis time
+  (matches the loader's real capability); decodable ones proceed to the boot
+  attempt. The static-recompile backend (`radek/analysis.py`, `ceiling.py`,
+  `gamepack.py`) still rejects chained fixups — it only emits a proven entry
+  routine and genuinely cannot reconstruct them.
+* New test `native/tests/macho_chained_fixups.cpp` (5 checks): synthetic
+  chained Mach-O binds two imports through the registry, traps them when
+  unimplemented, fails closed without traps, rejects non-PTR_32 formats, and
+  applies the slide to rebases. Suite is now **15/15**.
+* Angry Birds re-verified after the change: 254/254 imports, 0 unresolved,
+  0 trapped (it predates chained fixups; this unblocks modern-Xcode titles).
+
+### I. CI repairs + build speed **[T for native / R for workflow]**
+* `tools/build_native.py`: the portable build's hardcoded source list now
+  includes `openal_backend.cpp` and builds/runs the OpenAL and chained-fixups
+  test binaries — this was the link failure that broke GitHub CI.
+* `AndroidApiMapperTest`: the pinned `linkedImplementationCount == 0`
+  assertion is updated to the documented contract (device-verified
+  `libioscompat.so` exports count as linked implementations at the aggregate
+  level; per-symbol `linkedOrRewritten` stays false because no IPA callsite is
+  rewritten). The other two `== 0` assertions hold (they pass no replacement
+  resolver).
+* Workflow speed: the pinned Unicorn checkout is fetched once into a shared
+  `FETCHCONTENT_BASE_DIR` (`.local/unicorn-fetch`) reused by both the host
+  CMake step and the Gradle NDK build, cached by actions/cache keyed on the
+  pinned git SHA; the host build now runs at full runner parallelism
+  (`--parallel $(nproc)` instead of 2).
+
+### J. "NEXT BLOCKER" — one red line per import **[R]**
+* `Library.kt` computes `report.nextBlocker`: the single actionable thing
+  between the IPA and a fully converted APK (DRM / no ARM32 slice / the exact
+  loader reason / packaging failure / "launch the game-runtime APK and read
+  the NDK needs log for the first unimplemented symbol").
+* `MainActivity.kt` renders it bold red (`NEXT BLOCKER: …`) at the top of the
+  Compatibility report card. Cleared when a conversion reaches READY.
+
 ### What is NOT yet done / not verifiable here
 * On-device confirmation that Angry Birds now presents frames (needs hardware).
 * On-device audio confirmation — the AAudio sink path compiles only with the NDK

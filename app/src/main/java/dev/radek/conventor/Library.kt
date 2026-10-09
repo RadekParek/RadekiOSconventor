@@ -135,7 +135,9 @@ class Library(private val context: Context) {
                 .put("importsTruncated", slice.optBoolean("importsTruncated", false))
                 .put("symbolCount", slice.optInt("symbolCount", 0))
                 .put("bindDecodingComplete", slice.optBoolean("bindDecodingComplete", true))
-                .put("hasChainedFixups", slice.has("chainedFixups")))
+                .put("hasChainedFixups", slice.has("chainedFixups"))
+                .put("chainedFixupsDecodable",
+                     slice.optJSONObject("chainedFixups")?.optBoolean("decodable", false) ?: false))
         }
         return output
     }
@@ -432,8 +434,14 @@ class Library(private val context: Context) {
                     // sections. Only genuinely undecodable bind information and
                     // chained fixups block at analysis time; everything else is
                     // left to the boot attempt, which surfaces its own verdict.
-                    if (slice.has("chainedFixups") || !slice.optBoolean("bindDecodingComplete", true)) {
-                        if (slice.has("chainedFixups")) blockIncompatible("chained fixups require unsupported linker implementations")
+                    // The compat-runtime loader relinks DYLD_CHAINED_PTR_32
+                    // chained fixups (the analyzer flags such payloads
+                    // decodable), so only fixup formats it cannot traverse
+                    // stay blocked at analysis time.
+                    val chained = slice.optJSONObject("chainedFixups")
+                    val chainedBlocked = chained != null && !chained.optBoolean("decodable", false)
+                    if (chainedBlocked || !slice.optBoolean("bindDecodingComplete", true)) {
+                        if (chainedBlocked) blockIncompatible("chained fixups use a pointer format the loader does not relink")
                         if (!slice.optBoolean("bindDecodingComplete", true)) blockIncompatible("dyld binding information could not be fully decoded")
                     }
                 }
@@ -648,6 +656,7 @@ class Library(private val context: Context) {
                     // finish in READY so the entry needs no further action.
                     val converted = JSONObject(File(dir, "report.json").readText())
                     converted.put("blockers", JSONArray())
+                    converted.put("nextBlocker", "")
                     converted.put("state", ConversionState.READY.name)
                     val readyEvent = JSONObject()
                         .put("time", java.time.Instant.now().toString())
@@ -658,6 +667,8 @@ class Library(private val context: Context) {
                     save(dir, converted)
                     return dir to converted
                 } catch (e: Exception) {
+                    report.put("nextBlocker",
+                        "Packaging: the bounded proof passed but APK packaging failed (${e.message ?: e.javaClass.simpleName}) — retry with Force convert.")
                     report.put("autoConversion", JSONObject()
                         .put("status", "FAILED")
                         .put("message", e.message ?: e.javaClass.simpleName)
@@ -677,6 +688,23 @@ class Library(private val context: Context) {
                     .put("basis", "No game code is statically recompiled during IPA analysis. A user-triggered preview shell is tracked separately and is not counted as Android game-code progress."))
             }
             log(terminalState, reason, 100)
+            // One actionable red line for the UI: the single next blocker that
+            // stands between this IPA and a fully converted APK. Everything
+            // else lives in the detailed report and the NDK-needs log; this
+            // line names exactly what to fix (or report back) next.
+            val nextBlocker = when {
+                encrypted -> "Encrypted (FairPlay/DRM) executable — decryption is unsupported and will not be bypassed."
+                !hasCandidate -> "No supported ARM32 slice — nothing convertible in this IPA."
+                incompatible -> "Loader: " + incompatibleReasons.sorted().joinToString("; ")
+                    .ifBlank { "unsupported compatibility/linker implementations required" }
+                // deviceProven reaching this line means the auto-conversion
+                // failed above; keep the packaging-failure message it stored.
+                deviceProven -> report.optString("nextBlocker", "")
+                else -> "Runtime: install and launch the generated game-runtime APK on-device — boot " +
+                    "stops at the first unimplemented import; open the NDK needs log to read the exact " +
+                    "symbol name, then that symbol gets a real implementation."
+            }
+            report.put("nextBlocker", nextBlocker)
             save(dir, report)
         } catch (e: Exception) {
             report.put("error", "${e.javaClass.simpleName}: ${e.message}")
