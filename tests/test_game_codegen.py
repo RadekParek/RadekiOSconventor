@@ -260,6 +260,7 @@ class AndroidLinkVerificationTests(unittest.TestCase):
             prepared = prepare_translated_game_runtime_input(root, "arm64-v8a", link_report)
 
             self.assertEqual(prepared["status"], "READY_FOR_GAME_RUNTIME_APK")
+            self.assertTrue(prepared["readyForGameRuntimeApk"])
             self.assertFalse(prepared["linkedIntoGame"])
             self.assertFalse(prepared["apkProduced"])
             with zipfile.ZipFile(root / prepared["runtimeInputBundle"]) as bundle:

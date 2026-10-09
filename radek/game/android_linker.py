@@ -624,6 +624,7 @@ def prepare_translated_game_runtime_input(
 
     return {
         "status": "READY_FOR_GAME_RUNTIME_APK",
+        "readyForGameRuntimeApk": True,
         "contract": "translated-game-runtime-input-v1",
         "payloadContract": _TRANSLATED_GAME_PAYLOAD_CONTRACT,
         "targetAbi": target_abi,
