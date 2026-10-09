@@ -545,7 +545,11 @@ Json thin(Reader r, bool includeSymbolDetails) {
                         appendImport(im);
                     }
                 }
-                f["pointerTraversal"] = "not-implemented";
+                // The compat-runtime loader relinks DYLD_CHAINED_PTR_32 chains
+                // with the three import formats and uncompressed symbol
+                // strings. Anything else stays reported as not traversable so
+                // the conversion gates keep such images honestly blocked.
+                bool decodable = r.u(off + 24, 4) == 0 && stride != 0;
                 f["symbolsDecoding"] = r.u(off + 24, 4) == 0 ? "uncompressed" : "unsupported-compression";
                 auto starts = r.u(off + 4, 4);
                 if (starts < 28 || starts > n || n - starts < 4)
@@ -567,11 +571,14 @@ Json thin(Reader r, bool includeSymbolDetails) {
                     auto length = r.u(at, 4), pages = r.u(at + 20, 2);
                     if (length < 22 || length > n - starts - relative || pages > (length - 22) / 2)
                         throw std::runtime_error("invalid chained starts pages");
+                    auto pointerFormat = r.u(at + 6, 2), pageSize = r.u(at + 4, 2);
+                    if (pointerFormat != 3 || (pageSize != 0x1000 && pageSize != 0x4000))
+                        decodable = false;
                     if (includeSymbolDetails) {
                         Json segment = object();
                         segment["index"] = index;
-                        segment["pageSize"] = r.u(at + 4, 2);
-                        segment["pointerFormat"] = r.u(at + 6, 2);
+                        segment["pageSize"] = pageSize;
+                        segment["pointerFormat"] = pointerFormat;
                         segment["segmentOffset"] = r.u(at + 8, 8);
                         segment["maxValidPointer"] = r.u(at + 16, 4);
                         segment["pageStarts"] = array();
@@ -580,6 +587,8 @@ Json thin(Reader r, bool includeSymbolDetails) {
                         f["segments"].push(segment);
                     }
                 }
+                f["pointerTraversal"] = decodable ? "implemented-ptr32" : "not-implemented";
+                f["decodable"] = decodable;
                 j["chainedFixups"] = f;
             }
             if (includeSymbolDetails && cmd == 0x26 && n) {

@@ -48,6 +48,15 @@ constexpr std::uint32_t kSectionLazySymbolPointers = 0x7;
 constexpr std::uint32_t kIndirectSymbolLocal = 0x80000000;
 constexpr std::uint32_t kIndirectSymbolAbsolute = 0x40000000;
 
+// DYLD_CHAINED_FIXUPS payload constants (include/mach-o/fixup-chains.h).
+constexpr std::uint16_t kChainedPtrFormat32 = 3;      // DYLD_CHAINED_PTR_32
+constexpr std::uint16_t kChainedPtrStartNone = 0xFFFF;
+constexpr std::uint16_t kChainedPtrStartMulti = 0x8000;
+constexpr std::uint16_t kChainedPtrStartLast = 0x8000; // same bit, in chain_starts[]
+constexpr std::uint32_t kChainedImports = 1;          // DYLD_CHAINED_IMPORT
+constexpr std::uint32_t kChainedImportsAddend = 2;    // DYLD_CHAINED_IMPORT_ADDEND
+constexpr std::uint32_t kChainedImportsAddend64 = 3;  // DYLD_CHAINED_IMPORT_ADDEND64
+
 struct SliceRange {
     std::size_t offset = 0;
     std::size_t size = 0;
@@ -289,12 +298,19 @@ struct DynamicSymbolTable {
     bool present = false;
 };
 
+struct ChainedFixupsData {
+    std::uint32_t dataOffset = 0;
+    std::uint32_t dataSize = 0;
+    bool present = false;
+};
+
 struct ImageState {
     std::vector<Segment> segments;
     std::vector<std::string> dependencies;
     DyldStreams streams;
     SymbolTable symbols;
     DynamicSymbolTable dynamicSymbols;
+    ChainedFixupsData chainedFixups;
     GuestAddress entryPoint = 0;
     std::string entryPointSource;
     CpuRegisterState registers;
@@ -1202,7 +1218,16 @@ void parseLoadCommands(const Reader &reader, ImageState &image,
                 throw std::runtime_error("Mach-O has duplicate main-entry commands");
             image.mainEntryOffset = reader.u64le(cursor + 8);
         } else if (command == kLcDyldChainedFixups) {
-            throw std::runtime_error("chained dyld fixups are unsupported by compat-runtime-v1");
+            // LC_LINKEDIT_DATA layout: cmd, cmdsize, dataoff, datasize. The
+            // payload itself is decoded by applyChainedFixups once the
+            // segments are mapped.
+            if (commandSize < 16)
+                throw std::runtime_error("Mach-O chained-fixups command is truncated");
+            if (image.chainedFixups.present)
+                throw std::runtime_error("Mach-O has duplicate chained-fixups commands");
+            image.chainedFixups.dataOffset = reader.u32le(cursor + 8);
+            image.chainedFixups.dataSize = reader.u32le(cursor + 12);
+            image.chainedFixups.present = true;
         }
         cursor += commandSize;
     }
@@ -1257,6 +1282,195 @@ void applyRebaseAndBindStreams(const Reader &reader, const ImageState &image,
     applyBinds(reader, image, memory, shims, report,
                image.streams.lazyBindOffset, image.streams.lazyBindSize, true, "lazy-bind",
                trapContext);
+}
+
+struct ChainedImport {
+    std::string name;
+    std::int64_t libOrdinal = 0;
+    std::int64_t addend = 0;
+    bool weak = false;
+};
+
+/**
+ * Relinks LC_DYLD_CHAINED_FIXUPS images (the modern dyld format that replaces
+ * LC_DYLD_INFO bind opcodes). The 32-bit ARM loader supports the
+ * DYLD_CHAINED_PTR_32 pointer format with the three import-table formats and
+ * uncompressed symbol strings; anything else fails closed with an explicit
+ * error instead of silently leaving import slots unbound.
+ *
+ * Bind nodes route through the same bindAt() used by the opcode stream, so the
+ * shim registry, trap writer, and load report see chained imports exactly like
+ * classic ones. Rebase nodes install target + slide, matching applyRebases().
+ */
+void applyChainedFixups(const Reader &reader, const ImageState &image, GuestAddress slide,
+                        GuestAddressSpace &memory, const ShimRegistry &shims,
+                        MachOLoadReport &report, TrapContext *trapContext = nullptr) {
+    if (!image.chainedFixups.present)
+        return;
+    const auto base = static_cast<std::size_t>(image.chainedFixups.dataOffset);
+    const auto size = static_cast<std::size_t>(image.chainedFixups.dataSize);
+    if (size < 28)
+        throw std::runtime_error("chained fixups payload is truncated");
+    reader.range(base, size);
+    if (reader.u32le(base) != 0)
+        throw std::runtime_error("unsupported chained fixups version");
+    const auto startsOffset = reader.u32le(base + 4);
+    const auto importsOffset = reader.u32le(base + 8);
+    const auto symbolsOffset = reader.u32le(base + 12);
+    const auto importsCount = reader.u32le(base + 16);
+    const auto importsFormat = reader.u32le(base + 20);
+    const auto symbolsFormat = reader.u32le(base + 24);
+    if (startsOffset >= size || importsOffset >= size || symbolsOffset > size)
+        throw std::runtime_error("chained fixups offsets are outside the payload");
+    if (symbolsFormat != 0)
+        throw std::runtime_error(
+            "compressed chained fixup symbol strings are unsupported by compat-runtime-v1");
+
+    // --- import table ------------------------------------------------------
+    std::size_t entrySize = 0;
+    if (importsFormat == kChainedImports)
+        entrySize = 4;
+    else if (importsFormat == kChainedImportsAddend)
+        entrySize = 8;
+    else if (importsFormat == kChainedImportsAddend64)
+        entrySize = 16;
+    if (entrySize == 0)
+        throw std::runtime_error("unsupported chained fixups import format");
+    if (static_cast<std::uint64_t>(importsCount) > (size - importsOffset) / entrySize)
+        throw std::runtime_error("chained fixups import table overruns the payload");
+    std::vector<ChainedImport> imports;
+    imports.reserve(importsCount);
+    for (std::uint32_t index = 0; index < importsCount; ++index) {
+        const auto at = base + importsOffset + static_cast<std::size_t>(index) * entrySize;
+        ChainedImport entry;
+        std::uint32_t nameOffset = 0;
+        if (importsFormat == kChainedImportsAddend64) {
+            const auto word = reader.u64le(at);
+            entry.libOrdinal = static_cast<std::int16_t>(word & 0xffffU);
+            entry.weak = ((word >> 16) & 1) != 0;
+            nameOffset = static_cast<std::uint32_t>(word >> 32);
+            entry.addend = static_cast<std::int64_t>(reader.u64le(at + 8));
+        } else {
+            const auto word = reader.u32le(at);
+            entry.libOrdinal = static_cast<std::int8_t>(word & 0xffU);
+            entry.weak = ((word >> 8) & 1) != 0;
+            nameOffset = word >> 9;
+            if (importsFormat == kChainedImportsAddend)
+                entry.addend = static_cast<std::int32_t>(reader.u32le(at + 4));
+        }
+        const auto nameAbsolute = static_cast<std::uint64_t>(symbolsOffset) + nameOffset;
+        if (nameAbsolute >= size)
+            throw std::runtime_error("chained fixup symbol name is outside the payload");
+        entry.name = reader.cstring(base + symbolsOffset + nameOffset, base + size);
+        imports.push_back(std::move(entry));
+    }
+
+    // --- chain starts --------------------------------------------------------
+    if (static_cast<std::uint64_t>(startsOffset) + 4 > size)
+        throw std::runtime_error("chained fixups starts table is truncated");
+    const auto segmentCount = reader.u32le(base + startsOffset);
+    if (segmentCount > (size - startsOffset - 4) / 4)
+        throw std::runtime_error("chained fixups starts count overruns the payload");
+    if (segmentCount > image.segments.size())
+        throw std::runtime_error("chained fixups reference more segments than the image has");
+
+    std::size_t actions = 0;
+    for (std::uint32_t segmentIndex = 0; segmentIndex < segmentCount; ++segmentIndex) {
+        const auto relative = reader.u32le(base + startsOffset + 4 + segmentIndex * 4);
+        if (relative == 0)
+            continue;
+        const auto segInfoAbsolute = static_cast<std::uint64_t>(startsOffset) + relative;
+        if (segInfoAbsolute + 22 > size)
+            throw std::runtime_error("chained fixups segment info is truncated");
+        const auto segInfoAt = base + static_cast<std::size_t>(segInfoAbsolute);
+        const auto infoSize = reader.u32le(segInfoAt);
+        const auto pageSize = reader.u16le(segInfoAt + 4);
+        const auto pointerFormat = reader.u16le(segInfoAt + 6);
+        const auto pageCount = reader.u16le(segInfoAt + 20);
+        if (pointerFormat != kChainedPtrFormat32)
+            throw std::runtime_error(
+                "chained fixups use a pointer format this 32-bit loader does not relink");
+        if (pageSize != 0x1000 && pageSize != 0x4000)
+            throw std::runtime_error("chained fixups declare an unsupported page size");
+        if (infoSize < 22 + static_cast<std::uint64_t>(pageCount) * 2 ||
+            infoSize > size - segInfoAbsolute)
+            throw std::runtime_error("chained fixups segment info size is invalid");
+        // The page_start[] array holds pageCount per-page entries followed by
+        // any secondary chain-start entries referenced through START_MULTI.
+        const auto totalStartEntries = (infoSize - 22) / 2;
+        const auto &segment = image.segments[segmentIndex];
+        if (!segment.mapped)
+            continue; // nothing to fix up in an unmapped segment (__PAGEZERO)
+
+        for (std::uint32_t page = 0; page < pageCount; ++page) {
+            auto start = reader.u16le(segInfoAt + 22 + static_cast<std::size_t>(page) * 2);
+            if (start == kChainedPtrStartNone)
+                continue;
+            std::vector<std::uint16_t> chainStarts;
+            if ((start & kChainedPtrStartMulti) != 0) {
+                // dyld stores the MULTI value as an absolute index into
+                // page_start[] (page_count + extras index) and marks the last
+                // secondary entry with DYLD_CHAINED_PTR_START_LAST.
+                auto cursor = static_cast<std::size_t>(start & 0x7fff);
+                for (;;) {
+                    if (cursor >= totalStartEntries)
+                        throw std::runtime_error(
+                            "chained fixup multi-start index overruns the starts table");
+                    const auto value = reader.u16le(segInfoAt + 22 + cursor * 2);
+                    chainStarts.push_back(static_cast<std::uint16_t>(value & 0x7fff));
+                    if ((value & kChainedPtrStartLast) != 0)
+                        break;
+                    ++cursor;
+                }
+            } else {
+                chainStarts.push_back(start);
+            }
+
+            for (const auto chainStart : chainStarts) {
+                std::uint64_t offsetInPage = chainStart;
+                for (;;) {
+                    const auto slotOffsetInSegment =
+                        static_cast<std::uint64_t>(page) * pageSize + offsetInPage;
+                    if (slotOffsetInSegment + sizeof(std::uint32_t) > segment.vmSize)
+                        throw std::runtime_error("chained fixup pointer is outside its segment");
+                    if (++actions > kMaximumFixups)
+                        throw std::runtime_error("chained fixup count exceeds the loader limit");
+                    const auto slotAddress = static_cast<GuestAddress>(
+                        static_cast<std::uint64_t>(segment.guestAddress) + slotOffsetInSegment);
+                    std::uint32_t word = 0;
+                    if (!memory.read(slotAddress, &word, sizeof(word)))
+                        throw std::runtime_error("chained fixup pointer is not readable guest memory");
+                    const auto next = (word >> 1) & 0x1f;
+                    if ((word & 1) != 0) {
+                        // Bind node: resolve through the shim registry exactly
+                        // like a classic dyld bind opcode would.
+                        const auto ordinal = (word >> 6) & 0xfffff;
+                        const auto chainAddend = static_cast<std::int64_t>((word >> 26) & 0x3f);
+                        if (ordinal >= imports.size())
+                            throw std::runtime_error("chained bind ordinal is outside the import table");
+                        const auto &import = imports[ordinal];
+                        bindAt(image, memory, shims, report, segmentIndex, slotOffsetInSegment,
+                               kBindTypePointer, import.name, import.libOrdinal,
+                               import.addend + chainAddend, import.weak, "chained-bind",
+                               trapContext);
+                    } else {
+                        // Rebase node: target is the unslid vmaddr; install
+                        // target + slide like applyRebases() does.
+                        const auto target = word >> 6;
+                        const auto rebased = addGuestAddress(target, slide, "chained rebase target");
+                        if (!memory.initialize(slotAddress, &rebased, sizeof(rebased)))
+                            throw std::runtime_error("could not apply chained rebase fixup");
+                        ++report.rebasesApplied;
+                    }
+                    if (next == 0)
+                        break;
+                    offsetInPage += static_cast<std::uint64_t>(next) * sizeof(std::uint32_t);
+                    if (offsetInPage >= pageSize)
+                        throw std::runtime_error("chained fixup chain leaves its page");
+                }
+            }
+        }
+    }
 }
 
 } // namespace
@@ -1356,7 +1570,7 @@ radek::Json MachOLoadReport::toJson() const {
 
     constexpr std::size_t kMaximumLinkMapRecords = 4096;
     radek::Json linking = radek::Json::object();
-    linking["mechanism"] = "Mach-O dyld bind, indirect-symbol, and external-relocation fixups to guest callout/data-provider addresses";
+    linking["mechanism"] = "Mach-O dyld bind, chained-fixup, indirect-symbol, and external-relocation fixups to guest callout/data-provider addresses";
     linking["guestImageImportSlotsRelinked"] = static_cast<std::uint64_t>(resolvedSymbols.size());
     linking["guestImageImportSlotsTrapped"] = static_cast<std::uint64_t>(trappedSymbols.size());
     linking["guestImageImportSlotsUnresolved"] = static_cast<std::uint64_t>(unresolvedSymbols.size());
@@ -1480,6 +1694,7 @@ MachOLoadReport loadImpl(const std::vector<std::uint8_t> &mainBinary,
 
         applyRebaseAndBindStreams(reader, image, slide, addressSpace, shims, report,
                                   trapContext);
+        applyChainedFixups(reader, image, slide, addressSpace, shims, report, trapContext);
         std::set<std::string> observedSymbols;
         for (const auto &record : report.resolvedSymbols) {
             const auto found = record.fields.find("symbol");

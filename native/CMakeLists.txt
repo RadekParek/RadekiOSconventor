@@ -180,6 +180,12 @@ if(RADEK_BUILD_COMPAT_RUNTIME)
         target_link_libraries(compat-runtime-openal-tests PRIVATE compat_runtime_core)
         add_test(NAME compat-runtime-openal COMMAND compat-runtime-openal-tests)
 
+        add_executable(compat-runtime-chained-fixups-tests tests/macho_chained_fixups.cpp)
+        target_include_directories(compat-runtime-chained-fixups-tests PRIVATE include)
+        target_compile_options(compat-runtime-chained-fixups-tests PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(compat-runtime-chained-fixups-tests PRIVATE compat_runtime_core)
+        add_test(NAME compat-runtime-chained-fixups COMMAND compat-runtime-chained-fixups-tests)
+
         add_executable(compat-runtime-cxxabi-tests tests/compat_runtime_cxxabi.cpp)
         target_include_directories(compat-runtime-cxxabi-tests PRIVATE include)
         target_compile_options(compat-runtime-cxxabi-tests PRIVATE -Wall -Wextra -Werror)
