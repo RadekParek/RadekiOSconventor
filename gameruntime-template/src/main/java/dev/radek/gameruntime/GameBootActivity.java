@@ -16,6 +16,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -123,6 +124,8 @@ public final class GameBootActivity extends Activity {
     // latest holder surface so the runtime gets the real window as soon as its
     // JNI entry is available instead of silently staying on an offscreen pbuffer.
     private volatile Surface latestGameSurface;
+    private volatile int latestViewportWidth = 0;
+    private volatile int latestViewportHeight = 0;
     private LinearLayout overlayView;
     private final List<SplashFrame> activeSplashFrames = new ArrayList<>();
     private int currentSplashIndex = 0;
@@ -162,6 +165,10 @@ public final class GameBootActivity extends Activity {
      */
     private static native void setGameSurface(Surface surface);
     private static native String getRendererProgress();
+    /** Publishes the host surface size to the guest (`-[UIScreen bounds]`). */
+    private static native void setViewportSize(int width, int height);
+    /** Queues a host touch for the guest run loop; returns false when idle. */
+    private static native boolean postTouchEvent(int action, float x, float y);
 
     private final Runnable rendererProgressPoll = new Runnable() {
         @Override
@@ -237,6 +244,20 @@ public final class GameBootActivity extends Activity {
             // Surface creation commonly wins the race with System.loadLibrary.
             // The boot thread retries latestGameSurface immediately after the
             // runtime loads; unit tests also run safely without JNI.
+        }
+    }
+
+    /**
+     * Hands the real surface size to the guest. The boot thread re-publishes it
+     * after the runtime loads, because surfaceChanged can win that race.
+     */
+    private void publishViewportSize(int width, int height) {
+        latestViewportWidth = width;
+        latestViewportHeight = height;
+        try {
+            setViewportSize(width, height);
+        } catch (Throwable ignored) {
+            // Unit tests run without the native library.
         }
     }
 
@@ -943,6 +964,30 @@ public final class GameBootActivity extends Activity {
         gameSurfaceView.setBackgroundColor(Color.BLACK);
         gameSurfaceView.setContentDescription("Guest game surface");
         gameSurfaceView.setVisibility(View.GONE);
+        // Host input. The guest re-enters itself through its run loop, so a
+        // touch is queued for that loop rather than dispatched directly.
+        gameSurfaceView.setOnTouchListener(new View.OnTouchListener() {
+            @Override
+            public boolean onTouch(View view, MotionEvent event) {
+                final int action = event.getActionMasked();
+                final int forwarded;
+                if (action == MotionEvent.ACTION_DOWN) {
+                    forwarded = 0;
+                } else if (action == MotionEvent.ACTION_MOVE) {
+                    forwarded = 1;
+                } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                    forwarded = 2;
+                } else {
+                    return true;
+                }
+                try {
+                    postTouchEvent(forwarded, event.getX(), event.getY());
+                } catch (Throwable ignored) {
+                    // No native library loaded (unit tests, pre-boot).
+                }
+                return true;
+            }
+        });
         gameSurfaceView.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override
             public void surfaceCreated(SurfaceHolder holder) {
@@ -953,6 +998,10 @@ public final class GameBootActivity extends Activity {
             @Override
             public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
                 publishGameSurface(holder.getSurface());
+                // Publish the real surface size before the guest attaches its
+                // EAGL drawable, so a landscape game is not given a portrait
+                // rectangle (a zero-sized drawable is a black screen).
+                publishViewportSize(width, height);
                 appendLine("Android game surface size: " + width + "×" + height + ".");
             }
 
@@ -1115,6 +1164,9 @@ public final class GameBootActivity extends Activity {
                         // surfaceCreated/surfaceChanged can both have fired before
                         // the library was loaded. Re-publish before the EGL runtime starts.
                         publishGameSurface(latestGameSurface);
+                        if (latestViewportWidth > 0 && latestViewportHeight > 0) {
+                            publishViewportSize(latestViewportWidth, latestViewportHeight);
+                        }
                     }
                 } catch (Throwable error) {
                     appendLine("Runtime library failed to load: " + error);

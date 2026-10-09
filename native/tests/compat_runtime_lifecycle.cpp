@@ -296,6 +296,81 @@ int main() {
                   GuestCalloutResult::Returned);
             CHECK(cancelled.r[0] == 1);
         }
+        // ---- run loop: the frame pump -------------------------------------
+        // A game draws a second frame only while something services its run
+        // loop. Regression guard for the black-screen failure: CFRunLoopRun
+        // must keep re-entering the guest once per ready source instead of
+        // returning to main() right after applicationDidFinishLaunching:.
+        {
+            const auto timerClass = fixture.classData("_OBJC_CLASS_$_NSTimer");
+            const auto mainloopSelector = fixture.selectorAddress("mainloop");
+
+            // +[NSTimer scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:]
+            // AAPCS: the double interval occupies the even-aligned pair r2/r3,
+            // so the remaining arguments spill onto the stack.
+            CpuRegisterState schedule;
+            schedule.r[13] = kStackBase + 0x800;
+            const double interval = 1.0 / 60.0;
+            std::uint64_t intervalBits = 0;
+            std::memcpy(&intervalBits, &interval, sizeof(intervalBits));
+            schedule.r[2] = static_cast<std::uint32_t>(intervalBits & 0xffffffffu);
+            schedule.r[3] = static_cast<std::uint32_t>(intervalBits >> 32);
+            const std::array<std::uint32_t, 4> timerArguments{delegate, mainloopSelector, 0u, 1u};
+            CHECK(fixture.memory.write(kStackBase + 0x800, timerArguments.data(),
+                                       sizeof(timerArguments)));
+            std::string scheduleReason;
+            CHECK(fixture.send(timerClass,
+                               "scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:",
+                               schedule, scheduleReason) == GuestCalloutResult::Returned);
+            CHECK(schedule.r[0] != 0); // the timer object
+
+            CpuRegisterState loop;
+            loop.r[13] = kStackBase + 0x800;
+            loop.r[14] = 0x22334455; // the run loop's caller (_main/UIApplicationMain)
+            std::string loopReason;
+            CHECK(fixture.registry.invokeCallout(fixture.callout("_CFRunLoopRun"), loop,
+                                                fixture.memory, loopReason) ==
+                  GuestCalloutResult::Transferred);
+            CHECK((loop.r[15] & ~GuestAddress{1}) == kMainLoopImplementation);
+            CHECK((loop.r[14] & ~GuestAddress{1}) ==
+                  (fixture.callout("_radek_lifecycle_continuation") & ~GuestAddress{1}));
+
+            // A repeating timer must be serviced again on every return: that
+            // repeated re-entry is what makes frame 2, 3, ... happen at all.
+            for (int frame = 0; frame < 3; ++frame) {
+                CpuRegisterState returning = loop;
+                std::string continuationReason;
+                CHECK(fixture.registry.invokeCallout(
+                          fixture.callout("_radek_lifecycle_continuation"), returning,
+                          fixture.memory, continuationReason) == GuestCalloutResult::Transferred);
+                CHECK((returning.r[15] & ~GuestAddress{1}) == kMainLoopImplementation);
+                loop = returning;
+            }
+            {
+                auto outcome = fixture.objc.lifecycleOutcome(fixture.memory);
+                CHECK(outcome.runLoopIterations >= 4);
+                CHECK(outcome.runLoopRunning);
+                CHECK(!outcome.runLoopExited);
+            }
+
+            // Invalidating the timer empties the queue, so the loop returns to
+            // its caller instead of spinning forever.
+            {
+                CpuRegisterState invalidate;
+                std::string reason;
+                CHECK(fixture.send(schedule.r[0], "invalidate", invalidate, reason) ==
+                      GuestCalloutResult::Returned);
+            }
+            CpuRegisterState exiting = loop;
+            std::string exitReason;
+            CHECK(fixture.registry.invokeCallout(fixture.callout("_radek_lifecycle_continuation"),
+                                                exiting, fixture.memory, exitReason) ==
+                  GuestCalloutResult::Returned);
+            CHECK(exiting.r[14] == 0x22334455); // back to the run loop's caller
+            const auto finished = fixture.objc.lifecycleOutcome(fixture.memory);
+            CHECK(!finished.runLoopRunning);
+            CHECK(finished.runLoopExited);
+        }
         std::printf("compat-runtime lifecycle tests passed\n");
         return 0;
     } catch (const std::exception &error) {

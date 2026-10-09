@@ -10,6 +10,9 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.RandomAccessFile
 import java.security.MessageDigest
+import java.util.zip.Deflater
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 /**
  * Builds a signed, installable game-runtime boot-attempt APK on the device
@@ -45,6 +48,54 @@ internal class GameRuntimeApkBuilder(private val context: Context) {
         private const val EXECUTABLE_ASSET_PATH = "assets/gameboot/main-executable.bin"
         private val DEX_NAME_REGEX = Regex("""classes[0-9]+\.dex""")
         private val PNG_SIGNATURE = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
+
+        /**
+         * Bundle size above which the payload moves out of the APK into the
+         * expansion OBB, keeping the APK installable.
+         */
+        private const val OBB_ONLY_PAYLOAD_BYTES = 100L * 1024L * 1024L
+        /** Files at or below this size stay in the APK even when OBB-only. */
+        private const val OBB_BOOTSTRAP_FILE_BYTES = 1024L * 1024L
+    }
+
+    /**
+     * Writes the Android expansion file for the converted game:
+     * `main.<versionCode>.<package>.obb`, a stored (uncompressed) ZIP of the
+     * bundle payload laid out exactly as it sat inside the .app, so the guest's
+     * own relative paths resolve unchanged from `Android/obb/<package>/`.
+     */
+    private fun writeExpansionObb(target: File, resourceEntries: List<Pair<String, File>>) {
+        val pending = File(target.parentFile, ".${target.name}.pending")
+        ZipOutputStream(pending.outputStream().buffered()).use { zip ->
+            // Stored, not deflated: game media is usually already compressed,
+            // and an uncompressed OBB can be read without inflating it. STORED
+            // entries require both the size and the CRC-32 to be known before
+            // the entry is written, so each payload is hashed on the way in.
+            zip.setMethod(ZipOutputStream.STORED)
+            zip.setLevel(Deflater.NO_COMPRESSION)
+            val buffer = ByteArray(256 * 1024)
+            for ((relative, payload) in resourceEntries) {
+                val crc = java.util.zip.CRC32()
+                payload.inputStream().use { input ->
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read <= 0) break
+                        crc.update(buffer, 0, read)
+                    }
+                }
+                val entry = ZipEntry(relative)
+                entry.method = ZipEntry.STORED
+                entry.size = payload.length()
+                entry.crc = crc.value
+                entry.time = 0
+                zip.putNextEntry(entry)
+                payload.inputStream().use { it.copyTo(zip) }
+                zip.closeEntry()
+            }
+        }
+        require(pending.isFile && pending.length() > 0) { "could not assemble the expansion OBB" }
+        if (target.exists()) require(target.delete()) { "cannot replace the previous expansion OBB" }
+        require(pending.renameTo(target)) { "could not save the expansion OBB" }
     }
 
     private data class MachoSlice(
@@ -202,15 +253,28 @@ internal class GameRuntimeApkBuilder(private val context: Context) {
                 "game-runtime template icon resource path is invalid"
             }
 
-            // The package id carries the signing certificate's hash, exactly like
-            // the other generated APKs. Android rejects an update whose certificates
-            // changed; binding the id to the key means a regenerated identity
-            // produces a fresh package instead of the installer's opaque
-            // "app not installed" SIGNATURE_MISMATCH.
-            val packageName = "${GameRuntimeArtifactContract.PACKAGE_PREFIX}${sourceHash.take(20)}${certificateHash.take(8)}"
+            // The package id is the game's own bundle identifier so the converted
+            // game is installed and addressed under the id it shipped with. A
+            // bundle id Android cannot accept falls back to the previous
+            // hash-derived id; that fallback also keeps the signing-certificate
+            // binding, which means a regenerated identity still produces a fresh
+            // package instead of the installer's opaque SIGNATURE_MISMATCH.
+            val packageName = ArtifactNames.androidPackageName(
+                app.optString("bundleId"), sourceHash, certificateHash)
             require(packageName.length <= 127)
             val manifest = BinaryXmlManifest.customize(templateManifest, packageName, appName)
             val resources = ResourceTablePackagePatcher.customize(templateResources, packageName)
+
+            // Expansion-OBB identity, computed up front so both the metadata and
+            // the assembly step agree on the same name. See writeExpansionObb.
+            val versionCode = ArtifactNames.versionCodeOf(app.optString("version", "1.0"))
+            val obbName = ArtifactNames.obbFileName(packageName, versionCode)
+            val bundleBytes = resourceEntries.sumOf { it.second.length() }
+            val obbFile = File(dir, obbName)
+            val obbRequired = bundleBytes > OBB_ONLY_PAYLOAD_BYTES
+            // Written now so the metadata block below can report the real size
+            // and digest of the expansion file.
+            writeExpansionObb(obbFile, resourceEntries)
 
             val iconStatus = report.optJSONObject("icon")?.optString("status").orEmpty()
             val iconFile = File(dir, "icon.png")
@@ -229,6 +293,13 @@ internal class GameRuntimeApkBuilder(private val context: Context) {
                 .put("contract", CONTRACT)
                 .put("generator", "RadekiOSConventor (on-device)")
                 .put("package", packageName)
+                .put("versionCode", versionCode)
+                .put("expansionObb", JSONObject()
+                    .put("name", obbName)
+                    .put("bytes", obbFile.length())
+                    .put("required", obbRequired)
+                    .put("alsoEmbeddedInApk", !obbRequired)
+                    .put("installPath", "Android/obb/$packageName/$obbName"))
                 .put("targetAbi", "arm64-v8a")
                 .put("applicationName", appName)
                 .put("source", JSONObject()
@@ -320,7 +391,18 @@ internal class GameRuntimeApkBuilder(private val context: Context) {
             if (recoveredIcon != null) {
                 entries += AlignedApkZip.Entry("assets/ipa-icon.png", recoveredIcon, compressed = true)
             }
+            // Expansion OBB: the platform-standard home for a game's bulk media
+            // (`Android/obb/<package>/main.<versionCode>.<package>.obb`). The
+            // bundle stays in the APK as well, so a missing or mismatched OBB
+            // degrades to the embedded copy instead of a black screen. Above
+            // OBB_ONLY_PAYLOAD_BYTES the bundle is OBB-only, which is what keeps
+            // a large game's APK installable. `versionCode`, `obbName`,
+            // `obbFile` and `obbRequired` were computed up front above, and the
+            // OBB file itself was already written there.
             for ((relative, payload) in resourceEntries) {
+                // When the OBB is mandatory, only small bootstrap files stay in
+                // the APK; everything bulky lives in the expansion file.
+                if (obbRequired && payload.length() > OBB_BOOTSTRAP_FILE_BYTES) continue
                 entries += AlignedApkZip.Entry.stream("assets/bundle/$relative", payload, compressed = true)
             }
             val expectedNames = entries.map { it.name }.toSet()
@@ -408,6 +490,17 @@ internal class GameRuntimeApkBuilder(private val context: Context) {
                 .put("origin", "ON_DEVICE")
                 .put("artifact", resultFile.name)
                 .put("package", packageName)
+                .put("versionCode", versionCode)
+                .put("expansionObb", JSONObject()
+                    .put("name", obbName)
+                    .put("bytes", obbFile.length())
+                    .put("sha256", sha256(obbFile))
+                    .put("required", obbRequired)
+                    .put("alsoEmbeddedInApk", !obbRequired)
+                    .put("installPath", "Android/obb/$packageName/$obbName")
+                    .put("note", "Android expansion file named after the game's own bundle id: " +
+                        "main.<versionCode>.<package>.obb. The launcher falls back to the " +
+                        "copy embedded in the APK when the OBB is absent."))
                 .put("targetAbi", "arm64-v8a")
                 .put("applicationName", appName)
                 .put("sourceSha256", sourceHash)

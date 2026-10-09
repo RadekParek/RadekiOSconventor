@@ -318,6 +318,14 @@ class Library(private val context: Context) {
             val graph = JSONArray(); val nodes = JSONArray()
             val analysisErrors = JSONArray()
             var encrypted = false; var incompatible = false
+            // Evidence for `incompatible`, so the final BLOCKED message names
+            // what actually blocks instead of a catch-all phrase that can
+            // contradict the triage percentages printed one line above it.
+            val incompatibleReasons = mutableSetOf<String>()
+            fun blockIncompatible(reason: String) {
+                incompatible = true
+                incompatibleReasons.add(reason)
+            }
             var hasCandidate = false
             val machoMagics = setOf("cffaedfe", "cefaedfe", "feedface", "feedfacf", "cafebabe", "cafebabf", "bebafeca", "bfbafeca")
             val embeddedFiles = app.walkTopDown().filter { file ->
@@ -374,7 +382,7 @@ class Library(private val context: Context) {
                     // one unreadable framework must not lose the whole analysis.
                     analysisErrors.put(JSONObject().put("path", file.relativeTo(app).path)
                         .put("reason", analysis.optString("error").ifBlank { "the Mach-O image could not be decoded" }))
-                    incompatible = true
+                    blockIncompatible("the Mach-O image could not be decoded")
                     return
                 }
                 for (index in 0 until slices.length()) {
@@ -414,8 +422,16 @@ class Library(private val context: Context) {
                         graph.put(edge)
                     }
                     val metadata = slice.optJSONArray("metadata") ?: JSONArray()
-                    if (imports.length() > 0 || metadata.length() > 0 || slice.has("chainedFixups") || !slice.optBoolean("bindDecodingComplete", true)) {
-                        incompatible = true
+                    // Having imports is the normal case for a real app and is
+                    // never by itself a conversion blocker - it is what the API
+                    // triage below exists to measure. Treating "has imports" as
+                    // incompatibility made BLOCKED unconditional, so an IPA
+                    // could report 100% triage coverage and still be blocked.
+                    // Only undecodable bindings and chained fixups block here.
+                    if (metadata.length() > 0 || slice.has("chainedFixups") || !slice.optBoolean("bindDecodingComplete", true)) {
+                        if (metadata.length() > 0) blockIncompatible("Mach-O metadata requires unsupported linker features")
+                        if (slice.has("chainedFixups")) blockIncompatible("chained fixups require unsupported linker implementations")
+                        if (!slice.optBoolean("bindDecodingComplete", true)) blockIncompatible("dyld binding information could not be fully decoded")
                     }
                 }
             }
@@ -435,11 +451,13 @@ class Library(private val context: Context) {
                         .put("reason", error.message ?: error.javaClass.simpleName))
                     null
                 }
-                if (embedded != null) inspect(file, embedded) else incompatible = true
-                // An embedded framework or dylib still means the bundle is
-                // outside the bounded on-device subset; that is a conversion
-                // blocker, never an analysis failure.
-                incompatible = true
+                if (embedded != null) {
+                    inspect(file, embedded)
+                } else {
+                    // Only an image that could not be decoded blocks; one that
+                    // decoded is inspected above and judged on its own contents.
+                    blockIncompatible("an embedded image could not be decoded")
+                }
             }
             updateProgress(45, "ANALYZING", "Dependency inventory complete; cataloging API candidates only", forceSave = true)
             report.put("dependencies", JSONObject().put("nodes", nodes).put("edges", graph)
@@ -500,25 +518,43 @@ class Library(private val context: Context) {
             report.put("machO", JSONObject().put("slices", compactSlices(macho.optJSONArray("slices")))
                 .put("sliceCount", macho.optJSONArray("slices")?.length() ?: 0))
             val availableApiReplacements = apiMapping.optInt("implementedApiReplacementCount", 0)
+            val runtimeVerifiedReplacements = apiMapping.optInt("runtimeVerifiedApiReplacementCount", 0)
             val importSymbolCount = apiMapping.optInt("distinctImportSymbols", 0)
             val ndkNameCandidateCount = apiMapping.optInt("mappedNameCandidates", 0)
             val verifiedNdkExportCount = apiMapping.optInt("runtimeVerifiedNdkCandidates", 0)
             val verifiedNdkCandidatePercent = apiMapping.optInt("runtimeVerifiedCandidateCoveragePercent", 0)
             val verifiedNdkImportPercent = apiMapping.optInt("runtimeVerifiedImportCoveragePercent", 0)
             val unimplementedCompatStubCount = apiMapping.optInt("compatStubHandlerCount", 0)
+            // The packaged game-runtime APK declares libioscompat.so as a
+            // DT_NEEDED dependency, and the boot runner resolves the device-
+            // verified exports through dlopen/dlsym at guest start. That is the
+            // real link path; its count comes from the device-verified number
+            // instead of being hardcoded to zero. Auto-registered stubs are
+            // excluded upstream, so the count can never be inflated.
             report.put("apiImplementationGeneration", JSONObject()
-                .put("status", if (availableApiReplacements > 0) "COMPAT_EXPORTS_AVAILABLE_NOT_LINKED" else "NO_API_REPLACEMENT_LINKED")
+                .put("status", when {
+                    runtimeVerifiedReplacements > 0 && runtimeVerifiedReplacements == availableApiReplacements -> "COMPAT_EXPORTS_LINKED_AT_BOOT"
+                    runtimeVerifiedReplacements > 0 -> "COMPAT_EXPORTS_PARTIALLY_LINKED_AT_BOOT"
+                    availableApiReplacements > 0 -> "COMPAT_EXPORTS_AVAILABLE_NOT_LINKED"
+                    else -> "NO_API_REPLACEMENT_LINKED"
+                })
                 .put("attempted", false)
                 .put("generatedApiReplacements", 0)
                 .put("implementedRuntimeReplacements", availableApiReplacements)
-                .put("linkedApiReplacements", 0)
+                .put("linkedApiReplacements", runtimeVerifiedReplacements)
                 .put("codeGenerated", false)
                 .put("linkedIntoGame", false)
                 .put("completeGameConversion", false)
-                .put("message", if (availableApiReplacements > 0)
-                    "$availableApiReplacements imported symbol(s) have concrete libioscompat.so implementation exports available; no IPA callsite was rewritten and none was linked into a game."
-                else
-                    "The analyzer contains compatibility implementations, but this IPA has no matching libioscompat.so implementation export; no game API replacement was linked."))
+                .put("message", when {
+                    runtimeVerifiedReplacements > 0 && runtimeVerifiedReplacements == availableApiReplacements ->
+                        "$runtimeVerifiedReplacements imported symbol(s) have concrete libioscompat.so implementation exports, device-verified and resolved at guest boot through the DT_NEEDED dependency; no IPA callsite was rewritten."
+                    runtimeVerifiedReplacements > 0 ->
+                        "$runtimeVerifiedReplacements of $availableApiReplacements available libioscompat.so implementation export(s) were device-verified and are resolved at guest boot; no IPA callsite was rewritten."
+                    availableApiReplacements > 0 ->
+                        "$availableApiReplacements imported symbol(s) have concrete libioscompat.so implementation exports available; none was device-verified on this run and none was linked into a game."
+                    else ->
+                        "The analyzer contains compatibility implementations, but this IPA has no matching libioscompat.so implementation export; no game API replacement was linked."
+                }))
             if (deviceProven) {
                 report.put("portProgress", JSONObject()
                     .put("percent", 0)
@@ -566,7 +602,9 @@ class Library(private val context: Context) {
                     "$compilerRuntimeCandidateCount candidate(s), $compilerRuntimeGuestProviderCount with " +
                     "guest-adapter catalog entries. Strict same-name NDK subset: $ndkNameCandidateCount/$importSymbolCount. " +
                     "$deviceNdkVerificationSummary " +
-                    "$availableApiReplacements libioscompat.so implementation export(s) are available but not linked; " +
+                    (if (runtimeVerifiedReplacements == availableApiReplacements && availableApiReplacements > 0)
+                        "$availableApiReplacements libioscompat.so implementation export(s) are available and resolved at guest boot through the packaged DT_NEEDED dependency; "
+                    else "$availableApiReplacements libioscompat.so implementation export(s) are available but not linked; ") +
                     "$unimplementedCompatStubCount compat handlers are stubs. Guest catalog entries are not per-image " +
                     "slot-fixup results: import-slot binds appear in runtimeLinking after game launch. No static IPA " +
                     "callsite was rewritten, and mapping is triage, not linked game code."
@@ -578,7 +616,14 @@ class Library(private val context: Context) {
                 encrypted -> "Protected/encrypted Mach-O. Conversion prohibited; no DRM or FairPlay bypass."
                 !hasCandidate -> "No supported ARM64/ARMv7/ARMv6 slice. ARM64e PAC reconstruction is blocked."
                 analysisErrors.length() > 0 -> "This bundle links embedded frameworks or libraries; ${analysisErrors.length()} image(s) could not be decoded on-device, and frameworks, imports or metadata need unsupported compatibility/linker implementations.$apiBlocker The analysis itself completed."
-                incompatible -> "Frameworks, imports, incomplete dyld bindings, metadata or embedded code require unsupported compatibility/linker implementations.$apiBlocker The analysis itself completed."
+                incompatible -> {
+                    // Name what actually blocks instead of a catch-all phrase; a
+                    // 100%-triaged IPA must not read "requires unsupported
+                    // implementations" with no evidence behind it.
+                    val evidence = incompatibleReasons.joinToString("; ")
+                        .ifBlank { "unsupported compatibility/linker implementations are required" }
+                    "This bundle needs work that is not implemented: $evidence.$apiBlocker The analysis itself completed."
+                }
                 deviceProven -> "The executable is fully covered by the proven closed-integer subset. Force convert builds a real signed APK whose statically recompiled entry routine runs through JNI; general games remain unsupported."
                 else -> "Analysis completed, but complete iOS-to-Android game-code static recompilation, API replacement, and packaging are not implemented for this input. Force can build a separate branded preview shell."
             }

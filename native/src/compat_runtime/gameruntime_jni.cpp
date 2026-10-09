@@ -31,6 +31,7 @@
 #include <jni.h>
 
 #include <android/native_window_jni.h>
+#include <android/native_window.h>
 
 #include <cstdint>
 #include <stdexcept>
@@ -56,6 +57,14 @@ void attachSurface(JNIEnv *env, jobject surface) {
     if (gAttachedWindow != nullptr)
         ANativeWindow_release(gAttachedWindow);
     gAttachedWindow = window;
+    // Publish the real surface size to the guest. `-[UIScreen bounds]` and the
+    // EAGL drawable use it, so a landscape game is not handed a hardcoded
+    // portrait rectangle - a wrong or zero-sized drawable is a black screen.
+    if (window != nullptr) {
+        radek::compat_runtime::objc::configureActiveGuestViewport(
+            static_cast<std::uint32_t>(ANativeWindow_getWidth(window)),
+            static_cast<std::uint32_t>(ANativeWindow_getHeight(window)));
+    }
 }
 
 // Bundle assets are read-only; guest user data is mounted to the dedicated
@@ -129,6 +138,37 @@ Java_dev_radek_gameruntime_GameBootActivity_setGameSurface(JNIEnv *env, jclass, 
     } catch (...) {
         // A surface the runtime cannot use never fails the boot attempt; the
         // GL layer reports the missing drawable through its own diagnostics.
+    }
+}
+
+// The launcher reports its surface size here even before a Surface exists, so
+// the guest's screen rectangle is right from the first drawable attach.
+extern "C" JNIEXPORT void JNICALL
+Java_dev_radek_gameruntime_GameBootActivity_setViewportSize(JNIEnv *, jclass, jint width,
+                                                            jint height) {
+    try {
+        radek::compat_runtime::objc::configureActiveGuestViewport(
+            static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height));
+    } catch (...) {
+    }
+}
+
+// Host input. The boot runs on one thread and re-enters the guest through its
+// run loop, so touches are queued for that loop instead of dispatched here.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_dev_radek_gameruntime_GameBootActivity_postTouchEvent(JNIEnv *, jclass, jint action,
+                                                           jfloat x, jfloat y) {
+    const char *phase = action == 0 ? "touchesBegan"
+                        : action == 1
+                            ? "touchesMoved"
+                            : "touchesEnded";
+    try {
+        return radek::compat_runtime::objc::postTouchToActiveGuest(
+                   static_cast<float>(x), static_cast<float>(y), phase)
+                   ? JNI_TRUE
+                   : JNI_FALSE;
+    } catch (...) {
+        return JNI_FALSE;
     }
 }
 

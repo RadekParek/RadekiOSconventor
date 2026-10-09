@@ -22,6 +22,9 @@ constexpr std::uint32_t kObjectiveCDataMask32 = 0xfffffffcU;
 // It is a deterministic diagnostic value; nothing renders on it.
 constexpr float kVirtualViewWidth = 320.0f;
 constexpr float kVirtualViewHeight = 480.0f;
+// Height `-[UIScreen applicationFrame]` subtracts for the status bar on the
+// 3.x-era devices these games target.
+constexpr float kStatusBarHeight = 20.0f;
 constexpr std::uint32_t kSmallMethodListFlag = 0x80000000U;
 
 struct GuestClass32 {
@@ -246,7 +249,7 @@ ShimAdapter::ShimAdapter() {
     for (const auto *name : {
              "NSString", "NSArray", "NSDictionary", "NSNumber", "NSURL", "NSBundle", "NSThread",
              "UIWindow", "UIView", "UIScreen", "UIAccelerometer", "CAEAGLLayer",
-             "EAGLContext"}) {
+             "EAGLContext", "NSTimer"}) {
         classes_.emplace(name, runtime_.registerClass(name, rootClass_));
     }
     // The lifecycle adapters wire the delegate through the singleton's first
@@ -977,19 +980,58 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
     lifecycleContinuationBinding.library = "UIKit";
     lifecycleContinuationBinding.adapterName = "uikit-lifecycle-continuation";
     lifecycleContinuationBinding.guestAddress = nextCallout_;
-    lifecycleContinuationBinding.invoke = [this](auto &registers, auto &memory, auto &reason) {
-        return lifecycleContinuation(registers, memory, reason);
-    };
+    // Registered as a *transfer*, not a plain callout: when CFRunLoop has
+    // another ready source the continuation hands control straight to that
+    // guest callback instead of returning, which is what produces the next
+    // frame. Frames that have no follow-up leave the target at zero, so the
+    // callout simply returns to the guest exactly as it always did.
+    lifecycleContinuationBinding.invokeTransfer =
+        [this](auto &registers, auto &memory, auto &target, auto &reason) {
+            return lifecycleContinuation(registers, memory, reason, &target);
+        };
     nextCallout_ += 4U;
     registry.registerBinding(std::move(lifecycleContinuationBinding));
     const auto lifecycleContinuation = registry.resolve("_radek_lifecycle_continuation");
-    if (!lifecycleContinuation || !lifecycleContinuation->invoke)
+    if (!lifecycleContinuation || !lifecycleContinuation->invokeTransfer)
         throw std::runtime_error("Objective-C lifecycle continuation was not registered");
     lifecycleContinuationAddress_ = lifecycleContinuation->guestAddress;
     registerTransferFunction(registry, "_UIApplicationMain", "uikit-application-main",
                              [this](auto &registers, auto &memory, auto &target, auto &reason) {
                                  return applicationMain(registers, memory, target, reason);
                              });
+
+    // --- run loop: keeps the guest drawing past its startup callback --------
+    // A game that returns from `main()` after `applicationDidFinishLaunching:`
+    // never draws a second frame. CFRunLoopRun services the app's scheduled
+    // timers, deferred selectors and posted input events instead of returning,
+    // which is what a real UIApplicationMain does for the lifetime of the app.
+    // Transfers, not returns: the loop redirects the PC into the guest callback,
+    // exactly like `_UIApplicationMain` does for the startup message.
+    registerTransferFunction(registry, "_CFRunLoopRun", "corefoundation-run-loop-run",
+                             [this](auto &registers, auto &memory, auto &target, auto &reason) {
+                                 return runLoopRun(registers, memory, target, reason);
+                             });
+    registerTransferFunction(registry, "_CFRunLoopRunInMode", "corefoundation-run-loop-run-in-mode",
+                             [this](auto &registers, auto &memory, auto &target, auto &reason) {
+                                 return runLoopRun(registers, memory, target, reason);
+                             });
+    registerFunction(registry, "_CFRunLoopStop", "corefoundation-run-loop-stop",
+                     [this](auto &registers, auto &memory, auto &) {
+                         runLoopStop(memory);
+                         registers.r[0] = 0;
+                         return true;
+                     });
+    // The run loop object itself is a token: the bounded adapter has one loop.
+    registerFunction(registry, "_CFRunLoopGetMain", "corefoundation-run-loop-get-main",
+                     [](auto &registers, auto &, auto &) {
+                         registers.r[0] = 1;
+                         return true;
+                     });
+    registerFunction(registry, "_CFRunLoopGetCurrent", "corefoundation-run-loop-get-current",
+                     [](auto &registers, auto &, auto &) {
+                         registers.r[0] = 1;
+                         return true;
+                     });
 
     constexpr const char *copyContinuationSymbol =
         "_radek_objc_setProperty_copy_continuation";
@@ -1113,7 +1155,8 @@ bool ShimAdapter::dispatchStret(CpuRegisterState &registers, GuestAddressSpace &
                 std::lock_guard<std::mutex> lock(mutex_);
                 selectorName = selectorNames_.at(selectorValue);
             }
-            if (selectorName == "bounds" || selectorName == "frame") {
+            if (selectorName == "bounds" || selectorName == "frame" ||
+                selectorName == "applicationFrame") {
                 auto *receiverObject = objectForGuest(memory, receiver);
                 if (!receiverObject)
                     throw std::runtime_error("struct-return selector '" + selectorName +
@@ -1122,20 +1165,50 @@ bool ShimAdapter::dispatchStret(CpuRegisterState &registers, GuestAddressSpace &
                       (receiverObject->isa->name == "UIScreen" ||
                        receiverObject->isa->name == "UIView" ||
                        receiverObject->isa->name == "UIWindow" ||
-                       receiverObject->isa->name == "CAEAGLLayer")))
+                       receiverObject->isa->name == "CAEAGLLayer" ||
+                       receiverObject->isa->name == "UIApplication")))
                     throw std::runtime_error("struct-return selector '" + selectorName +
                                              "' is only implemented for UIKit views");
-                std::array<float, 4> storedFrame{0.0f, 0.0f, kVirtualViewWidth, kVirtualViewHeight};
-                if (receiverObject->ivars.size() >= 4) {
+                // The window/screen rectangle defaults to the host viewport when
+                // the guest never materialized a frame, so a landscape game is
+                // not handed a hardcoded portrait rectangle.
+                std::array<float, 4> storedFrame{0.0f, 0.0f, kVirtualViewWidth,
+                                                 kVirtualViewHeight};
+                std::uint32_t viewportWidth = 0;
+                std::uint32_t viewportHeight = 0;
+                effectiveViewport(memory, viewportWidth, viewportHeight);
+                if (viewportWidth != 0 && viewportHeight != 0) {
+                    storedFrame[2] = static_cast<float>(viewportWidth);
+                    storedFrame[3] = static_cast<float>(viewportHeight);
+                }
+                const auto bitsToFloat = [](Value value) {
+                    const auto bits = static_cast<std::uint32_t>(value);
+                    float result = 0.0f;
+                    std::memcpy(&result, &bits, sizeof(result));
+                    return result;
+                };
+                if (receiverObject->ivars.size() >= 4 &&
+                    bitsToFloat(receiverObject->ivars[2]) >= 1.0f &&
+                    bitsToFloat(receiverObject->ivars[3]) >= 1.0f) {
                     for (std::size_t index = 0; index < storedFrame.size(); ++index) {
                         const auto bits = static_cast<std::uint32_t>(receiverObject->ivars[index]);
                         std::memcpy(&storedFrame[index], &bits, sizeof(bits));
                     }
                 }
-                const std::array<float, 4> frame =
+                // `applicationFrame` is the screen rectangle minus the status
+                // bar; 2009-era games use it to size their window.
+                const bool applicationFrame = selectorName == "applicationFrame";
+                const float statusBarHeight = applicationFrame && !statusBarHidden(memory)
+                                                  ? kStatusBarHeight
+                                                  : 0.0f;
+                std::array<float, 4> frame =
                     selectorName == "bounds"
                         ? std::array<float, 4>{0.0f, 0.0f, storedFrame[2], storedFrame[3]}
                         : storedFrame;
+                if (applicationFrame) {
+                    frame = {0.0f, statusBarHeight, storedFrame[2],
+                             std::max(storedFrame[3] - statusBarHeight, 1.0f)};
+                }
                 if (!memory.write(returnBuffer, frame.data(), sizeof(frame)))
                     throw std::runtime_error("objc_msgSend_stret could not write the CGRect result");
                 registers.r[0] = returnBuffer;
