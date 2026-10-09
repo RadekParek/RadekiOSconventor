@@ -291,6 +291,14 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private String runNativeEntryWithStatus() {
+        try {
+            return "Native entry returned: " + runNative();
+        } catch (Throwable error) {
+            return "Native entry failed: " + error;
+        }
+    }
+
     private void startNativeEntry() {
         if (nativeLineView == null || destroyed) return;
         if (!nativeReady) {
@@ -303,12 +311,7 @@ public final class MainActivity extends Activity {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                final String result;
-                try {
-                    result = "Native entry returned: " + runNative();
-                } catch (Throwable error) {
-                    result = "Native entry failed: " + error;
-                }
+                final String result = runNativeEntryWithStatus();
                 appendLaunchLog(result);
                 mainHandler.post(new Runnable() {
                     @Override
