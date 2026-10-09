@@ -582,7 +582,7 @@ class AndroidApiMapperTest {
 
         assertTrue(output.contains("_malloc"))
         assertTrue(output.contains("device export verification"))
-        assertTrue(output.contains("_OBJC_CLASS_$_UIView"))
+        assertTrue(output.contains("_OBJC_CLASS_\$_UIView"))
         assertTrue(output.contains("not a same-name NDK export"))
         assertTrue(output.contains("_UnknownApi"))
         assertTrue(output.contains("UNIMPLEMENTED"))
