@@ -103,8 +103,7 @@ through JNI is built and attached with no user action, leaving the entry in `REA
 convert to .apk** action never overrides these states: for proven IPAs it simply rebuilds the
 converted APK; everything else gets a separately named, signed `game-runtime-v1` boot-attempt APK
 that packs the selected ARM executable, bundle, `libcompat_runtime_v1.so`, and required `libunicorn.so`.
-Guest execution has no artificial instruction/time budget on the device. It stops at a documented runtime boundary — the first unimplemented import it touches, a guest exception, memory/execution fault, unavailable backend, or setup failure — while the diagnostic activity remains open; it
-does not claim playability. A source-free preview shell is available as an explicit fallback. Its
+The default compatibility guest-CPU path has no artificial instruction/time budget on the device. It stops at a documented runtime boundary — the first unimplemented import it touches, a guest exception, memory/execution fault, unavailable backend, or setup failure — while the diagnostic activity remains open; it does not claim playability. An optional, independently linked and hash-bound portable-C handoff can be imported and selected by the game-runtime boot path after ELF/dependency/export/JNI/payload checks. Its JNI runner is not connected to EGL/GLES, so pixels/gameplay are unverified; Android build/device validation remains outstanding. A source-free preview shell is available as an explicit fallback. Its
 launcher displays that the shell started and that no statically recompiled executable is included;
 it does not display converter branding or static-analysis details. The artifact metadata
 (`placeholder-info.json` retains the preview summary, and the report keeps

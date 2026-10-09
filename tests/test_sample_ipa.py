@@ -36,7 +36,12 @@ class SampleIpaTests(unittest.TestCase):
             SAMPLE_PATH, True, analyze_only=True
         )
         self.assertEqual(report["state"], "PARTIAL")
+        link = report["androidLink"]
+        self.assertEqual(link["status"], "VERIFIED_ANDROID_SHARED_LIBRARY")
         self.assertGreater(report["portProgress"]["percent"], 0)
+        self.assertEqual(report["portProgress"]["percent"], link["androidLinkedTextPercent"])
+        self.assertTrue(report["portProgress"]["androidLinkVerified"])
+        self.assertFalse(link["apkProduced"])
         self.assertEqual(report["portProgress"]["recompiledTextBytes"], len(CODE))
         self.assertFalse(report["portProgress"]["completeGameConversion"])
         registry = report["compatRegistry"]

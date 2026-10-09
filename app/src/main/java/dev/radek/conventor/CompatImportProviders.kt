@@ -7,14 +7,16 @@ package dev.radek.conventor
  * particular IPA image's import slot was fixed up or that the API is complete.
  */
 internal object CompatImportProviders {
-    const val EXPECTED_GUEST_RUNTIME_ADAPTER_COUNT = 73
+    const val EXPECTED_GUEST_RUNTIME_ADAPTER_COUNT = 75
     // Legacy identifier retained for report/schema compatibility.
     const val EXPECTED_DARWIN_ONLY_IMPORT_COUNT = EXPECTED_GUEST_RUNTIME_ADAPTER_COUNT
 
     val bySymbol: Map<String, String> = mapOf(
         "_AudioSessionInitialize" to "audio-session.initialize",
         "_AudioSessionSetActive" to "audio-session.set-active",
+        "_NSHomeDirectory" to "foundation.home-directory",
         "_NSSearchPathForDirectoriesInDomains" to "foundation.search-paths",
+        "_NSTemporaryDirectory" to "foundation.temporary-directory",
         "_OBJC_CLASS_\$_CAEAGLLayer" to "objc.class.CAEAGLLayer",
         "_OBJC_CLASS_\$_EAGLContext" to "objc.class.EAGLContext",
         "_OBJC_CLASS_\$_NSAutoreleasePool" to "objc.class.NSAutoreleasePool",

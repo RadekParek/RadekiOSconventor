@@ -78,8 +78,8 @@ void testAllDarwinProvidersAreRegistered() {
     Harness harness;
     const auto missing = compat_import_catalog::missingProviders(harness.registry);
     CHECK(missing.empty());
-    CHECK(compat_import_catalog::kDarwinOnlyProviderCount == 73);
-    CHECK(compat_import_catalog::kGuestRuntimeAdapterProviderCount == 73);
+    CHECK(compat_import_catalog::kDarwinOnlyProviderCount == 75);
+    CHECK(compat_import_catalog::kGuestRuntimeAdapterProviderCount == 75);
     CHECK(harness.compiler.registeredSymbolCount() == 9);
     for (const char *symbol : {"___divsi3", "___modsi3", "___udivsi3", "___umodsi3",
                                "___divdi3", "___moddi3", "___floatdidf", "___floatdisf", "___fixdfdi"}) {
@@ -94,6 +94,37 @@ void testAllDarwinProvidersAreRegistered() {
         for (const auto &ndkProvider : ndk_import_catalog::kProviders)
             CHECK(std::string(provider.symbol) != ndkProvider.symbol);
     }
+}
+
+void testLiveGlesSnapshotIsThreadSafeAndResettable() {
+    gles::resetProgress();
+    Harness harness;
+    gles::resetProgress();
+
+    auto snapshot = gles::progressSnapshot();
+    CHECK(snapshot.guestCallsObserved == 0);
+    CHECK(snapshot.forwardedCalls == 0);
+    CHECK(snapshot.refusedCalls == 0);
+    CHECK(snapshot.framesPresented == 0);
+
+    CpuRegisterState registers;
+    registers.r[0] = 3;
+    registers.r[1] = 0x1406; // GL_FLOAT
+    registers.r[2] = 0;
+    registers.r[3] = kData;
+    std::string reason;
+    CHECK(harness.call("_glVertexPointer", registers, reason) == GuestCalloutResult::Returned);
+
+    snapshot = gles::progressSnapshot();
+    CHECK(snapshot.guestCallsObserved == 1);
+    CHECK(snapshot.forwardedCalls == 0); // client pointer is reissued safely at draw time
+    CHECK(snapshot.framesPresented == 0);
+
+    gles::resetProgress();
+    snapshot = gles::progressSnapshot();
+    CHECK(snapshot.guestCallsObserved == 0);
+    CHECK(snapshot.forwardedCalls == 0);
+    CHECK(snapshot.framesPresented == 0);
 }
 
 void testExceptionAllocationAndGuards() {
@@ -176,10 +207,16 @@ void testAllNdkProvidersAndMinimalEmulation() {
     CHECK(harness.ndk.typedProviderCount() > 0);
     CHECK(harness.ndk.genericProviderCount() + harness.ndk.typedProviderCount() ==
           ndk_full_import_catalog::kProviderCount);
+    CHECK(harness.ndk.fixtureProviderCount() == 181);
+    CHECK(harness.ndk.fixtureNonGenericProviderCount() == 181);
+    CHECK(harness.ndk.fixtureGenericProviderCount() == 0);
     for (const auto &provider : ndk_import_catalog::kProviders) {
         const auto binding = harness.registry.resolve(provider.symbol);
         CHECK(binding.has_value());
         CHECK(binding->library.size() > 0);
+        CHECK(binding->adapterName.rfind("ndk-bounded-", 0) != 0);
+        CHECK(binding->invoke || binding->invokeTransfer || binding->invokeException ||
+              binding->resolveGuestAddress);
     }
     for (const char *symbol : {"_AAssetManager_open", "_inflate", "_vkCreateInstance",
                                "_pthread_attr_init", "_eglGetDisplay"}) {
@@ -304,6 +341,7 @@ void testAllNdkProvidersAndMinimalEmulation() {
 } // namespace
 
 int main() {
+    testLiveGlesSnapshotIsThreadSafeAndResettable();
     testAllDarwinProvidersAreRegistered();
     testExceptionAllocationAndGuards();
     testRttiDataBindingIsGuestData();

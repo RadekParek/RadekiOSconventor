@@ -22,6 +22,7 @@
 #include "compat_runtime/gles_shims.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <map>
 #include <set>
@@ -88,6 +89,33 @@ constexpr EGLint EGL_CONTEXT_CLIENT_VERSION = 0x3098;
 // libsystem window ending at 0xf004ffff and the loader's reserved region).
 constexpr GuestAddress kCalloutBase = 0xf0080000u;
 constexpr GuestAddress kCalloutEnd = 0xf00C0000u;
+
+struct AtomicProgress {
+    std::atomic<bool> driverGlesLoaded{false};
+    std::atomic<bool> driverEglLoaded{false};
+    std::atomic<bool> drawableReady{false};
+    std::atomic<bool> presentingToWindow{false};
+    std::atomic<std::uint32_t> drawableWidth{0};
+    std::atomic<std::uint32_t> drawableHeight{0};
+    std::atomic<std::uint64_t> guestCallsObserved{0};
+    std::atomic<std::uint64_t> forwardedCalls{0};
+    std::atomic<std::uint64_t> refusedCalls{0};
+    std::atomic<std::uint64_t> framesPresented{0};
+};
+
+AtomicProgress gProgress;
+
+void recordDriver(const DriverReport &report) {
+    gProgress.driverGlesLoaded.store(report.glesLoaded, std::memory_order_relaxed);
+    gProgress.driverEglLoaded.store(report.eglLoaded, std::memory_order_relaxed);
+}
+
+void recordDrawable(bool ready, bool window, std::uint32_t width, std::uint32_t height) {
+    gProgress.drawableReady.store(ready, std::memory_order_relaxed);
+    gProgress.presentingToWindow.store(ready && window, std::memory_order_relaxed);
+    gProgress.drawableWidth.store(ready ? width : 0, std::memory_order_relaxed);
+    gProgress.drawableHeight.store(ready ? height : 0, std::memory_order_relaxed);
+}
 
 /** ARM AAPCS argument view: r0-r3, then [sp], plus the VFP argument bank. */
 struct Args {
@@ -209,6 +237,34 @@ struct EglState {
 
 } // namespace
 
+void resetProgress() {
+    gProgress.driverGlesLoaded.store(false, std::memory_order_relaxed);
+    gProgress.driverEglLoaded.store(false, std::memory_order_relaxed);
+    gProgress.drawableReady.store(false, std::memory_order_relaxed);
+    gProgress.presentingToWindow.store(false, std::memory_order_relaxed);
+    gProgress.drawableWidth.store(0, std::memory_order_relaxed);
+    gProgress.drawableHeight.store(0, std::memory_order_relaxed);
+    gProgress.guestCallsObserved.store(0, std::memory_order_relaxed);
+    gProgress.forwardedCalls.store(0, std::memory_order_relaxed);
+    gProgress.refusedCalls.store(0, std::memory_order_relaxed);
+    gProgress.framesPresented.store(0, std::memory_order_relaxed);
+}
+
+ProgressSnapshot progressSnapshot() {
+    ProgressSnapshot snapshot;
+    snapshot.driverGlesLoaded = gProgress.driverGlesLoaded.load(std::memory_order_relaxed);
+    snapshot.driverEglLoaded = gProgress.driverEglLoaded.load(std::memory_order_relaxed);
+    snapshot.drawableReady = gProgress.drawableReady.load(std::memory_order_relaxed);
+    snapshot.presentingToWindow = gProgress.presentingToWindow.load(std::memory_order_relaxed);
+    snapshot.drawableWidth = gProgress.drawableWidth.load(std::memory_order_relaxed);
+    snapshot.drawableHeight = gProgress.drawableHeight.load(std::memory_order_relaxed);
+    snapshot.guestCallsObserved = gProgress.guestCallsObserved.load(std::memory_order_relaxed);
+    snapshot.forwardedCalls = gProgress.forwardedCalls.load(std::memory_order_relaxed);
+    snapshot.refusedCalls = gProgress.refusedCalls.load(std::memory_order_relaxed);
+    snapshot.framesPresented = gProgress.framesPresented.load(std::memory_order_relaxed);
+    return snapshot;
+}
+
 // ---------------------------------------------------------------------------
 struct Forwarder::Impl {
     static constexpr std::size_t kMaxDiagnostics = 64;
@@ -251,6 +307,7 @@ struct Forwarder::Impl {
         report.glesLoaded = driver.glesLoaded;
         report.eglLoaded = driver.eglLoaded;
         report.detail = driver.detail;
+        recordDriver(report);
     }
 
     void note(const std::string &message) {
@@ -264,6 +321,7 @@ struct Forwarder::Impl {
     /** Records that a call could not be handed to the driver and why. */
     void refuse(const std::string &call, const std::string &why = {}) {
         ++refused;
+        gProgress.refusedCalls.fetch_add(1, std::memory_order_relaxed);
         if (why.empty())
             note(call + " refused: no GLES driver is loaded on this host");
         else
@@ -280,6 +338,7 @@ struct Forwarder::Impl {
         }
         fn(args...);
         ++forwarded;
+        gProgress.forwardedCalls.fetch_add(1, std::memory_order_relaxed);
         return true;
     }
 
@@ -330,6 +389,7 @@ struct Forwarder::Impl {
             setterFn(array.size, array.type, array.stride,
                      reinterpret_cast<const void *>(static_cast<std::uintptr_t>(array.pointer)));
             ++forwarded;
+            gProgress.forwardedCalls.fetch_add(1, std::memory_order_relaxed);
             return true;
         }
         auto *host = static_cast<const void *>(
@@ -344,6 +404,7 @@ struct Forwarder::Impl {
         }
         setterFn(array.size, array.type, array.stride, host);
         ++forwarded;
+        gProgress.forwardedCalls.fetch_add(1, std::memory_order_relaxed);
         return true;
     }
 
@@ -484,6 +545,7 @@ struct Forwarder::Impl {
     bool attachDrawable(GuestAddressSpace &memory, std::uint32_t width, std::uint32_t height) {
         (void)memory;
         if (width == 0 || height == 0) {
+            recordDrawable(false, false, 0, 0);
             note("EAGL drawable has a zero-sized frame; the drawable stays unattached");
             return false;
         }
@@ -500,25 +562,31 @@ struct Forwarder::Impl {
                 destroyEgl();
                 std::string why;
                 if (createEglSurface(static_cast<int>(width), static_cast<int>(height), why)) {
+                    recordDrawable(true, egl.windowSurface, width, height);
                     note("EAGL drawable re-attached to an EGL window surface (frames go to the "
                          "Android surface)");
                     return true;
                 }
+                recordDrawable(false, false, 0, 0);
                 note("EGL window surface setup failed: " + why + "; GL calls are refused");
                 return false;
             }
+            recordDrawable(egl.current && egl.surface != nullptr, egl.windowSurface, width, height);
             return true;
         }
         if (!driver.eglLoaded) {
+            recordDrawable(false, false, 0, 0);
             note("no EGL library is available on this host: the EAGL drawable has no "
                  "context and every GL call is refused");
             return false;
         }
         std::string why;
         if (!createEglSurface(static_cast<int>(width), static_cast<int>(height), why)) {
+            recordDrawable(false, false, 0, 0);
             note("EGL surface setup failed: " + why + "; GL calls are refused");
             return false;
         }
+        recordDrawable(true, egl.windowSurface, width, height);
         note(egl.windowSurface
                  ? "EAGL drawable attached to an EGL window surface (frames go to the "
                    "Android surface)"
@@ -539,11 +607,13 @@ struct Forwarder::Impl {
         }
         const auto result = eglSwapBuffers(egl.display, egl.surface);
         ++forwarded;
+        gProgress.forwardedCalls.fetch_add(1, std::memory_order_relaxed);
         if (result != EGL_TRUE_VALUE) {
             refuse("eglSwapBuffers", "the EGL driver reported a failed swap");
             return false;
         }
         ++frames;
+        gProgress.framesPresented.fetch_add(1, std::memory_order_relaxed);
         return true;
     }
 
@@ -585,6 +655,7 @@ void Forwarder::registerBindings(ShimRegistry &registry) {
         binding.invoke = [&impl, invoke](CpuRegisterState &registers, GuestAddressSpace &memory,
                                          std::string &reason) {
             ++impl.guestCalls;
+            gProgress.guestCallsObserved.fetch_add(1, std::memory_order_relaxed);
             Args args{registers, memory, reason};
             try {
                 return invoke(args);

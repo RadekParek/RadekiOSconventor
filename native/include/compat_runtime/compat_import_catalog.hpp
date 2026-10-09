@@ -19,10 +19,12 @@ struct Provider {
     const char *provider;
 };
 
-inline constexpr std::array<Provider, 73> kDarwinOnlyProviders{{
+inline constexpr std::array<Provider, 75> kDarwinOnlyProviders{{
     {"_AudioSessionInitialize", "audio-session.initialize"},
     {"_AudioSessionSetActive", "audio-session.set-active"},
+    {"_NSHomeDirectory", "foundation.home-directory"},
     {"_NSSearchPathForDirectoriesInDomains", "foundation.search-paths"},
+    {"_NSTemporaryDirectory", "foundation.temporary-directory"},
     {"_OBJC_CLASS_$_CAEAGLLayer", "objc.class.CAEAGLLayer"},
     {"_OBJC_CLASS_$_EAGLContext", "objc.class.EAGLContext"},
     {"_OBJC_CLASS_$_NSAutoreleasePool", "objc.class.NSAutoreleasePool"},

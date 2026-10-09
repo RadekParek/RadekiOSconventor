@@ -17,6 +17,7 @@ import android.widget.*
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.zip.ZipFile
@@ -91,6 +92,15 @@ private object IconLoader {
 private fun formatPortPercent(value: Double): String =
     String.format(Locale.ROOT, "%.6f", value.coerceIn(0.0, 100.0)).trimEnd('0').trimEnd('.')
 
+private fun isVerifiedAndroidCodeArtifact(link: JSONObject?): Boolean {
+    if (link == null) return false
+    return link.optString("status") in setOf("VERIFIED_ANDROID_SHARED_LIBRARY", "VERIFIED_ANDROID_APK_LIBRARY") &&
+        link.optBoolean("architectureVerified", false) &&
+        link.optBoolean("dependenciesVerified", false) &&
+        link.optBoolean("exportsVerified", false) &&
+        link.optBoolean("allVerificationsPassed", false)
+}
+
 class MainActivity : Activity() {
     private var bgColor = Color.rgb(11, 16, 29)
     private var panel = Color.rgb(20, 29, 47)
@@ -110,6 +120,8 @@ class MainActivity : Activity() {
     private var pendingInstall: Pair<File, String>? = null
     private val pickerIpa = 100
     private val pickerApk = 101
+    private val pickerTranslatedRuntimeInput = 102
+    private val maxTranslatedRuntimeInputBytes = 1024L * 1024 * 1024
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
     private fun applyThemePalette() {
         lightMode = preferences.getBoolean("light_theme", false)
@@ -369,12 +381,24 @@ class MainActivity : Activity() {
             val state = report.optString("state", "FAILED")
             text(state, 11f, statusColor(state), true, item)
             report.optJSONObject("portProgress")?.let { port ->
-                val percent = port.optDouble("percent", port.optInt("percent", 0).toDouble())
+                val androidLink = report.optJSONObject("androidLink")
+                val linkStatus = androidLink?.optString("status", "NOT_REPORTED") ?: "NOT_REPORTED"
+                val linkVerified = isVerifiedAndroidCodeArtifact(androidLink)
+                val percent = if (linkVerified) {
+                    androidLink?.optDouble("androidLinkedTextPercent", port.optDouble("percent", 0.0)) ?: 0.0
+                } else 0.0
+                val linkSummary = when {
+                    linkVerified && linkStatus == "VERIFIED_ANDROID_APK_LIBRARY" ->
+                        "Verified Android APK code-byte coverage: ${formatPortPercent(percent)}% · gameplay not tested"
+                    linkVerified && linkStatus == "VERIFIED_ANDROID_SHARED_LIBRARY" ->
+                        "Verified Android ELF code-byte coverage: ${formatPortPercent(percent)}% · standalone, not a game APK"
+                    else -> "Verified Android-linked code-byte coverage: 0% · no ELF/APK link verified"
+                }
                 val planPercent = report.optJSONObject("staticRecompilationPlan")
                     ?.takeIf { it.optString("status", "") in listOf("COMPUTED", "TRUNCATED") }
                     ?.optDouble("percent", 0.0)
                 val planClause = if (planPercent != null) " · host plan: ${formatPortPercent(planPercent)}% of __text (not linked)" else ""
-                text("Android code-byte static recompilation: ${formatPortPercent(percent)}% · scope in the basis · not gameplay$planClause", 11f, statusColor("BLOCKED"), true, item)
+                text("$linkSummary$planClause", 11f, statusColor(if (linkVerified) "SUPPORTED" else "BLOCKED"), true, item)
             }
             report.optJSONObject("analysisProgress")?.let { analysis ->
                 val value = analysis.optInt("percent", 0)
@@ -621,6 +645,11 @@ class MainActivity : Activity() {
             strictNdkSubsetExplanation(mapping).takeIf { it.isNotBlank() }?.let {
                 text(it, 12f, muted, parent = mappingCard)
             }
+            if (total > 0) {
+                button("List this IPA's unimplemented / unresolved NDK needs", parent = mappingCard) {
+                    showText("Android compatibility needs", ApiNeedReport.format(mapping))
+                }
+            }
             val generated = report.optJSONObject("hostConversion")?.optInt("generatedApiReplacements", 0) ?: 0
             val triageNote = if (mapping.optString("classificationStatus") == "COMPLETE" && total > 0)
                 "All $classified observed import symbols were categorized; categorization is not static recompilation."
@@ -651,8 +680,22 @@ class MainActivity : Activity() {
         }
         report.optJSONObject("portProgress")?.let { port ->
             val portCard = card()
-            val percent = port.optDouble("percent", port.optInt("percent", 0).toDouble())
-            text("Android code-byte static recompilation progress: ${formatPortPercent(percent)}%", 16f, statusColor("BLOCKED"), true, portCard)
+            val rawPercent = port.optDouble("percent", port.optInt("percent", 0).toDouble())
+            val androidLink = report.optJSONObject("androidLink")
+            val linkStatus = androidLink?.optString("status", "NOT_REPORTED") ?: "NOT_REPORTED"
+            val linkVerified = isVerifiedAndroidCodeArtifact(androidLink)
+            val percent = if (linkVerified) {
+                androidLink?.optDouble("androidLinkedTextPercent", rawPercent) ?: rawPercent
+            } else 0.0
+            val heading = when {
+                linkVerified && linkStatus == "VERIFIED_ANDROID_APK_LIBRARY" ->
+                    "Verified Android APK code-byte coverage: ${formatPortPercent(percent)}% · gameplay not tested"
+                linkVerified && linkStatus == "VERIFIED_ANDROID_SHARED_LIBRARY" ->
+                    "Verified Android ELF code-byte coverage: ${formatPortPercent(percent)}% · standalone library, not a game APK"
+                else ->
+                    "Verified Android-linked code-byte progress: 0% · no Android ELF/APK link verified"
+            }
+            text(heading, 16f, statusColor(if (linkVerified) "SUPPORTED" else "BLOCKED"), true, portCard)
             text(port.optString("basis"), 13f, muted, parent = portCard)
             val plan = report.optJSONObject("staticRecompilationPlan")
             if (plan != null) {
@@ -684,6 +727,24 @@ class MainActivity : Activity() {
                         "(python3 -m radek analyze …) for the wider static-recompilation plan of the same IPA.",
                     12f, muted, parent = portCard,
                 )
+            }
+            report.optJSONObject("bytecodeTranslation")?.let { translation ->
+                val status = translation.optString("status", "NOT_REPORTED")
+                if (status == "GENERATED_PORTABLE_C") {
+                    val portablePercent = translation.optDouble("percent", 0.0)
+                    text(
+                        "Host portable-C translation coverage: ${formatPortPercent(portablePercent)}% of executable __text " +
+                            "(${translation.optInt("translatedTextBytes", 0)}/${translation.optInt("executableTextBytes", 0)} " +
+                            "unique instruction byte(s), ${translation.optInt("translatedFunctionCount", 0)} function(s)). " +
+                            "This is generated portable C, not Android-linked code or an APK.",
+                        12f, muted, parent = portCard,
+                    )
+                } else {
+                    text(
+                        "Host portable-C translation coverage: not generated ($status); this does not change Android-linked progress.",
+                        12f, muted, parent = portCard,
+                    )
+                }
             }
         }
         report.optJSONObject("analysisProgress")?.let { analysis ->
@@ -816,8 +877,17 @@ class MainActivity : Activity() {
         if (gameOutputFile != null) {
             val executableBytes = gameRuntimeConversion?.optLong("executableBytes", 0L) ?: 0L
             val machoFormat = gameRuntimeConversion?.optString("machoFormat").orEmpty().ifBlank { "Mach-O" }
+            val translatedIncluded = gameRuntimeConversion?.optBoolean("translatedPortableCIncluded", false) == true
             text("Game-runtime boot-attempt APK · $machoFormat executable, $executableBytes byte(s) packed", 13f, accent, true)
-            text("Runs the real guest boot with no artificial instruction or time cutoff, so an implemented render loop can stay alive. It stops only at a real runtime boundary such as an unimplemented call, guest exception, memory/execution fault, or setup failure; the diagnostic screen stays open instead of crashing. This is not the complete-game static recompilation contract.", 12f, muted)
+            text(
+                if (translatedIncluded) {
+                    "A verified portable-C ARM32 translation and its memory payload are packaged and selected at boot. The current runner is not connected to Android EGL/GLES, so pixels and gameplay are not verified; execution has no frame-based timeout and stops only at a real runtime boundary."
+                } else {
+                    "Runs the real guest boot with no artificial instruction or time cutoff, so an implemented render loop can stay alive. It stops only at a real runtime boundary such as an unimplemented call, guest exception, memory/execution fault, or setup failure; the diagnostic screen stays open instead of crashing. This is not the complete-game static recompilation contract."
+                },
+                12f,
+                muted,
+            )
             button("Install ${gameOutputFile.name}", true) { installArtifact(dir, gameOutputFile.name) }
             button("Share ${gameOutputFile.name}") { shareResultApk(dir, gameOutputFile.name) }
             if (app.has("sha256")) button("Open installed game boot") {
@@ -837,8 +907,26 @@ class MainActivity : Activity() {
                     startForceConvert(dir, true)
                 }
             } else {
-                text("This IPA is outside the complete static-recompilation subset, so Force builds a game-runtime boot-attempt APK: it packs the real 32-bit ARM executable, its bundle, and the Unicorn native dependency. The device runner has no artificial instruction/time cutoff and keeps the black game viewport alive until a real runtime boundary; if it stops, the diagnostic screen remains open instead of crashing. A preview shell without an executable remains available as a fallback.", 12f, muted)
-                dangerButton(if (gameOutputFile != null) "Rebuild game APK" else "Force convert to game APK") {
+                val translatedInput = File(dir, "translated-game-runtime-input.zip")
+                text(
+                    if (translatedInput.isFile) {
+                        "A portable-C handoff ZIP is staged, but has not yet been accepted as linked code. The APK builder must verify its ARM64 ELF class/architecture, Android dependencies, translated exports and JNI entry, selected-executable binding, payload hashes, APK alignment, signature, and install structure before packaging it. Rendering and gameplay remain unverified."
+                    } else {
+                        "Force builds a game-runtime boot-attempt APK from the real 32-bit ARM executable, bundle, and guest runtime. An optional host-generated portable-C handoff can be imported below; it is accepted only after ELF architecture/class, dependency, export, JNI-entry, payload, and provenance checks. The translated runner has no EGL renderer, and neither path is a complete-game static conversion or gameplay claim."
+                    },
+                    12f,
+                    muted,
+                )
+                button(if (translatedInput.isFile) "Replace portable-C handoff ZIP" else "Import portable-C handoff ZIP") {
+                    chooseTranslatedRuntimeInput(dir)
+                }
+                dangerButton(
+                    when {
+                        translatedInput.isFile -> "Build game APK with translated code"
+                        gameOutputFile != null -> "Rebuild game APK"
+                        else -> "Force convert to game APK"
+                    },
+                ) {
                     startGameRuntimeBuild(dir)
                 }
                 button(if (placeholderOutputFile != null) "Rebuild preview APK" else "Build preview shell instead") {
@@ -884,6 +972,100 @@ class MainActivity : Activity() {
         home()
     }
 
+    private fun chooseTranslatedRuntimeInput(dir: File) {
+        if (Jobs.busy) {
+            Toast.makeText(this, "A job is already running", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val picker = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            type = "application/zip"
+            addCategory(Intent.CATEGORY_OPENABLE)
+        }
+        startActivityForResult(picker, pickerTranslatedRuntimeInput)
+    }
+
+    private fun importTranslatedRuntimeInput(uri: Uri, dir: File) {
+        if (Jobs.busy) return
+        Jobs.begin("Importing verified portable-C handoff")
+        returnToDetailAfterJob = dir
+        wasBusy = true
+        val started = Jobs.tryRun {
+            val destination = File(dir, "translated-game-runtime-input.zip")
+            val temporary = File(dir, ".translated-game-runtime-input.importing")
+            val backup = File(dir, ".translated-game-runtime-input.previous")
+            temporary.delete()
+            backup.delete()
+            try {
+                contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(temporary).use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        var total = 0L
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            total += count
+                            require(total <= maxTranslatedRuntimeInputBytes) {
+                                "translated runtime handoff exceeds the 1 GiB import limit"
+                            }
+                            output.write(buffer, 0, count)
+                        }
+                        output.fd.sync()
+                        require(total > 0) { "selected translated runtime handoff is empty" }
+                    }
+                } ?: error("selected translated runtime handoff could not be opened")
+                SafeZip.requireStorage(dir, temporary.length())
+                ZipFile(temporary).use { archive ->
+                    val names = archive.entries().asSequence().map { it.name }.toList()
+                    require(names.size == 5 && names.toSet() == setOf(
+                        "manifest.json", "libtranslated_game.so", "translated-game-payload.zip",
+                        "android-link-report.json", "rt_report.json",
+                    )) { "selected ZIP is not a translated game-runtime input bundle" }
+                    val manifestEntry = archive.getEntry("manifest.json")
+                        ?: error("translated handoff is missing manifest.json")
+                    require(manifestEntry.size in 1..(1024L * 1024)) { "translated handoff manifest is invalid" }
+                    val manifestText = archive.getInputStream(manifestEntry).bufferedReader(Charsets.UTF_8).use { reader ->
+                        val output = StringBuilder()
+                        val buffer = CharArray(8192)
+                        var total = 0
+                        while (true) {
+                            val count = reader.read(buffer)
+                            if (count < 0) break
+                            total += count
+                            require(total <= 1024 * 1024) { "translated handoff manifest exceeds its size limit" }
+                            output.append(buffer, 0, count)
+                        }
+                        output.toString()
+                    }
+                    val manifest = JSONObject(manifestText)
+                    require(manifest.optString("contract") == "translated-game-runtime-input-v1" &&
+                        manifest.optInt("schemaVersion", 0) == 1) {
+                        "selected ZIP does not use translated-game-runtime-input-v1"
+                    }
+                }
+                if (destination.exists()) require(destination.renameTo(backup)) {
+                    "existing translated handoff could not be preserved"
+                }
+                if (!temporary.renameTo(destination)) {
+                    if (backup.isFile) backup.renameTo(destination)
+                    error("translated handoff could not be saved")
+                }
+                backup.delete()
+                Jobs.update(100, "Hash-bound portable-C handoff imported; the APK builder will revalidate it")
+            } catch (error: Throwable) {
+                temporary.delete()
+                if (backup.isFile && !destination.exists()) backup.renameTo(destination)
+                throw error
+            }
+        }
+        if (!started) {
+            wasBusy = false
+            returnToDetailAfterJob = null
+            Toast.makeText(this, "A job is already running", Toast.LENGTH_SHORT).show()
+            return
+        }
+        home()
+    }
+
     private fun startGameRuntimeBuild(dir: File) {
         if (Jobs.busy) {
             Toast.makeText(this, "A job is already running", Toast.LENGTH_SHORT).show()
@@ -893,7 +1075,12 @@ class MainActivity : Activity() {
             Toast.makeText(this, "Retained IPA not found; nothing can be built", Toast.LENGTH_LONG).show()
             return
         }
-        Jobs.begin("Building game-runtime boot APK")
+        Jobs.begin(
+            if (File(dir, "translated-game-runtime-input.zip").isFile)
+                "Building translated game-runtime APK"
+            else
+                "Building game-runtime boot APK",
+        )
         returnToDetailAfterJob = dir
         wasBusy = true
         val started = Jobs.tryRun {
@@ -961,6 +1148,9 @@ class MainActivity : Activity() {
             }
             val started = Jobs.tryRun { attachApk(context, uri, dir); Jobs.update("Host APK attached") }
             if (started) { wasBusy = true; home() }
+        } else if (requestCode == pickerTranslatedRuntimeInput) {
+            val dir = selected ?: return
+            importTranslatedRuntimeInput(uri, dir)
         }
     }
     private fun installArtifact(dir: File, name: String) {

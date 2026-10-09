@@ -1348,10 +1348,30 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
         else
             ++typedProviders;
     }
+
+    // The exact fixture inventory must never be satisfied by the broad
+    // catalog's type-agnostic zero-return fallback. Every observed name has a
+    // signature-aware adapter/data binding or an explicit fail-closed runtime
+    // boundary. This is provider ABI coverage, not a claim that every API is
+    // semantically complete or that every image slot was fixed up.
+    std::size_t fixtureNonGenericProviders = 0;
+    std::size_t fixtureGenericProviders = 0;
+    for (const auto &provider : ndk_import_catalog::kProviders) {
+        const auto binding = registry.resolve(provider.symbol);
+        if (!binding.has_value())
+            throw std::logic_error(std::string("fixture NDK provider is missing: ") + provider.symbol);
+        if (binding->adapterName.rfind("ndk-bounded-", 0) == 0)
+            ++fixtureGenericProviders;
+        else
+            ++fixtureNonGenericProviders;
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
         genericProviders_ = genericProviders;
         typedProviders_ = typedProviders;
+        fixtureProviderCount_ = ndk_import_catalog::kProviderCount;
+        fixtureNonGenericProviderCount_ = fixtureNonGenericProviders;
+        fixtureGenericProviderCount_ = fixtureGenericProviders;
     }
 }
 
@@ -1383,6 +1403,21 @@ std::size_t ShimAdapter::genericProviderCount() const noexcept {
 std::size_t ShimAdapter::typedProviderCount() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return typedProviders_;
+}
+
+std::size_t ShimAdapter::fixtureProviderCount() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return fixtureProviderCount_;
+}
+
+std::size_t ShimAdapter::fixtureNonGenericProviderCount() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return fixtureNonGenericProviderCount_;
+}
+
+std::size_t ShimAdapter::fixtureGenericProviderCount() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return fixtureGenericProviderCount_;
 }
 
 std::size_t ShimAdapter::registeredCalloutCount() const noexcept {

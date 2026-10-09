@@ -149,19 +149,82 @@ jobs:
           test -f .local/sample-conversion/ioscompat/libioscompat.cpp
           test -f .local/sample-conversion/ioscompat/registry.json
           python3 - <<'EOF'
-          import json, pathlib, sys
+          import hashlib, json, pathlib, sys, zipfile
           path = pathlib.Path(".local/sample-conversion/report.json")
           if not path.is_file():
               print("::error::sample conversion report.json was not written")
               sys.exit(1)
           report = json.load(path.open())
-          keys = ("state", "portProgress", "compatRegistry", "experimentalShell",
-                  "conversionProgress", "error")
+          keys = ("state", "portProgress", "androidLink", "gameRuntimeIntegration", "compatRegistry",
+                  "experimentalShell", "conversionProgress", "error")
           diagnostic = {k: report.get(k) for k in keys}
           print(json.dumps(diagnostic, indent=2))
+          runtime_input_path = pathlib.Path(".local/sample-conversion/bytecode-translation/translated-game-runtime-input.zip")
+          integration = report.get("gameRuntimeIntegration", {})
+          handoff_valid = False
+          if runtime_input_path.is_file():
+              try:
+                  with zipfile.ZipFile(runtime_input_path) as handoff:
+                      expected_entries = {
+                          "manifest.json", "libtranslated_game.so", "translated-game-payload.zip",
+                          "android-link-report.json", "rt_report.json",
+                      }
+                      entries = handoff.namelist()
+                      names = set(entries)
+                      manifest = json.loads(handoff.read("manifest.json"))
+                      files = manifest.get("files", {})
+                      hashes_match = (len(entries) == len(names) and names == expected_entries
+                                      and set(files) == expected_entries - {"manifest.json"})
+                      if hashes_match:
+                          for name, record in files.items():
+                              digest = hashlib.sha256()
+                              total = 0
+                              with handoff.open(name) as stream:
+                                  while True:
+                                      chunk = stream.read(1024 * 1024)
+                                      if not chunk:
+                                          break
+                                      digest.update(chunk)
+                                      total += len(chunk)
+                              if digest.hexdigest() != record.get("sha256") or total != record.get("sizeBytes"):
+                                  hashes_match = False
+                                  break
+                      link_flags = manifest.get("linkVerification", {})
+                      handoff_valid = (
+                          handoff.testzip() is None and hashes_match
+                          and manifest.get("contract") == "translated-game-runtime-input-v1"
+                          and manifest.get("sourceExecutableSha256") == integration.get("sourceExecutableSha256")
+                          and manifest.get("entryPointSymbol") == "Java_dev_radek_gameruntime_GameBootActivity_runTranslatedGame"
+                          and all(link_flags.get(key) is True for key in (
+                              "architectureVerified", "dependenciesVerified", "exportsVerified",
+                              "translationEntryPointVerified", "allVerificationsPassed"))
+                      )
+              except Exception as error:
+                  print("::error::translated game-runtime handoff ZIP validation failed:", error)
           checks = (
               ("state is BLOCKED", report["state"] == "BLOCKED"),
-              ("statically recompiled-byte progress > 0", report["portProgress"]["percent"] > 0),
+              ("Android ELF is architecture/dependency/export verified",
+               report["androidLink"]["status"] == "VERIFIED_ANDROID_SHARED_LIBRARY"
+               and report["androidLink"]["architectureVerified"] is True
+               and report["androidLink"]["dependenciesVerified"] is True
+               and report["androidLink"]["exportsVerified"] is True
+               and report["androidLink"]["translationEntryPointVerified"] is True
+               and report["androidLink"]["allVerificationsPassed"] is True),
+              ("code-byte progress matches the verified Android ELF",
+               report["portProgress"]["percent"] == report["androidLink"]["androidLinkedTextPercent"]
+               and report["portProgress"]["androidLinkVerified"] is True
+               and report["portProgress"]["architectureVerified"] is True
+               and report["portProgress"]["dependenciesVerified"] is True
+               and report["portProgress"]["exportsVerified"] is True
+               and report["portProgress"]["translationEntryPointVerified"] is True),
+              ("hash-bound handoff is ready for the game-runtime APK builder",
+               integration.get("status") == "READY_FOR_GAME_RUNTIME_APK"
+               and integration.get("readyForGameRuntimeApk") is True
+               and integration.get("linkedIntoGame") is False
+               and integration.get("apkProduced") is False
+               and integration.get("gamePlayable") is False),
+              ("handoff ZIP contains the verified library, payload, and provenance reports",
+               handoff_valid),
               ("3 verified shims", report["compatRegistry"]["verifiedImplementations"] == 3),
               ("0 stubbed handlers", report["compatRegistry"]["stubbedHandlers"] == 0),
               ("0 unresolved imports", report["compatRegistry"]["unresolvedImports"] == 0),

@@ -13,6 +13,7 @@ emits the C sources + blobs the ``radek/game/rt`` runtime links against:
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -21,6 +22,9 @@ import zipfile
 
 from . import disasm, lift, lsda, macho, objc_meta
 from .lift import sanitize
+
+
+TRANSLATION_ENTRY_POINT_SYMBOL = "Java_dev_radek_gameruntime_GameBootActivity_runTranslatedGame"
 
 
 def _find_exec(zf: zipfile.ZipFile) -> str:
@@ -84,6 +88,54 @@ def _collect_shims(ctx, out) -> list[str]:
         if nm not in shims:
             shims.append(nm)
     return sorted(shims)
+
+
+def _translated_text_coverage(funcs, translated_addrs, text_address: int, text_size: int) -> dict:
+    """Count unique bytes in successfully emitted instructions inside ``__text``.
+
+    Function symbols can overlap or contain duplicate instruction ranges. Sum of
+    function sizes therefore is not a code-byte measure; merge the actual
+    emitted instruction intervals and clip them to the executable text section.
+    """
+    text_end = text_address + text_size
+    intervals: list[tuple[int, int]] = []
+    summed_function_bytes = 0
+    summed_text_instruction_bytes = 0
+    instruction_count = 0
+    for address in translated_addrs:
+        for instruction_address, _mnemonic, _operands, encoded in funcs[address].instructions:
+            instruction_size = len(encoded)
+            if instruction_size <= 0:
+                continue
+            instruction_count += 1
+            summed_function_bytes += instruction_size
+            start = max(int(instruction_address), text_address)
+            end = min(int(instruction_address) + instruction_size, text_end)
+            if start < end:
+                summed_text_instruction_bytes += end - start
+                intervals.append((start, end))
+
+    intervals.sort()
+    unique_bytes = 0
+    merged_start = merged_end = None
+    for start, end in intervals:
+        if merged_start is None:
+            merged_start, merged_end = start, end
+        elif start <= merged_end:
+            merged_end = max(merged_end, end)
+        else:
+            unique_bytes += merged_end - merged_start
+            merged_start, merged_end = start, end
+    if merged_start is not None:
+        unique_bytes += merged_end - merged_start
+
+    return {
+        "uniqueTextBytes": unique_bytes,
+        "summedFunctionInstructionBytes": summed_function_bytes,
+        "summedTextInstructionBytes": summed_text_instruction_bytes,
+        "overlappingTextInstructionBytes": summed_text_instruction_bytes - unique_bytes,
+        "translatedInstructionCount": instruction_count,
+    }
 
 
 def _callsites(funcs, addrs) -> set[int]:
@@ -424,11 +476,16 @@ def generate(ipa_path: str, out_dir: str) -> dict:
 
     text_section = img.section_named("__TEXT", "__text")
     executable_text_bytes = int(getattr(text_section, "size", 0) or 0)
-    translated_function_bytes = sum(
-        4 * len(funcs[address].instructions) for address in addrs
+    text_address = int(getattr(text_section, "address", 0) or 0)
+    translated_coverage = _translated_text_coverage(
+        funcs, addrs, text_address, executable_text_bytes
     )
+    translated_function_bytes = translated_coverage["uniqueTextBytes"]
+    function_symbols = [ctx.cname[address] for address in addrs]
     report = {
         "status": "GENERATED",
+        "sourceExecutableSha256": hashlib.sha256(img.data).hexdigest(),
+        "translationEntryPointSymbol": TRANSLATION_ENTRY_POINT_SYMBOL,
         "functions": len(addrs),
         "functionFailures": 0,
         "shims": len(shims),
@@ -452,6 +509,12 @@ def generate(ipa_path: str, out_dir: str) -> dict:
         "main_addr": main_addr,
         "executableTextBytes": executable_text_bytes,
         "translatedFunctionBytes": translated_function_bytes,
+        "translatedUniqueTextBytes": translated_function_bytes,
+        "summedFunctionInstructionBytes": translated_coverage["summedFunctionInstructionBytes"],
+        "summedTextInstructionBytes": translated_coverage["summedTextInstructionBytes"],
+        "overlappingTextInstructionBytes": translated_coverage["overlappingTextInstructionBytes"],
+        "translatedInstructionCount": translated_coverage["translatedInstructionCount"],
+        "translatedFunctionSymbols": function_symbols,
         "translatedTextPercent": round(
             min(100.0, 100.0 * translated_function_bytes / executable_text_bytes), 6
         ) if executable_text_bytes else 0.0,

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from . import macho
 
 try:
+    import capstone as _capstone
     from capstone import CS_ARCH_ARM, CS_MODE_ARM, Cs
     from capstone.arm import ARM_OP_IMM, ARM_OP_MEM, ARM_OP_REG
     from capstone.arm_const import ARM_CC_AL, ARM_CC_INVALID
@@ -44,6 +45,7 @@ try:
         )
     }
 except ImportError:  # pragma: no cover - dependency is documented in docs/BUILD.md
+    _capstone = None
     Cs = None
     ARM_CC_AL, ARM_CC_INVALID = 15, 0
     _IDS = {}
@@ -84,9 +86,17 @@ _CS_SINGLETON = []
 
 
 def require_capstone():
-    if Cs is None:
+    if Cs is None or _capstone is None:
         raise RuntimeError(
-            "radek.game.disasm needs the capstone package (pip install capstone)"
+            "radek.game.disasm needs capstone >= 5.0.6,<6.0.0 (pip install 'capstone==5.0.7')"
+        )
+    version_match = re.match(r"^(\d+)\.(\d+)\.(\d+)", str(_capstone.__version__))
+    version = tuple(map(int, version_match.groups())) if version_match is not None else None
+    if version is None or version < (5, 0, 6) or version >= (6, 0, 0):
+        installed = getattr(_capstone, "__version__", "unknown")
+        raise RuntimeError(
+            "radek.game.disasm needs capstone >= 5.0.6,<6.0.0 for complete ARM detail "
+            f"operands; found {installed}"
         )
     if not _CS_SINGLETON:
         engine = Cs(CS_ARCH_ARM, CS_MODE_ARM)

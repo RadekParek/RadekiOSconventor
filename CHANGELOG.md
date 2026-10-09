@@ -4,6 +4,34 @@ All notable changes to RadekiOSConventor. Every entry states what was verified a
 what was **not**: analysis, triage, name mappings and host static-recompilation
 coverage never mean a linked game, a playable conversion or a device-tested APK.
 
+## 2026-10-09 — Android progress gated by verified artifacts; runtime evidence separated
+
+Whole-game Android-linked progress stays at 0 until the emitted Android ELF is present and its
+ABI/ELF class, dynamic dependencies, exported translated functions, and aggregate verification all
+pass. The linker-reported function/byte counts must also match the host translation manifest before
+`portProgress` can advance. The bounded-entry path exposes the same architecture/dependency/export
+checks. The UI now gates verified Android coverage on every verification flag and reports host
+static-recompilation-plan bytes and generated portable-C bytes separately. A standalone verified
+`.so` is still described as a library, not as a game APK, game-boot integration, or proof of gameplay.
+
+The `game-runtime-v1` launcher keeps the guest running without a frame-count timeout and displays
+live EGL/GLES driver, drawable, call/refusal, and swap counters. An EGL swap is not evidence that
+pixels were visible or that gameplay worked. Guest `/` now maps to internal app-private
+`files/game-data`, with the more-specific `/Documents`, `/Library`, and created `/tmp` directories;
+`/Android/obb` is optional and read-only when available. Storage and runtime reports describe those
+mounts and retain bounded guest diagnostics. The splash completes once and reveals the game surface
+before guest execution.
+
+Fixture-specific guardrails remain exact: the Angry Birds image has 181 strict NDK/system names
+and 73 guest-adapter imports among its 254 distinct names; the separate 75-name adapter inventory
+is not 75 imports found in the image. Its ARMv6 image has 51 direct `_gl*` imports, all explicitly
+bound, and no direct shader/program imports.
+
+Validation: `python -m unittest discover -v` passed 351 tests (9 skipped), and
+`python tools/build_native.py` passed the host native build and runtime suites. Python compileall
+and `git diff --check` passed. No Android SDK/NDK build, Robolectric/Gradle test, APK install, or
+device run was available here, so the on-device storage/UI/rendering behavior remains unverified.
+
 ## 2026-10-09 — Provider-catalog counts separated from NDK and runtime links
 
 The checked-in Angry Birds v1.0 executable was parsed directly: it has 254 distinct import names,

@@ -16,6 +16,24 @@ struct DriverReport {
     std::string detail;        // library names, or why the probe failed
 };
 
+/** Thread-safe process snapshot for the launcher's live black-screen diagnostic. */
+struct ProgressSnapshot {
+    bool driverGlesLoaded = false;
+    bool driverEglLoaded = false;
+    bool drawableReady = false;
+    bool presentingToWindow = false;
+    std::uint32_t drawableWidth = 0;
+    std::uint32_t drawableHeight = 0;
+    std::uint64_t guestCallsObserved = 0;
+    std::uint64_t forwardedCalls = 0;
+    std::uint64_t refusedCalls = 0;
+    std::uint64_t framesPresented = 0;
+};
+
+/** Reset/live-read counters without stopping or limiting guest execution. */
+void resetProgress();
+ProgressSnapshot progressSnapshot();
+
 /**
  * OpenGL ES 1.1 forwarding layer for the compat runtime.
  *

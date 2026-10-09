@@ -13,9 +13,13 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.Shadows;
 import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowLooper;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32;
@@ -49,6 +53,54 @@ public final class GameBootActivityTest {
     }
 
     @Test
+    public void guestHomeAndTemporaryDirectoryUseInternalPrivateStorage() throws Exception {
+        GameBootActivity activity = Robolectric.buildActivity(GameBootActivity.class).create().get();
+        File root = new File(activity.getFilesDir(), "game-data");
+
+        assertTrue(root.isDirectory());
+        for (String relative : new String[] {"Documents", "Library", "Library/Caches", "tmp", "diagnostics"}) {
+            assertTrue("created app-private directory " + relative, new File(root, relative).isDirectory());
+        }
+
+        File manifestFile = new File(new File(root, "diagnostics"), "storage.json");
+        assertTrue(manifestFile.isFile());
+        JSONObject storage = new JSONObject(new String(Files.readAllBytes(manifestFile.toPath()), StandardCharsets.UTF_8));
+        assertEquals(root.getAbsolutePath(), storage.getString("appDataDirectory"));
+        assertEquals("Context.getFilesDir()/game-data (internal app-private storage)", storage.getString("source"));
+        assertTrue(storage.getBoolean("appDataDirectoryExists"));
+        assertEquals("/tmp", storage.getString("temporaryDirectory"));
+        assertTrue(storage.getBoolean("temporaryDirectoryExists"));
+        JSONObject optionalObb = storage.getJSONObject("optionalObbMount");
+        assertEquals("/Android/obb", optionalObb.getString("guestPath"));
+        assertFalse(optionalObb.getBoolean("writable"));
+        assertFalse(optionalObb.getBoolean("required"));
+        assertEquals("longest guest-path prefix wins; / maps to the writable app-private root",
+                storage.getString("mountResolution"));
+
+        JSONArray mounts = storage.getJSONArray("guestMounts");
+        JSONObject homeMount = null;
+        JSONObject temporaryMount = null;
+        boolean obbMountSeen = false;
+        for (int index = 0; index < mounts.length(); index++) {
+            JSONObject mount = mounts.getJSONObject(index);
+            if ("/".equals(mount.getString("guestPath"))) homeMount = mount;
+            if ("/tmp".equals(mount.getString("guestPath"))) temporaryMount = mount;
+            if ("/Android/obb".equals(mount.getString("guestPath"))) {
+                obbMountSeen = true;
+                assertFalse("optional OBB mount is read-only", mount.getBoolean("writable"));
+            }
+        }
+        assertNotNull(homeMount);
+        assertEquals(root.getAbsolutePath(), homeMount.getString("hostPath"));
+        assertTrue(homeMount.getBoolean("writable"));
+        assertNotNull(temporaryMount);
+        assertEquals(new File(root, "tmp").getAbsolutePath(), temporaryMount.getString("hostPath"));
+        assertTrue(temporaryMount.getBoolean("writable"));
+        assertEquals(optionalObb.getBoolean("available"), obbMountSeen);
+        assertEquals(storage.isNull("obbDirectory"), !obbMountSeen);
+    }
+
+    @Test
     public void blockedGuestBootShowsTheImportAndDoesNotCrash() {
         GameBootActivity activity = Robolectric.buildActivity(GameBootActivity.class).create().get();
         activity.displayBootResult(
@@ -67,6 +119,29 @@ public final class GameBootActivityTest {
         assertFalse(activity.isFinishing());
 
         mainLooper.idleFor(2, TimeUnit.SECONDS);
+        assertFalse(activity.isFinishing());
+    }
+
+    @Test
+    public void translatedPortableCRunReportsItsBoundaryWithoutInventingFramesOrInstructions() {
+        GameBootActivity activity = Robolectric.buildActivity(GameBootActivity.class).create().get();
+        activity.displayBootResult(
+                "{\"translatedPortableC\":{\"status\":\"STOPPED_AT_RUNTIME_SHIM\","
+                        + "\"modinitsCompleted\":2,\"mainReached\":true},"
+                        + "\"execution\":{\"status\":\"STOPPED_AT_TRAP\"},"
+                        + "\"renderer\":{\"status\":\"NOT_CONNECTED_TO_EGL\","
+                        + "\"pixelsVerified\":false,\"gameplayVerified\":false},"
+                        + "\"trappedImport\":\"glDrawArrays\",\"reason\":\"shim=glDrawArrays\"}");
+        ShadowLooper mainLooper = Shadows.shadowOf(Looper.getMainLooper());
+        mainLooper.idle();
+
+        String screenText = textIn(activity.getWindow().getDecorView());
+        assertTrue(screenText.contains("Translated portable-C guest boot: STOPPED_AT_RUNTIME_SHIM"));
+        assertTrue(screenText.contains("NOT_CONNECTED_TO_EGL"));
+        assertTrue(screenText.contains("pixels verified: no"));
+        assertTrue(screenText.contains("Stopped at unimplemented import: glDrawArrays"));
+        assertFalse(screenText.contains("Executed 0 guest instruction"));
+        assertTrue(screenText.contains("This APK is not a playable conversion"));
         assertFalse(activity.isFinishing());
     }
 

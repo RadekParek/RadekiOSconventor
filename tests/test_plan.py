@@ -27,10 +27,11 @@ ANGRY_BIRDS_IPA = Path(__file__).resolve().parent / "data" / "AngryBirds_v1.0_os
 
 def _capstone_available() -> bool:
     try:
-        import capstone  # noqa: F401
+        import capstone
+        version = tuple(map(int, capstone.__version__.split(".")[:3]))
     except Exception:
         return False
-    return True
+    return (5, 0, 6) <= version < (6, 0, 0)
 
 
 CAPSTONE_AVAILABLE = _capstone_available()
@@ -98,12 +99,25 @@ class PlanRealInputTest(unittest.TestCase):
         self.assertEqual(self.report["state"], "BLOCKED")
         self.assertEqual(self.report["conversionProgress"]["status"], "NOT_BUILT")
         self.assertEqual(self.report["conversionProgress"]["percent"], 0)
-        self.assertGreater(self.report["portProgress"]["percent"], 0)
-        self.assertTrue(self.report["portProgress"]["hostPlanOnly"])
+        host_progress = self.report["hostStaticRecompilationProgress"]
+        self.assertGreater(host_progress["percent"], 0)
+        self.assertFalse(host_progress["androidLinkVerified"])
+        self.assertFalse(host_progress["completeGameConversion"])
+        android_link = self.report["androidLink"]
+        if android_link["status"] == "VERIFIED_ANDROID_SHARED_LIBRARY":
+            self.assertTrue(android_link["architectureVerified"])
+            self.assertTrue(android_link["dependenciesVerified"])
+            self.assertTrue(android_link["exportsVerified"])
+            self.assertTrue(android_link["allVerificationsPassed"])
+            self.assertGreater(self.report["portProgress"]["percent"], 0)
+            self.assertTrue(self.report["portProgress"]["androidLinkVerified"])
+        else:
+            self.assertEqual(self.report["portProgress"]["percent"], 0)
+            self.assertEqual(android_link["androidLinkedTextBytes"], 0)
+            self.assertFalse(self.report["portProgress"]["androidLinkVerified"])
+            self.assertFalse(android_link["allVerificationsPassed"])
+        self.assertFalse(self.report["portProgress"]["linkedIntoGame"])
         self.assertFalse(self.report["portProgress"]["completeGameConversion"])
-        self.assertEqual(
-            self.report["portProgress"]["status"], "PARTIAL_HOST_STATIC_RECOMPILATION"
-        )
 
     def test_plan_is_durable_in_the_saved_report(self):
         saved = json.loads((self.root / "job" / "report.json").read_text())
@@ -112,18 +126,32 @@ class PlanRealInputTest(unittest.TestCase):
             self.report["staticRecompilationPlan"]["status"],
         )
         self.assertEqual(
-            saved["portProgress"]["recompiledTextBytes"],
+            saved["hostStaticRecompilationProgress"]["recompiledTextBytes"],
             self.report["staticRecompilationPlan"]["staticallyRecompiledBytes"],
         )
+        self.assertEqual(saved["portProgress"]["percent"], self.report["portProgress"]["percent"])
 
     def test_whole_game_bytecode_translation_is_emitted_before_packaging_blocker(self):
         translation = self.report["bytecodeTranslation"]
         self.assertEqual(translation["status"], "GENERATED_PORTABLE_C")
         self.assertGreater(translation["translatedFunctionCount"], 1000)
         self.assertEqual(translation["functionFailures"], 0)
-        self.assertEqual(translation["percent"], 100.0)
+        self.assertGreater(translation["percent"], 0)
+        self.assertLessEqual(translation["percent"], 100.0)
         self.assertFalse(translation["linkedIntoGame"])
         self.assertFalse(translation["apkProduced"])
+        self.assertEqual(translation["translatedFunctionCount"], translation["translatedFunctionSymbolsCount"])
+        self.assertLessEqual(translation["translatedTextBytes"], translation["executableTextBytes"])
+        link = self.report["androidLink"]
+        if link["status"] == "VERIFIED_ANDROID_SHARED_LIBRARY":
+            self.assertEqual(link["linkedTranslatedFunctionCount"], translation["translatedFunctionCount"])
+            self.assertEqual(self.report["portProgress"]["percent"], link["androidLinkedTextPercent"])
+            self.assertTrue(self.report["portProgress"]["androidLinkVerified"])
+            self.assertFalse(link["linkedIntoGame"])
+            self.assertFalse(link["apkProduced"])
+        else:
+            self.assertEqual(self.report["portProgress"]["percent"], 0)
+            self.assertEqual(link["androidLinkedTextBytes"], 0)
         job = self.root / "job"
         for name in ("game_all.c", "rt_gen.c", "rt_gen.h", "rt_mem.bin", "rt_report.json"):
             self.assertTrue((job / "bytecode-translation" / name).is_file(), name)

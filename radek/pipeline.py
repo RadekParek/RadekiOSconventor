@@ -110,10 +110,36 @@ class Pipeline:
                     "The whole-game ARM translation stage has not run; no translated game source has been emitted."
                 ),
             },
+            "gameRuntimeIntegration": {
+                "status": "NOT_ATTEMPTED",
+                "readyForGameRuntimeApk": False,
+                "linkedIntoGame": False,
+                "apkProduced": False,
+                "gamePlayable": False,
+            },
+            "androidLink": {
+                "status": "NOT_ATTEMPTED",
+                "androidLinkedTextBytes": 0,
+                "androidLinkedTextPercent": 0,
+                "architectureVerified": False,
+                "dependenciesVerified": False,
+                "exportsVerified": False,
+                "translationEntryPointVerified": False,
+                "allVerificationsPassed": False,
+                "linkedIntoGame": False,
+                "apkProduced": False,
+                "completeGameConversion": False,
+            },
             "portProgress": {
                 "percent": 0,
-                "status": "NO_COMPLETE_GAME_CODE_EMITTED",
-                "basis": "No complete runnable game code has been written.",
+                "status": "NO_ANDROID_LINK_VERIFIED",
+                "androidLinkVerified": False,
+                "architectureVerified": False,
+                "dependenciesVerified": False,
+                "exportsVerified": False,
+                "translationEntryPointVerified": False,
+                "metric": "uniquely translated __text instruction bytes with symbols verified in an Android artifact",
+                "basis": "No Android-target linked game-code artifact has been verified.",
             },
             "conversionProgress": {
                 "percent": 0,
@@ -132,7 +158,7 @@ class Pipeline:
         }
         self._last_save = None
 
-    def _record_bytecode_translation(self, ipa: Path) -> None:
+    def _record_bytecode_translation(self, ipa: Path, target_abi: str = "auto") -> None:
         """Emit the complete translated ARM game source after leaf proving stops.
 
         The complete-game prover is intentionally stricter than the translator:
@@ -158,6 +184,35 @@ class Pipeline:
                 "completeGameConversion": False,
                 "message": f"Whole-game bytecode translation did not emit an artifact: {exc}",
             }
+            self.report["gameRuntimeIntegration"] = {
+                "status": "BLOCKED_TRANSLATION",
+                "readyForGameRuntimeApk": False,
+                "linkedIntoGame": False,
+                "apkProduced": False,
+                "gamePlayable": False,
+                "reason": str(exc),
+            }
+            self.report["androidLink"] = {
+                "status": "NOT_ATTEMPTED_TRANSLATION_BLOCKED",
+                "androidLinkedTextBytes": 0,
+                "androidLinkedTextPercent": 0,
+                "architectureVerified": False,
+                "dependenciesVerified": False,
+                "exportsVerified": False,
+                "translationEntryPointVerified": False,
+                "allVerificationsPassed": False,
+                "linkedIntoGame": False,
+                "apkProduced": False,
+                "completeGameConversion": False,
+                "reason": str(exc),
+            }
+            self.report["portProgress"] = {
+                "percent": 0,
+                "status": "NO_ANDROID_LINK_VERIFIED",
+                "metric": "uniquely translated __text instruction bytes with symbols verified in an Android artifact",
+                "completeGameConversion": False,
+                "basis": "Portable-C generation failed; no Android-target linked game-code artifact was verified.",
+            }
             self.log("BYTECODE_TRANSLATION", self.report["bytecodeTranslation"]["message"])
             return
 
@@ -169,11 +224,171 @@ class Pipeline:
             "rt_report.json",
         ]
         present = [name for name in artifact_names if (destination / name).is_file()]
+        from .game.android_linker import link_generated_translation
+
+        link_target_abi = target_abi if target_abi in ("arm64-v8a", "armeabi-v7a") else "arm64-v8a"
+        try:
+            android_link = link_generated_translation(destination, link_target_abi)
+        except Exception as exc:  # noqa: BLE001 - linking is optional and must fail closed
+            android_link = {
+                "status": "BLOCKED_ANDROID_LINK_FAILED",
+                "attempted": False,
+                "targetAbi": link_target_abi,
+                "linkedTranslatedFunctionCount": 0,
+                "translatedFunctionCount": result.get("functions", 0),
+                "androidLinkedTextBytes": 0,
+                "executableTextBytes": result.get("executableTextBytes", 0),
+                "androidLinkedTextPercent": 0,
+                "architectureVerified": False,
+                "dependenciesVerified": False,
+                "exportsVerified": False,
+                "translationEntryPointVerified": False,
+                "allVerificationsPassed": False,
+                "missingFunctionSymbols": [],
+                "linkedIntoGame": False,
+                "apkProduced": False,
+                "completeGameConversion": False,
+                "reason": f"Android shared-library link failed closed: {exc}",
+            }
+        android_link.setdefault("translatedFunctionCount", result.get("functions", 0))
+        android_link.setdefault("executableTextBytes", result.get("executableTextBytes", 0))
+        if android_link.get("status") == "VERIFIED_ANDROID_SHARED_LIBRARY":
+            verification_flags = (
+                android_link.get("architectureVerified") is True,
+                android_link.get("dependenciesVerified") is True,
+                android_link.get("exportsVerified") is True,
+                android_link.get("translationEntryPointVerified") is True,
+                android_link.get("allVerificationsPassed") is True,
+                android_link.get("linkedTranslatedFunctionCount") == result.get("functions"),
+                android_link.get("translatedFunctionCount") == result.get("functions"),
+                android_link.get("androidLinkedTextBytes")
+                == result.get("translatedUniqueTextBytes", result.get("translatedFunctionBytes", 0)),
+                android_link.get("executableTextBytes") == result.get("executableTextBytes"),
+            )
+            artifact_value = android_link.get("artifact")
+            artifact_path = destination / artifact_value if isinstance(artifact_value, str) else None
+            if not all(verification_flags):
+                android_link = {
+                    **android_link,
+                    "status": "BLOCKED_ANDROID_VERIFICATION_INCOMPLETE",
+                    "androidLinkedTextBytes": 0,
+                    "androidLinkedTextPercent": 0,
+                    "allVerificationsPassed": False,
+                    "reason": "Android architecture/class, dependency, translated-export, JNI-entry, and overall verification flags are required.",
+                }
+            elif artifact_path is None or not artifact_path.is_file():
+                android_link = {
+                    **android_link,
+                    "status": "BLOCKED_ANDROID_ARTIFACT_MISSING",
+                    "androidLinkedTextBytes": 0,
+                    "androidLinkedTextPercent": 0,
+                    "allVerificationsPassed": False,
+                    "reason": "The verified Android ELF artifact is missing from the translation output directory.",
+                }
+        if android_link.get("status") != "VERIFIED_ANDROID_SHARED_LIBRARY":
+            android_link["translatedFunctionCount"] = result.get("functions", 0)
+            android_link["executableTextBytes"] = result.get("executableTextBytes", 0)
+            android_link["androidLinkedTextBytes"] = 0
+            android_link["androidLinkedTextPercent"] = 0
+        android_verified = android_link.get("status") == "VERIFIED_ANDROID_SHARED_LIBRARY"
+        game_runtime_integration = {
+            "status": "BLOCKED_ANDROID_LINK_NOT_VERIFIED",
+            "readyForGameRuntimeApk": False,
+            "linkedIntoGame": False,
+            "apkProduced": False,
+            "gamePlayable": False,
+            "reason": "A verified Android shared library, translated memory image, and provenance report are required.",
+        }
+        if android_verified:
+            from .game.android_linker import prepare_translated_game_runtime_input
+
+            try:
+                game_runtime_integration = prepare_translated_game_runtime_input(
+                    destination, link_target_abi, android_link
+                )
+            except Exception as exc:  # noqa: BLE001 - package handoff is optional and fail-closed
+                game_runtime_integration = {
+                    **game_runtime_integration,
+                    "status": "BLOCKED_TRANSLATED_GAME_PACKAGE_INPUT",
+                    "reason": f"Translated game-runtime handoff could not be prepared: {exc}",
+                }
+            if game_runtime_integration.get("readyForGameRuntimeApk") is True:
+                present.extend(("translated-game-payload.zip", "translated-game-runtime-input.zip"))
+        self.report["gameRuntimeIntegration"] = game_runtime_integration
+        self.report["androidLink"] = android_link
+        link_report_path = destination / "android-link-report.json"
+        link_report_path.write_text(json.dumps(android_link, indent=2, ensure_ascii=True))
+        if android_verified:
+            artifact = android_link["artifact"]
+            present.extend((artifact, "android-link-report.json"))
+            host_plan = self.report.get("staticRecompilationPlan", {})
+            self.report["portProgress"] = {
+                "percent": android_link["androidLinkedTextPercent"],
+                "status": "PARTIAL_ANDROID_SHARED_LIBRARY_LINKED_NOT_GAME",
+                "metric": (
+                    "unique successfully translated __text instruction bytes whose generated function symbols "
+                    "are present in a verified Android ELF shared library / executable __text bytes"
+                ),
+                "recompiledFunctions": android_link["linkedTranslatedFunctionCount"],
+                "totalTranslatedFunctions": android_link["translatedFunctionCount"],
+                "recompiledTextBytes": android_link["androidLinkedTextBytes"],
+                "totalTextBytes": android_link["executableTextBytes"],
+                "androidArtifact": artifact,
+                "targetAbi": link_target_abi,
+                "androidLinkVerified": True,
+                "architectureVerified": android_link["architectureVerified"],
+                "dependenciesVerified": android_link["dependenciesVerified"],
+                "exportsVerified": android_link["exportsVerified"],
+                "translationEntryPointVerified": android_link["translationEntryPointVerified"],
+                "linkedIntoAndroidSharedLibrary": True,
+                "linkedIntoGame": False,
+                "apkProduced": False,
+                "completeGameConversion": False,
+                "hostStaticPlanPercent": host_plan.get("percent", 0),
+                "basis": (
+                    f"{android_link['linkedTranslatedFunctionCount']} translated function symbol(s) were verified in "
+                    f"{artifact} ({android_link['androidLinkedTextBytes']}/{android_link['executableTextBytes']} "
+                    f"unique source __text bytes; {android_link['androidLinkedTextPercent']}%). This is a standalone "
+                    "Android shared object, not linked into the game boot path, not an APK, and not gameplay evidence."
+                ),
+            }
+        else:
+            host_plan = self.report.get("staticRecompilationPlan", {})
+            self.report["portProgress"] = {
+                "percent": 0,
+                "status": "NO_ANDROID_LINK_VERIFIED",
+                "metric": (
+                    "unique successfully translated __text instruction bytes with generated function symbols "
+                    "verified in an Android ELF shared library / executable __text bytes"
+                ),
+                "recompiledFunctions": 0,
+                "totalTranslatedFunctions": result.get("functions", 0),
+                "recompiledTextBytes": 0,
+                "totalTextBytes": result.get("executableTextBytes", 0),
+                "androidArtifact": None,
+                "targetAbi": link_target_abi,
+                "androidLinkVerified": False,
+                "architectureVerified": False,
+                "dependenciesVerified": False,
+                "exportsVerified": False,
+                "translationEntryPointVerified": False,
+                "linkedIntoAndroidSharedLibrary": False,
+                "linkedIntoGame": False,
+                "apkProduced": False,
+                "completeGameConversion": False,
+                "hostStaticPlanPercent": host_plan.get("percent", 0),
+                "basis": (
+                    "Host-only plans and generated portable C do not count as Android-linked progress. "
+                    f"No Android shared library was verified ({android_link.get('status', 'UNKNOWN')}: "
+                    f"{android_link.get('reason', 'no verified link')})."
+                ),
+            }
         self.report["bytecodeTranslation"] = {
             "status": "GENERATED_PORTABLE_C",
             "translatedFunctionCount": result.get("functions", 0),
+            "translatedFunctionSymbolsCount": len(result.get("translatedFunctionSymbols", [])),
             "functionFailures": result.get("functionFailures", 0),
-            "translatedTextBytes": result.get("translatedFunctionBytes", 0),
+            "translatedTextBytes": result.get("translatedUniqueTextBytes", result.get("translatedFunctionBytes", 0)),
             "executableTextBytes": result.get("executableTextBytes", 0),
             "percent": result.get("translatedTextPercent", 0),
             "translationBackend": result.get("translationBackend"),
@@ -184,16 +399,22 @@ class Pipeline:
             "completeGameConversion": False,
             "message": (
                 f"Translated {result.get('functions', 0)} decoded ARM function(s) into portable C and "
-                "generated the ARM32 state-runtime tables. This is host translation output; it is not yet "
-                "linked into an Android game library or APK."
+                "generated the ARM32 state-runtime tables. This host translation percentage is separate "
+                "from Android-linked code-byte progress. "
+                + (
+                    "A hash-bound translated-game input bundle is ready for the game-runtime APK builder; "
+                    "it is not yet packaged as an APK or connected to rendering/gameplay."
+                    if game_runtime_integration.get("readyForGameRuntimeApk") is True
+                    else "The translated runtime input bundle was not prepared, and no game-runtime APK was produced."
+                )
             ),
+            "androidLinkStatus": android_link.get("status", "UNKNOWN"),
+            "androidLinkArtifact": android_link.get("artifact"),
+            "androidLinkVerified": android_verified,
+            "gameRuntimeIntegrationStatus": game_runtime_integration.get("status", "UNKNOWN"),
+            "gameRuntimeInputBundle": game_runtime_integration.get("runtimeInputBundle"),
+            "gameRuntimeApkProduced": False,
         }
-        port = self.report["portProgress"]
-        port["bytecodeTranslationStatus"] = self.report["bytecodeTranslation"]["status"]
-        port["translatedFunctions"] = self.report["bytecodeTranslation"]["translatedFunctionCount"]
-        port["translatedTextBytes"] = self.report["bytecodeTranslation"]["translatedTextBytes"]
-        port["translationArtifacts"] = self.report["bytecodeTranslation"]["artifacts"]
-        port["translationLinkedIntoGame"] = False
         self.log("BYTECODE_TRANSLATION", self.report["bytecodeTranslation"]["message"])
 
     def _record_static_recompilation_plan(self, executable: Path) -> None:
@@ -222,22 +443,26 @@ class Pipeline:
                 f'{plan.get("reason", "no statically recompilable code measured")}',
             )
             return
-        port = self.report["portProgress"]
-        port["percent"] = plan["percent"]
-        port["status"] = "PARTIAL_HOST_STATIC_RECOMPILATION"
-        port["metric"] = plan["metric"]
-        port["recompiledFunctions"] = plan["functionsStaticallyRecompiled"]
-        port["totalTextBytes"] = plan["executableTextBytes"]
-        port["recompiledTextBytes"] = plan["staticallyRecompiledBytes"]
-        port["hostPlanOnly"] = True
-        port["completeGameConversion"] = False
-        port["basis"] = plan["basis"]
+        plan["countsAsAndroidLinkedProgress"] = False
+        self.report["hostStaticRecompilationProgress"] = {
+            "percent": plan["percent"],
+            "status": "PARTIAL_HOST_STATIC_RECOMPILATION",
+            "metric": plan["metric"],
+            "recompiledFunctions": plan["functionsStaticallyRecompiled"],
+            "totalTextBytes": plan["executableTextBytes"],
+            "recompiledTextBytes": plan["staticallyRecompiledBytes"],
+            "androidLinkVerified": False,
+            "linkedIntoGame": False,
+            "apkProduced": False,
+            "completeGameConversion": False,
+            "basis": plan["basis"],
+        }
         self.log(
             "STATIC_RECOMPILATION_PLAN",
-            f'Host static-recompilation plan: {plan["percent"]}% of executable __text '
+            f'Host-only static-recompilation plan: {plan["percent"]}% of executable __text '
             f'({plan["functionsStaticallyRecompiled"]}/{plan["functionsDiscovered"]} discovered function(s), '
-            f'{plan["staticallyRecompiledBytes"]}/{plan["executableTextBytes"]} byte(s)) — source bytes only, '
-            "nothing was linked into an APK",
+            f'{plan["staticallyRecompiledBytes"]}/{plan["executableTextBytes"]} byte(s)) — this does not '
+            "count as Android-linked progress",
         )
 
     def _attempt_experimental_shell(self, work: Path, program) -> dict:
@@ -408,6 +633,34 @@ class Pipeline:
             f"bytes) were statically recompiled and linked into {final_path.name}. This is the bounded "
             "one-function subset; general games remain unsupported."
         )
+        self.report["androidLink"] = {
+            "status": "VERIFIED_ANDROID_APK_LIBRARY",
+            "attempted": True,
+            "targetAbi": program.target_abi,
+            "artifact": final_path.name,
+            "androidLinkedTextBytes": program.source_size,
+            "executableTextBytes": program.source_size,
+            "androidLinkedTextPercent": 100.0,
+            "linkedTranslatedFunctionCount": 1,
+            "translatedFunctionCount": 1,
+            "architectureVerified": True,
+            "dependenciesVerified": True,
+            "exportsVerified": True,
+            "allVerificationsPassed": True,
+            "dynamicDependencies": self.report.get("nativeCodeArtifact", {}).get("dynamicDependencies", []),
+            "linkedIntoAndroidSharedLibrary": True,
+            "linkedIntoGame": True,
+            "apkProduced": True,
+            "completeGameConversion": True,
+            "note": "The bounded one-function native artifact is present in the signed, statically validated APK.",
+        }
+        port["androidLinkVerified"] = True
+        port["architectureVerified"] = True
+        port["dependenciesVerified"] = True
+        port["exportsVerified"] = True
+        port["linkedIntoAndroidSharedLibrary"] = True
+        port["linkedIntoGame"] = True
+        port["apkProduced"] = True
         self.report["conversionProgress"] = {
             "percent": 100,
             "stage": "VALIDATED",
@@ -610,7 +863,7 @@ class Pipeline:
                             "(see the Conversion ceiling section of reconstruction.md)"
                         )
                     self._record_static_recompilation_plan(executable)
-                    self._record_bytecode_translation(ipa)
+                    self._record_bytecode_translation(ipa, target_abi)
                     self.transition("BLOCKED", str(exc))
                     return self.report
                 # Emit a real, self-contained Android function artifact from the
@@ -647,14 +900,22 @@ class Pipeline:
                 elf_report = inspect_elf(shared_object)
                 exported = elf_report.get("exports", {}).get("radek_recompiled_entry")
                 expected_code_hash = hashlib.sha256(program.machine_code).hexdigest()
-                if (
-                    elf_report["architecture"] != program.target_abi
-                    or exported is None
-                    or exported.get("size") != len(program.machine_code)
-                    or exported.get("sha256") != expected_code_hash
-                    or elf_report.get("undefinedSymbols")
-                ):
-                    raise RuntimeError("generated Android entry library failed static ELF/export verification")
+                expected_elf_class = 64 if program.target_abi == "arm64-v8a" else 32
+                architecture_verified = (
+                    elf_report.get("architecture") == program.target_abi
+                    and elf_report.get("elfClass") == expected_elf_class
+                )
+                dependencies_verified = not elf_report.get("needed") and not elf_report.get("undefinedSymbols")
+                exports_verified = (
+                    exported is not None
+                    and exported.get("type") == 2
+                    and exported.get("size") == len(program.machine_code)
+                    and exported.get("sha256") == expected_code_hash
+                )
+                if not architecture_verified or not dependencies_verified or not exports_verified:
+                    raise RuntimeError(
+                        "generated Android entry library failed architecture/dependency/export verification"
+                    )
                 self.report["nativeCodeArtifact"] = {
                     "status": "STANDALONE_ENTRY_FUNCTION_ONLY",
                     "sharedLibraryPath": shared_object_path.name,
@@ -667,7 +928,13 @@ class Pipeline:
                     "machineCodeSha256": expected_code_hash,
                     "sharedLibrarySha256": hashlib.sha256(shared_object).hexdigest(),
                     "elfValidation": elf_report,
+                    "elfArchitecture": elf_report.get("architecture"),
+                    "elfClass": elf_report.get("elfClass"),
+                    "dynamicDependencies": elf_report.get("needed", []),
                     "undefinedSymbols": elf_report.get("undefinedSymbols", []),
+                    "architectureVerified": architecture_verified,
+                    "dependenciesVerified": dependencies_verified,
+                    "exportsVerified": exports_verified,
                     "relocations": 0,
                     "linkedIntoGame": False,
                     "apkProduced": False,
@@ -723,19 +990,60 @@ class Pipeline:
                         "of the game, lifecycle, resources, and reachable APIs remain not statically recompiled."
                     ),
                 }
+                self.report["androidLink"] = {
+                    "status": "VERIFIED_ANDROID_SHARED_LIBRARY",
+                    "attempted": True,
+                    "method": "bounded self-contained ELF writer",
+                    "targetAbi": program.target_abi,
+                    "artifact": shared_object_path.name,
+                    "elfArchitecture": elf_report.get("architecture"),
+                    "elfClass": elf_report.get("elfClass"),
+                    "dynamicDependencies": elf_report.get("needed", []),
+                    "dynamicUndefinedSymbols": elf_report.get("undefinedSymbols", []),
+                    "translatedFunctionCount": 1,
+                    "linkedTranslatedFunctionCount": 1,
+                    "androidLinkedTextBytes": program.source_size,
+                    "executableTextBytes": total_text_bytes,
+                    "androidLinkedTextPercent": recompiled_percent,
+                    "architectureVerified": architecture_verified,
+                    "dependenciesVerified": dependencies_verified,
+                    "exportsVerified": exports_verified,
+                    "allVerificationsPassed": True,
+                    "verifiedFunctionSymbols": ["radek_recompiled_entry"],
+                    "missingFunctionSymbols": [],
+                    "linkedIntoAndroidSharedLibrary": True,
+                    "linkedIntoGame": False,
+                    "apkProduced": False,
+                    "completeGameConversion": False,
+                    "apiRelinking": {
+                        "status": "NO_IMPORTS_IN_PROVEN_ENTRY",
+                        "staticGuestImportRewriteCount": 0,
+                    },
+                    "note": (
+                        "This is one verified self-contained Android function in a standalone ELF shared object; "
+                        "it is not linked into a game APK or the GameBootActivity guest runtime."
+                    ),
+                }
                 self.report["portProgress"] = {
                     "percent": recompiled_percent,
-                    "status": "PARTIAL_RECOMPILATION",
-                    "metric": "statically recompiled source bytes / executable __text bytes in the selected Mach-O slice",
+                    "status": "PARTIAL_ANDROID_SHARED_LIBRARY_LINKED_NOT_GAME",
+                    "metric": "verified standalone Android ELF function source bytes / executable __text bytes",
                     "recompiledFunctions": 1,
                     "totalTextBytes": total_text_bytes,
                     "recompiledTextBytes": program.source_size,
+                    "androidLinkedTextBytes": program.source_size,
+                    "androidLinkVerified": True,
+                    "architectureVerified": architecture_verified,
+                    "dependenciesVerified": dependencies_verified,
+                    "exportsVerified": exports_verified,
+                    "linkedIntoAndroidSharedLibrary": True,
+                    "linkedIntoGame": False,
+                    "apkProduced": False,
                     "completeGameConversion": False,
                     "basis": (
-                        f"{program.source_size} source instruction bytes were statically recompiled into a standalone "
-                        f"{program.target_abi} function ({recompiled_percent:.6f}% of this slice's executable "
-                        "__text bytes). This is not gameplay, whole-app function coverage, API/link integration, "
-                        "or APK progress."
+                        f"{program.source_size} source instruction bytes are present in the verified standalone "
+                        f"{program.target_abi} Android ELF ({recompiled_percent:.6f}% of this slice's executable "
+                        "__text bytes). This is not a linked game, whole-app API integration, APK, or gameplay result."
                     ),
                 }
                 # The bounded complete-game backend converts an IPA only when every

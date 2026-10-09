@@ -31,6 +31,9 @@ internal class GameRuntimeApkBuilder(private val context: Context) {
         private const val MAX_REPORTED_RESOURCES = 20_000
         internal const val MAX_RESOURCE_FILES = 200_000
         private const val MAX_EXECUTABLE_BYTES = 256L * 1024 * 1024
+        private const val TRANSLATED_RUNTIME_INPUT_NAME = "translated-game-runtime-input.zip"
+        private const val TRANSLATED_PAYLOAD_NAME = "translated-game-payload.zip"
+        private const val TRANSLATED_LIBRARY_NAME = "libtranslated_game.so"
         private const val MACHO_HEADER_BYTES = 64 * 1024
         private const val MAX_FAT_SLICES = 64
         private const val CPU_TYPE_ARM = 12
@@ -121,6 +124,12 @@ internal class GameRuntimeApkBuilder(private val context: Context) {
             setProgress(24, "CONVERTING", "Selecting the 32-bit ARM Mach-O slice for the boot attempt")
             val slice = selectArmSlice(binary, File(staged, "executable"))
             val executableSha = sha256(slice.file)
+            setProgress(30, "CONVERTING", "Checking for a verified portable-C runtime handoff")
+            val translatedRuntime = TranslatedGameRuntimeInput.stage(
+                File(dir, TRANSLATED_RUNTIME_INPUT_NAME),
+                File(staged, "translated-runtime-input"),
+                executableSha,
+            )
 
             setProgress(36, "CONVERTING", "Collecting and hashing the bundle resources")
             val inventory = JSONArray()
@@ -239,13 +248,23 @@ internal class GameRuntimeApkBuilder(private val context: Context) {
                     .put("backend", BACKEND)
                     .put("entryActivity", ENTRY_CLASS)
                     .put("jniSymbol", JNI_SYMBOL)
-                    .put("behavior", "Shows up to three recovered splash frames for 900 ms each before the guest starts; then runs the real guest boot and keeps diagnostics on the first runtime boundary. No preview, menu, or gameplay UI is claimed."))
+                    .put("behavior", if (translatedRuntime == null)
+                        "Shows up to three recovered splash frames for 900 ms each before the compatibility guest-CPU boot; diagnostics remain open at the first runtime boundary. No preview, menu, or gameplay UI is claimed."
+                    else
+                        "Shows up to three recovered splash frames for 900 ms each before the verified translated portable-C runner; it is not connected to Android EGL/GLES, and pixels/gameplay are unverified."))
                 .put("storage", JSONObject()
-                    .put("appDataBase", "Context.getExternalFilesDir(null) (Android/data/<package>/files)")
+                    .put("appDataBase", "Context.getFilesDir()/game-data (internal app-private storage)")
                     .put("directoriesCreatedAtLaunch", JSONArray()
                         .put("Documents").put("Library").put("Library/Caches")
                         .put("tmp").put("diagnostics"))
-                    .put("obbDirectoryCreatedAtLaunch", "Context.getObbDir()")
+                    .put("obbDirectoryCreatedAtLaunch", "Optional: Context.getObbDir() when available; mounted read-only")
+                    .put("optionalObbMount", JSONObject()
+                        .put("source", "Context.getObbDir() when available")
+                        .put("guestPath", "/Android/obb")
+                        .put("readOnly", true)
+                        .put("required", false))
+                    .put("guestHomePath", "/")
+                    .put("guestTemporaryPath", "/tmp")
                     .put("bundleAssetsInApk", true)
                     .put("expansionObbRequired", false)
                     .put("runtimeReport", "diagnostics/runtime-report.json")
@@ -263,6 +282,9 @@ internal class GameRuntimeApkBuilder(private val context: Context) {
                     .put("bytes", totalResourceBytes)
                     .put("inventoryEntries", inventory.length())
                     .put("inventoryTruncated", inventory.length() < resourceCount))
+            if (translatedRuntime != null) {
+                metadata.put("translatedPortableC", translatedRuntime.metadata)
+            }
 
             setProgress(68, "PACKAGING", "Assembling the game-runtime APK entries")
             val entries = ArrayList<AlignedApkZip.Entry>()
@@ -276,6 +298,21 @@ internal class GameRuntimeApkBuilder(private val context: Context) {
                     library.file,
                     compressed = false,
                     alignment = AlignedApkZip.NATIVE_LIBRARY_ALIGNMENT,
+                )
+            }
+            if (translatedRuntime != null) {
+                entries += AlignedApkZip.Entry.stream(
+                    "lib/$ABI/$TRANSLATED_LIBRARY_NAME",
+                    translatedRuntime.library,
+                    compressed = false,
+                    alignment = AlignedApkZip.NATIVE_LIBRARY_ALIGNMENT,
+                )
+                // This entry is already a ZIP; store it verbatim so the payload
+                // digest recorded in gameboot.json remains stable on device.
+                entries += AlignedApkZip.Entry.stream(
+                    "assets/$TRANSLATED_PAYLOAD_NAME",
+                    translatedRuntime.payload,
+                    compressed = false,
                 )
             }
             entries += AlignedApkZip.Entry("assets/gameboot.json", metadata.toString().toByteArray(Charsets.UTF_8), compressed = true)
@@ -292,6 +329,9 @@ internal class GameRuntimeApkBuilder(private val context: Context) {
                 put("resources.arsc", AlignedApkZip.ALIGNMENT)
                 put(iconEntryPath, AlignedApkZip.ALIGNMENT)
                 compatibilityLibraries.forEach { put(it.apkPath, AlignedApkZip.NATIVE_LIBRARY_ALIGNMENT) }
+                if (translatedRuntime != null) {
+                    put("lib/$ABI/$TRANSLATED_LIBRARY_NAME", AlignedApkZip.NATIVE_LIBRARY_ALIGNMENT)
+                }
                 templateDexNames.forEach { put(it, AlignedApkZip.ALIGNMENT) }
             }
             AlignedApkZip.write(unsignedFile, entries)
@@ -386,12 +426,19 @@ internal class GameRuntimeApkBuilder(private val context: Context) {
                     compatibilityLibraries.forEach { put(it.soname) }
                 })
                 .put("compatibilityRuntimeLinked", true)
+                .put("translatedPortableCIncluded", translatedRuntime != null)
+                .put("translatedPortableCLinkedIntoGame", translatedRuntime != null)
+                .put("linkedIntoGame", translatedRuntime != null)
+                .put("apkProduced", true)
                 .put("sourceIconSha256", launcherIconSha)
                 .put("launcherIconSha256", launcherIconSha)
                 .put("installableAndroidPackage", true)
                 .put("runtimeExecution", "NOT_TESTED")
                 .put("gamePlayability", "NOT_TESTED")
-                .put("bootBehavior", "ATTEMPTS_GUEST_BOOT_WITH_UNLIMITED_DEVICE_EXECUTION_THEN_LEAVES_DIAGNOSTICS_OPEN_AT_REAL_RUNTIME_BOUNDARY")
+                .put("bootBehavior", if (translatedRuntime == null)
+                    "ATTEMPTS_GUEST_BOOT_WITH_UNLIMITED_DEVICE_EXECUTION_THEN_LEAVES_DIAGNOSTICS_OPEN_AT_REAL_RUNTIME_BOUNDARY"
+                else
+                    "RUNS_VERIFIED_TRANSLATED_PORTABLE_C_BOOT_WITHOUT_EGL_RENDERING_OR_GAMEPLAY_CLAIMS")
                 .put("signing", JSONObject()
                     .put("schemes", JSONArray().put("v1").put("v2").put("v3"))
                     .put("certificateSha256", certificateHash))
@@ -399,11 +446,30 @@ internal class GameRuntimeApkBuilder(private val context: Context) {
                     .put("installable", audit.installable)
                     .put("warnings", JSONArray().apply { audit.warnings.forEach { put(it) } }))
                 .put("completedAt", java.time.Instant.now().toString())
+            if (translatedRuntime != null) {
+                conversion.put("translatedPortableC", JSONObject(translatedRuntime.metadata.toString())
+                    .put("linkedIntoGame", true)
+                    .put("packagedInApk", true)
+                    .put("runtimeExecuted", false)
+                    .put("gameplayVerified", false))
+                conversion.put("translatedRuntimeLinkVerification", translatedRuntime.verification)
+                conversion.put("translatedFunctionCount", translatedRuntime.metadata.optInt("translatedFunctionCount", 0))
+                conversion.put("translatedCodeCoverage", JSONObject()
+                    .put("translatedUniqueTextBytes", translatedRuntime.metadata.optLong("translatedUniqueTextBytes", 0))
+                    .put("executableTextBytes", translatedRuntime.metadata.optLong("executableTextBytes", 0)))
+                conversion.put("linkedRuntimeLibraries", JSONArray().apply {
+                    compatibilityLibraries.forEach { put(it.soname) }
+                    put(TRANSLATED_LIBRARY_NAME)
+                })
+            }
             report.put("gameRuntimeConversion", conversion)
             reportContext.save(dir, report)
             finalized = true
             backupFile.delete()
-            progress(100, "Game-runtime APK ready; device execution is unlimited and diagnostics remain available at a real runtime boundary")
+            progress(100, if (translatedRuntime == null)
+                "Game-runtime APK ready; device execution is unlimited and diagnostics remain available at a real runtime boundary"
+            else
+                "Game-runtime APK contains the verified translated portable-C library and payload; execution, EGL rendering, pixels, and gameplay are untested")
             return conversion
         } catch (error: Throwable) {
             // An OutOfMemoryError is an Error, not an Exception: catching it

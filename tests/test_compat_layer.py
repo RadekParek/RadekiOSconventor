@@ -6,10 +6,12 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from radek.compat_layer import CONTRACT, classify, collect_imports, generate
 from radek.compat_import_catalog import CONCRETE_DARWIN_COMPAT_PROVIDERS
+from radek.game import macho
 from radek.providers import BIONIC_SYMBOL_CANDIDATES
 
 
@@ -57,8 +59,17 @@ class CompatLayerTests(unittest.TestCase):
         ndk_names = re.findall(r'\{"([^"]+)"\}', native_catalog)
         self.assertEqual(len(ndk_names), 181)
         self.assertEqual(len(set(ndk_names)), 181)
-        imports = ndk_names + list(CONCRETE_DARWIN_COMPAT_PROVIDERS)
+        fixture = Path(__file__).resolve().parent / "data" / "AngryBirds_v1.0_os30.ipa"
+        with zipfile.ZipFile(fixture) as archive:
+            image = macho.parse(archive.read("Payload/AngryBirds.app/AngryBirds"))
+        imports = sorted({symbol.name for symbol in image.undefined_symbols if symbol.name})
         self.assertEqual(len(imports), 254)
+        strict_ndk = set(imports) & set(ndk_names)
+        guest_catalog = set(imports) & set(CONCRETE_DARWIN_COMPAT_PROVIDERS)
+        self.assertEqual(len(strict_ndk), 181)
+        self.assertEqual(len(guest_catalog), 73)
+        self.assertEqual(strict_ndk | guest_catalog, set(imports))
+        self.assertFalse(strict_ndk & guest_catalog)
         with tempfile.TemporaryDirectory() as directory:
             report = generate(reconstruction(imports), Path(directory))
         self.assertEqual(report["totalObservedImports"], 254)
@@ -66,7 +77,7 @@ class CompatLayerTests(unittest.TestCase):
         self.assertEqual(report["sameNameNdkProviderCount"], 181)
         self.assertEqual(report["concreteDarwinProviderCount"], 73)  # legacy alias
         self.assertEqual(report["guestRuntimeAdapterCatalogCount"], 73)
-        self.assertEqual(report["guestRuntimeAdapterCatalogInventoryCount"], 73)
+        self.assertEqual(report["guestRuntimeAdapterCatalogInventoryCount"], 75)
         self.assertAlmostEqual(report["guestRuntimeAdapterCatalogCoveragePercent"], 28.7402)
         self.assertEqual(report["guestRuntimeAdapterCatalogStatus"], "CATALOG_ONLY_NOT_RUNTIME_LINKED")
         self.assertEqual(report["guestRuntimeSlotFixupsStatus"], "NOT_RUN")

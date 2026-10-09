@@ -978,9 +978,17 @@ void testFoundationSearchPathsReturnGuestNSStringArray() {
     radek::compat_runtime::objc::ShimAdapter objcShims;
     objcShims.registerBindings(registry);
     const auto searchPaths = registry.resolve("_NSSearchPathForDirectoriesInDomains");
+    const auto homeDirectory = registry.resolve("_NSHomeDirectory");
+    const auto temporaryDirectory = registry.resolve("_NSTemporaryDirectory");
     const auto messageSend = registry.resolve("_objc_msgSend");
     const auto release = registry.resolve("_objc_release");
     CHECK(searchPaths.has_value() && searchPaths->invoke);
+    CHECK(homeDirectory.has_value() && homeDirectory->invoke);
+    CHECK(temporaryDirectory.has_value() && temporaryDirectory->invoke);
+    CHECK(homeDirectory->library == "Foundation");
+    CHECK(temporaryDirectory->library == "Foundation");
+    CHECK(homeDirectory->adapterName == "foundation-home-directory-app-sandbox-root");
+    CHECK(temporaryDirectory->adapterName == "foundation-temporary-directory-app-sandbox");
     CHECK(searchPaths->library == "Foundation");
     CHECK(searchPaths->adapterName == "foundation-search-paths-virtual-user-domain");
     CHECK(messageSend.has_value() && messageSend->invokeTransfer);
@@ -1034,6 +1042,27 @@ void testFoundationSearchPathsReturnGuestNSStringArray() {
     std::array<char, 32> path{};
     CHECK(memory.read(registers.r[0], path.data(), path.size()));
     CHECK(std::string(path.data()) == "/Documents");
+
+    const auto assertFoundationPath = [&](const ShimBinding &binding,
+                                          const std::string &expectedPath) {
+        CpuRegisterState pathRegisters;
+        std::string pathReason;
+        CHECK(registry.invokeCallout(binding.guestAddress, pathRegisters, memory, pathReason) ==
+              GuestCalloutResult::Returned);
+        const auto pathObject = pathRegisters.r[0];
+        CHECK(pathObject != 0);
+        pathRegisters = {};
+        pathRegisters.r[0] = pathObject;
+        pathRegisters.r[1] = selectorMemory + 48;
+        CHECK(registry.invokeCallout(messageSend->guestAddress, pathRegisters, memory, pathReason) ==
+              GuestCalloutResult::Returned);
+        std::array<char, 32> actualPath{};
+        CHECK(memory.read(pathRegisters.r[0], actualPath.data(), actualPath.size()));
+        CHECK(std::string(actualPath.data()) == expectedPath);
+    };
+    assertFoundationPath(*homeDirectory, "/");
+    assertFoundationPath(*temporaryDirectory, "/tmp");
+
     registers.r[0] = directoryString;
     registers.r[1] = selectorMemory + 64;
     CHECK(registry.invokeCallout(messageSend->guestAddress, registers, memory, reason) ==

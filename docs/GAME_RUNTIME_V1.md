@@ -1,20 +1,25 @@
 # game-runtime-v1: boot-attempt APK contract
 
-A `game-runtime-v1` APK packs a real iOS game executable and its bundle and
-runs the actual guest boot on-device. The Android runner does **not** impose an
-instruction-count or wall-clock cutoff: once the guest enters its own render
-loop it is allowed to stay alive for gameplay. Execution stops only at a real
-runtime boundary (an unimplemented import, guest exception, memory/execution
-fault, or unavailable backend) or when setup fails, and the launcher remains
-open with the exact reason rather than crashing.
-It is still not a complete static recompilation contract: framework/input
-coverage must be sufficient for the particular game before gameplay can be
-claimed. The runtime does not show a preview shell in place of the guest.
+A `game-runtime-v1` APK packs the selected 32-bit ARM executable and its bundle
+and attempts a guest boot on-device. Its default compatibility guest-CPU path
+has no instruction-count or wall-clock cutoff; it may remain alive if the guest
+reaches a render loop and stops only at a real runtime boundary or setup failure.
+An optional verified portable-C handoff can be imported into the APK builder; in
+that case the boot activity selects the NDK-linked ARM64 library, verifies and
+extracts its memory payload, and calls its JNI runner. That translated runner
+currently is **not connected to Android EGL/GLES**, so no pixels, gameplay, or
+playability are verified. In both paths the launcher keeps diagnostics open
+rather than crashing. Neither boot-attempt path is a complete static
+recompilation contract.
 The host-only `radek-gameboot --diagnostic-probe` command opts into a finite
 time window so CI/CLI probes can return JSON for a guest that intentionally
 runs forever; that flag is never passed by the APK.
 
-## Native GL, not a reimplementation
+## Compatibility-path native GL, not a reimplementation
+
+The following EGL/GLES forwarding describes the default compatibility-runtime
+path only. The optional translated portable-C runner described below does not
+attach an Android EGL/GLES renderer.
 
 Guest OpenGL ES 1.1 calls are **forwarded to the platform's own EGL/GLES driver**
 (`libEGL.so`/`libGLESv1_CM.so`/`libGLESv2.so` opened at runtime); nothing is
@@ -30,7 +35,64 @@ platform, `guestCallsObserved` (imports entering the compat layer),
 `framesPresented`, and every refusal as a named diagnostic: a rendered frame is
 guest output, not gameplay evidence.
 
+### Angry Birds shader/rendering audit
+
+The checked-in Angry Birds ARMv6 image has **51 distinct imported `_gl*` symbols**.
+All 51 have explicit guest bindings in `gles_shims.cpp` (including the client-array
+pointer adapters); none is a shader/program/uniform/vertex-attribute API. The
+observed import surface is fixed-function OpenGL ES 1.x plus buffer, texture and
+OES framebuffer calls, so the current fixture does not need GLSL shader creation
+or compilation to reach its declared GL imports. The mapper's GLESv2 candidate
+count alone does not mean the IPA imports shader APIs. This audit covers direct
+undefined-symbol imports only: it does not prove that runtime `dlsym` or
+`eglGetProcAddress` lookups never occur, nor that an Android device displayed a
+non-black frame.
+
+During the unlimited device run, a small renderer-status strip reports whether
+EGL/GLES drivers and a drawable are ready, guest GL calls/refusals, and successful
+EGL swaps. It remains visible over a blank viewport and never stops or time-limits
+the guest. An EGL swap is only evidence that the platform accepted a present call;
+it does not inspect pixel content or prove gameplay. If the screen remains black,
+the live counts help separate a missing surface/driver, no guest GL call, a refused
+call, and a swap with unverified image content; final diagnostics are persisted in
+the runtime report and app-specific log.
+
+## Optional translated portable-C boot path
+
+The whole-game ARM lifter can emit portable C and, when the Android NDK is
+available, link it as `libtranslated_game.so`. A successful host link is counted
+only after verifying ARM64 ELF class/machine, Android `DT_NEEDED` dependencies,
+every translated-function export, the sized `GameBootActivity` JNI entry, and
+translation/link function and byte counts. The host then writes a separate,
+hash-bound `translated-game-runtime-input.zip` containing the native library,
+`rt_mem.bin` payload, and reports. It is an APK-builder input—not an APK or
+proof of runtime execution.
+
+On-device, the game-runtime detail screen can import that ZIP. During the APK
+build the selected ARM executable hash is matched to the handoff, its manifest
+and file hashes are checked, the ARM64 ELF and dependency policy are checked
+again, translated-function/export and JNI-entry evidence is required, and the
+nested memory-image hash is verified. Only then are
+`lib/arm64-v8a/libtranslated_game.so` and
+`assets/translated-game-payload.zip` added to the signed game-runtime APK. The
+launcher loads that library, extracts and rechecks `rt_mem.bin`, then invokes
+`Java_dev_radek_gameruntime_GameBootActivity_runTranslatedGame`. The runtime
+maps guest `/` and `/tmp` into dedicated writable app-private storage, serves
+bundle paths from the extracted read-only bundle, and exposes `/Android/obb`
+only as an optional read-only app-specific mount. There is no frame-based
+execution timeout. The report distinguishes host link, APK packaging/linkage, and
+runtime execution; a library in an APK is not evidence that the JNI runner
+booted. This path is not connected to EGL/GLES, and pixels/gameplay remain
+unverified until separately tested. The Android source/tests still require an
+Android SDK/NDK build and device validation before runtime success can be
+claimed.
+
 ## Behavior contract
+
+The numbered details below describe the default compatibility guest-CPU path.
+The optional translated portable-C variant follows the separate selection,
+payload-verification, no-EGL and reporting contract described above; it still
+retains the original authorized executable and bundle in the APK.
 
 1. The APK embeds exactly one authorized 32-bit ARM Mach-O slice
    (`assets/gameboot/main-executable.bin`), the bundle resources
@@ -39,10 +101,14 @@ guest output, not gameplay evidence.
 2. The launcher (`dev.radek.gameruntime.GameBootActivity`) runs the boot once
    through `Java_dev_radek_gameruntime_GameBootActivity_runGameBootAttempt`,
    passing the app directory it extracts from `assets/bundle/**`. The runtime
-   mounts that directory as the guest's own bundle (read-only) plus writable
-   `/Documents` and `/Library` scratch directories, so the guest reads its real
-   data files; refused accesses are listed in the report's `guestFileSystem`
-   block instead of being invented.
+   mounts that directory as the guest's own bundle (read-only), maps guest `/`
+   to the dedicated writable internal app-private `files/game-data` root, and
+   gives `/Documents`, `/Library` and `/tmp` more-specific writable mounts.
+   The `/tmp` directory is created under that root before boot. When Android provides an
+   app-specific OBB directory it is an optional read-only `/Android/obb` mount;
+   the packaged bundle itself does not require an expansion OBB. Longest-prefix
+   resolution preserves the bundle/OBB boundaries and refused accesses are
+   listed in `guestFileSystem` instead of being invented.
 3. Unimplemented imports are bound to abort-on-call traps. The guest executes
    real instructions from the Mach-O entry point without an artificial
    instruction/time budget. It continues while implemented adapters and the
@@ -58,19 +124,19 @@ guest output, not gameplay evidence.
    guest-callable `pthread_create` worker transfers).
 4. The launcher is **fullscreen** (`SYSTEM_UI_FLAG_IMMERSIVE_STICKY` plus
    layout through the display cutout) and runs in **sensor landscape** while the
-   guest boots, showing only the game: the recovered splash frames are shown
-   **once each** (~0.9 s apart) and the sequence then stays on the last frame —
-   it never cycles and touches never advance it. A `SurfaceView` above the
-   splash receives the guest's frames: its surface is handed to the runtime
-   (`setGameSurface` → `ANativeWindow` → EGL window surface) and the guest's
+   guest boots: up to three recovered splash frames are shown **once each** for
+   ~0.9 s, then the splash is hidden and the game `SurfaceView` is revealed before
+   guest execution starts. The sequence never cycles and touches do not advance
+   it. The surface is handed to the runtime (`setGameSurface` → `ANativeWindow` →
+   EGL window surface) and the guest's
    `renderbufferStorage:fromDrawable:`/`presentRenderbuffer:` pairs become
-   `eglCreateWindowSurface`/`eglSwapBuffers` on the platform GLES driver, so a
-   frame the guest renders covers the boot screen. The diagnostic panel stays
-   hidden while the guest runs and is revealed, after the launcher switches back
-   to **portrait**, when the attempt stops.
-5. The launcher shows loader/trap/instruction progress in that panel. While the
-   unlimited device guest is running, the panel is hidden behind the black game
-   viewport. When guest execution stops or setup fails, the launcher keeps the
+   `eglCreateWindowSurface`/`eglSwapBuffers` on the platform GLES driver. A
+   small renderer-status strip remains visible over the viewport while the
+   diagnostic panel stays hidden; the panel is revealed, after the launcher
+   switches back to **portrait**, when the attempt stops.
+5. The launcher shows loader/trap/instruction progress in the terminal panel and
+   live EGL/GLES state in the viewport strip. While the unlimited device guest is
+   running, the panel is hidden behind the game viewport. When guest execution stops or setup fails, the launcher keeps the
    fullscreen diagnostic screen open; it does not throw an Android crash or show
    a preview. The stop reason is reported as what it is: a named unimplemented
    import trap, an explicitly bounded host/legacy `TIME_LIMIT` or
@@ -139,10 +205,11 @@ and digest against the report.
 ## Launcher presentation
 
 - The launcher runs fullscreen in **sensor landscape** (the device can be turned
-  left or right) and shows **only the game**: the recovered splash frames are
-  shown fullscreen, each one exactly once, and the sequence stays on the last
-  frame instead of cycling; the guest's own EGL frames take over as soon as the
-  guest renders. The diagnostics panel stays hidden while the guest runs.
+  left or right); the recovered splash frames are shown fullscreen, each one
+  exactly once, and the sequence stays on the last frame instead of cycling.
+  The guest's own EGL frames take over after the splash, while a small live
+  renderer-status strip reports swaps/refusals without claiming visible pixels
+  or gameplay. The larger diagnostics panel stays hidden while the guest runs.
 - When the attempt stops for any reason (unimplemented import, guest exception,
   fault, unavailable backend, or setup failure), the launcher switches back to
   **portrait** and reveals the diagnostic log, so the stop reason is readable
@@ -199,11 +266,12 @@ and digest against the report.
 Android has no same-name system export for the Apple-spelled Darwin imports
 that motivate this layer (for example `__tolower`, `___error`, `__stdoutp`,
 `__DefaultRuneLocale`, `kEAGLColorFormatRGB565`, `_gxx_personality_sj0`, and
-OpenAL's `_alc*`/`_al*`). The exact 73-symbol catalog also includes ARM32
-compiler-runtime/unwind names. These entries stay outside the strict same-name
+OpenAL's `_alc*`/`_al*`). The 75-entry provider inventory also includes ARM32
+compiler-runtime/unwind names and two Foundation path functions; 73 of its names
+match the Angry Birds fixture. These entries stay outside the strict same-name
 Android catalog and identify guest-runtime adapters/data providers instead; they
 are not static NDK exports or proof of complete semantics. The source/provider
-catalog is shared by Python, Kotlin, and C++; the 181 observed same-name NDK
+inventory is shared by Python, Kotlin, and C++; the 181 observed same-name NDK
 imports also receive ARM32 guest-provider bindings (specialized GLES/libSystem/C++
 providers plus bounded libc/POSIX/math/stdio/pthread/zlib/asset wrappers). The
 full reviewed NDK candidate inventory contains 1,229 names and is registered
@@ -250,9 +318,10 @@ Android-linked game library or APK. The Darwin data/ctype/OpenAL subset lives in
 
 The Darwin adapter is counted (`boundSymbols`, `ctypeCalls`, `openalCalls`,
 `streamCells`, `personalityBoundaries`) and pinned by
-`native/tests/darwin_compat.cpp` (34 bindings). The complete 73-entry provider
-catalog is separately pinned by `native/tests/compat_runtime_cxxabi.cpp` and the
-provider-parity tests. The host probe and on-device JNI register the adapters
+`native/tests/darwin_compat.cpp` (34 bindings). The complete 75-entry provider
+inventory is separately pinned by `native/tests/compat_runtime_cxxabi.cpp` and the
+provider-parity tests; 73 inventory names are observed in the Angry Birds fixture.
+The host probe and on-device JNI register the adapters
 next to the other shims and report both `darwinCompat` and `importProviders`
 blocks.
 

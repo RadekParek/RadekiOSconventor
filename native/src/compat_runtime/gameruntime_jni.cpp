@@ -58,8 +58,8 @@ void attachSurface(JNIEnv *env, jobject surface) {
     gAttachedWindow = window;
 }
 
-// Bundle assets are read-only; guest user data is mounted to the app-specific
-// Android/data/<package>/files tree created by the launcher. OBB storage is an
+// Bundle assets are read-only; guest user data is mounted to the dedicated
+// internal app-private files/game-data directory created by the launcher. OBB storage is an
 // optional read-only mount: this package carries its bundle in APK assets and
 // therefore does not synthesize or require an expansion OBB.
 void mountGuestPayload(const std::string &payloadDirectory,
@@ -73,6 +73,10 @@ void mountGuestPayload(const std::string &payloadDirectory,
         ? appDataDirectory
         : payloadDirectory.empty() ? std::string() : payloadDirectory + "/../radek-home";
     if (!dataRoot.empty()) {
+        // NSHomeDirectory() is the guest-visible sandbox root. More-specific
+        // mounts below keep Documents, Library and tmp rooted at their actual
+        // app-private subdirectories; the VFS resolves longest prefixes first.
+        files.mount("/", dataRoot, true);
         files.mount("/Documents", dataRoot + "/Documents", true);
         files.mount("/Library", dataRoot + "/Library", true);
         files.mount("/tmp", dataRoot + "/tmp", true);
@@ -129,6 +133,24 @@ Java_dev_radek_gameruntime_GameBootActivity_setGameSurface(JNIEnv *env, jclass, 
 }
 
 extern "C" JNIEXPORT jstring JNICALL
+Java_dev_radek_gameruntime_GameBootActivity_getRendererProgress(JNIEnv *env, jclass) {
+    const auto progress = radek::compat_runtime::gles::progressSnapshot();
+    radek::Json report = radek::Json::object();
+    report["driverGlesLoaded"] = progress.driverGlesLoaded;
+    report["driverEglLoaded"] = progress.driverEglLoaded;
+    report["drawableReady"] = progress.drawableReady;
+    report["presentingToWindow"] = progress.presentingToWindow;
+    report["drawableWidth"] = progress.drawableWidth;
+    report["drawableHeight"] = progress.drawableHeight;
+    report["guestCallsObserved"] = progress.guestCallsObserved;
+    report["forwardedCalls"] = progress.forwardedCalls;
+    report["refusedCalls"] = progress.refusedCalls;
+    report["framesPresented"] = progress.framesPresented;
+    report["note"] = "A successful EGL swap records a presented frame, not verified image content or gameplay.";
+    return jsonString(env, report);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
 Java_dev_radek_gameruntime_GameBootActivity_runGameBootAttempt(JNIEnv *env, jobject,
                                                                jbyteArray mainBinary,
                                                                jstring payloadDirectory,
@@ -148,6 +170,7 @@ Java_dev_radek_gameruntime_GameBootActivity_runGameBootAttempt(JNIEnv *env, jobj
         env->GetByteArrayRegion(mainBinary, 0, length, reinterpret_cast<jbyte *>(bytes.data()));
         if (env->ExceptionCheck())
             return nullptr;
+        radek::compat_runtime::gles::resetProgress();
         radek::compat_runtime::ShimRegistry shims;
         radek::compat_runtime::objc::ShimAdapter objcShims;
         radek::compat_runtime::libsystem::ShimAdapter libsystemShims;
@@ -216,9 +239,13 @@ Java_dev_radek_gameruntime_GameBootActivity_runGameBootAttempt(JNIEnv *env, jobj
             storage["bundleAssetsInApk"] = true;
             storage["expansionObbRequired"] = false;
             storage["guestWritableMounts"] = radek::Json::array();
-            for (const auto *path : {"/Documents", "/Library", "/tmp"})
+            for (const auto *path : {"/", "/Documents", "/Library", "/tmp"})
                 storage["guestWritableMounts"].push(radek::Json(path));
+            storage["mountResolution"] = "longest guest-path prefix wins; / is the app-private home root";
+            storage["bundleGuestMount"] = radek::compat_runtime::bundleGuestPath();
+            storage["bundleMountReadOnly"] = true;
             storage["obbGuestMount"] = obb.empty() ? radek::Json() : radek::Json("/Android/obb (read-only)");
+            storage["obbMountReadOnly"] = !obb.empty();
             report["appStorage"] = std::move(storage);
         }
 
@@ -306,6 +333,18 @@ Java_dev_radek_gameruntime_GameBootActivity_runGameBootAttempt(JNIEnv *env, jobj
                 radek::compat_runtime::ndk_import_catalog::kProviderCount);
             providers["sameNameNdkRegistrationStatus"] = "COMPLETE";
             providers["sameNameNdkRegistrationPercent"] = std::uint64_t{100};
+            providers["fixtureSameNameNdkImportCount"] = static_cast<std::uint64_t>(
+                ndkShims.fixtureProviderCount());
+            providers["fixtureSameNameNdkNonGenericProviderCount"] = static_cast<std::uint64_t>(
+                ndkShims.fixtureNonGenericProviderCount());
+            providers["fixtureSameNameNdkGenericProviderCount"] = static_cast<std::uint64_t>(
+                ndkShims.fixtureGenericProviderCount());
+            providers["fixtureSameNameNdkAdapterStatus"] =
+                ndkShims.fixtureProviderCount() == 181 &&
+                        ndkShims.fixtureNonGenericProviderCount() == 181 &&
+                        ndkShims.fixtureGenericProviderCount() == 0
+                    ? "ALL_FIXTURE_IMPORTS_HAVE_TYPED_OR_FAIL_CLOSED_ADAPTERS"
+                    : "FIXTURE_IMPORT_ADAPTER_GAP";
             providers["fullNdkCandidateInventoryCount"] = static_cast<std::uint64_t>(
                 radek::compat_runtime::ndk_full_import_catalog::kProviderCount);
             providers["fullNdkRegisteredProviderCount"] = static_cast<std::uint64_t>(
@@ -334,10 +373,11 @@ Java_dev_radek_gameruntime_GameBootActivity_runGameBootAttempt(JNIEnv *env, jobj
                 std::to_string(radek::compat_runtime::compat_import_catalog::kGuestRuntimeAdapterProviderCount) +
                 "-name guest-runtime adapter catalog, and the " +
                 std::to_string(radek::compat_runtime::ndk_full_import_catalog::kProviderCount) +
-                "-name broad NDK candidate inventory. This is catalog registration, not API-semantic "
-                "completeness; generic bounded adapters remain for many NDK candidates. Guest adapter "
-                "catalog presence does not prove a per-image slot fixup. Actual bind/relocation results "
-                "and provider names appear separately under runtimeLinking.";
+                "-name broad NDK candidate inventory. All 181 same-name imports in this fixture resolve to a "
+                "non-generic signature-aware adapter or explicit fail-closed boundary; the separate 75-name "
+                "guest-adapter inventory has 73 names observed in the fixture. This is not API-semantic "
+                "completeness or proof of a per-image slot fixup. Generic bounded adapters remain for many broad "
+                "NDK candidates; actual bind/relocation results appear under runtimeLinking.";
             report["importProviders"] = std::move(providers);
         }
 

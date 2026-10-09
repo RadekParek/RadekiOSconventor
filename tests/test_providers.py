@@ -180,8 +180,8 @@ class ProviderTests(unittest.TestCase):
 
     def test_guest_runtime_adapter_catalog_is_explicit_and_matches_kotlin(self):
         """Non-same-name imports have catalogued guest adapters, not fake NDK hits."""
-        self.assertEqual(CONCRETE_DARWIN_COMPAT_IMPORT_COUNT, 73)
-        self.assertEqual(len(CONCRETE_DARWIN_COMPAT_PROVIDERS), 73)
+        self.assertEqual(CONCRETE_DARWIN_COMPAT_IMPORT_COUNT, 75)
+        self.assertEqual(len(CONCRETE_DARWIN_COMPAT_PROVIDERS), 75)
         kotlin = (ROOT / "app/src/main/java/dev/radek/conventor/CompatImportProviders.kt").read_text(
             encoding="utf-8"
         )
