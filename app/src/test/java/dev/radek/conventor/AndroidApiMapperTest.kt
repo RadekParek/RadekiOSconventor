@@ -261,14 +261,16 @@ class AndroidApiMapperTest {
         assertEquals(5, mapping.getInt("compilerRuntimeCandidateCount"))
         assertEquals(0, mapping.getInt("unmappedSymbolCount"))
         assertEquals(100, mapping.getInt("classificationCoveragePercent"))
-        // divdi3 now has a concrete, host-tested compatibility body; the
-        // remaining compiler-runtime/unwind names stay honest toolchain
-        // candidates rather than being relabelled as direct NDK exports.
+        // ___divdi3 has a separate host-tested compatibility body, but it is
+        // also in the guest-adapter catalog. Keep the per-import classification
+        // on the guest runtime path; neither record is a direct NDK link.
         assertEquals(4, decoded.count { it.getString("classification") == "COMPILER_RUNTIME_CANDIDATE" })
-        assertEquals(1, decoded.count { it.getString("classification") == "IMPLEMENTED_API_REPLACEMENT_AVAILABLE" })
+        assertEquals(0, decoded.count { it.getString("classification") == "IMPLEMENTED_API_REPLACEMENT_AVAILABLE" })
+        assertEquals(1, mapping.getInt("implementedApiReplacementCount"))
         val divdi3 = decoded.single { it.getString("sourceSymbol") == "___divdi3" }
-        assertEquals("IMPLEMENTED_API_REPLACEMENT_AVAILABLE", divdi3.getString("classification"))
-        assertEquals("radek_compat___divdi3", divdi3.getString("targetSymbol"))
+        assertEquals("GUEST_RUNTIME_ADAPTER_CATALOGUED", divdi3.getString("classification"))
+        assertEquals("compiler-runtime.divdi3", divdi3.getString("targetSymbol"))
+        assertTrue(divdi3.getJSONObject("evidence").getBoolean("hostTestedImplementation"))
         assertTrue(decoded.all { !it.getBoolean("linkedOrRewritten") && !it.getBoolean("codeGenerated") })
         assertTrue(decoded.any { it.getString("reason").contains("does not provide a drop-in libgcc_s.so") })
     }
