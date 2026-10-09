@@ -84,6 +84,7 @@ if(RADEK_BUILD_COMPAT_RUNTIME)
         src/compat_runtime/gles_shims.cpp
         src/compat_runtime/darwin_compat_shims.cpp
         src/compat_runtime/app_lifecycle.cpp
+        src/compat_runtime/openal_backend.cpp
     )
     if(RADEK_FETCH_UNICORN)
         include(FetchContent)
@@ -132,8 +133,9 @@ if(RADEK_BUILD_COMPAT_RUNTIME)
         target_include_directories(compat_runtime_v1 PRIVATE include)
         target_compile_options(compat_runtime_v1 PRIVATE -Wall -Wextra -Werror)
         # libandroid provides ANativeWindow_fromSurface, used to attach the
-        # launcher's Surface as the guest's EGL drawable.
-        target_link_libraries(compat_runtime_v1 PRIVATE compat_runtime_core android)
+        # launcher's Surface as the guest's EGL drawable; libaaudio backs the
+        # OpenAL mixer's output stream (minSdk 26 ships AAudio).
+        target_link_libraries(compat_runtime_v1 PRIVATE compat_runtime_core android aaudio)
         target_link_options(compat_runtime_v1 PRIVATE "-Wl,-z,max-page-size=16384")
     else()
         # Host boot-attempt probe: loads one 32-bit ARM Mach-O, binds traps,
@@ -171,6 +173,12 @@ if(RADEK_BUILD_COMPAT_RUNTIME)
         target_compile_options(compat-runtime-darwin-compat-tests PRIVATE -Wall -Wextra -Werror)
         target_link_libraries(compat-runtime-darwin-compat-tests PRIVATE compat_runtime_core)
         add_test(NAME compat-runtime-darwin-compat COMMAND compat-runtime-darwin-compat-tests)
+
+        add_executable(compat-runtime-openal-tests tests/openal_backend.cpp)
+        target_include_directories(compat-runtime-openal-tests PRIVATE include)
+        target_compile_options(compat-runtime-openal-tests PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(compat-runtime-openal-tests PRIVATE compat_runtime_core)
+        add_test(NAME compat-runtime-openal COMMAND compat-runtime-openal-tests)
 
         add_executable(compat-runtime-cxxabi-tests tests/compat_runtime_cxxabi.cpp)
         target_include_directories(compat-runtime-cxxabi-tests PRIVATE include)

@@ -76,9 +76,40 @@ new package rule. Verified by Python simulation of the exact Kotlin logic
   `linkedApiReplacements` now carry the device-verified count (was hardcoded 0),
   and the `apiImplementationGeneration` status/message reflect it.
 
+### G. OpenAL → real audio: software mixer + AAudio output **[T for mixer / R for AAudio]**
+* New files: `native/include/compat_runtime/openal_backend.hpp`,
+  `native/src/compat_runtime/openal_backend.cpp` — `openal::Engine`, a
+  platform-free software mixer: `alBufferData` now copies the guest's PCM into
+  host memory (8-bit unsigned / 16-bit signed decode, mono→stereo duplication,
+  linear resample to 44100 Hz, per-buffer normalization cache keyed by a
+  generation counter so re-uploaded buffers re-decode). Sources keep a queue,
+  cursor, and per-buffer position; `play`/`stop`/`queue`/`unqueue`/`AL_LOOPING`/
+  `AL_GAIN`/`AL_BUFFERS_PROCESSED`/`AL_SOURCE_STATE` all delegate to the engine.
+  Looping buffers auto-replay and never count as processed (they cannot be
+  unqueued); deleted/missing buffers are skipped instead of wedging playback.
+* Device sink: on Android (`#ifdef __ANDROID__`) `openDevice()` builds an AAudio
+  output stream (44100 Hz, stereo, PCM_I16, LOW_LATENCY) whose data callback
+  calls `render()` and clamps the float mix to int16; `compat_runtime_v1` now
+  links `aaudio`. Off-device `openDevice()` returns false and `render()` is
+  still drivable directly, which is how the tests exercise the mixer.
+* `darwin_compat_shims.cpp`: the 19 OpenAL handlers are no longer state-only.
+  `alcOpenDevice`/`alcMakeContextCurrent` open the output stream (idempotent),
+  `alSourcePlay/Stop` start/stop mixing, `alGetSourcei` answers
+  `AL_BUFFERS_PROCESSED` and `AL_SOURCE_STATE` from real playback position.
+* New test `native/tests/openal_backend.cpp` (9 checks): audible stereo output
+  from captured PCM, gain-zero silence, stop→silence, processed/unqueue
+  bookkeeping, looping continuity, stereo channel separation, 8-bit decode,
+  half-rate resample stretching, missing-buffer skip. Suite is now **14/14**.
+* Angry Birds boot probe re-verified after the rewiring: loader LOADED,
+  runtime linking COMPLETE, **254/254 imports resolved, 0 unresolved, 0
+  trapped**, 578 fixup slots relinked (`/tmp/ab_boot.json`).
+
 ### What is NOT yet done / not verifiable here
 * On-device confirmation that Angry Birds now presents frames (needs hardware).
-* OpenAL → AAudio and AudioToolbox backends (real sound) — still state-only.
+* On-device audio confirmation — the AAudio sink path compiles only with the NDK
+  (not present in this sandbox); the mixer itself is unit-tested host-side.
+* AudioToolbox session → AAudio stream mapping beyond the existing no-error
+  lifecycle handlers.
 * Bioshock's 180 stub-handler bodies (needs its symbol list / IPA).
 * Compiler-rt/sjlLj bodies beyond the existing adapters.
 * The Unicorn CPU backend does not build in this sandbox (its own CMake fetch
