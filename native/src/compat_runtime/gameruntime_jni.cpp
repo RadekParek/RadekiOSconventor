@@ -140,8 +140,8 @@ Java_dev_radek_gameruntime_GameBootActivity_getRendererProgress(JNIEnv *env, jcl
     report["driverEglLoaded"] = progress.driverEglLoaded;
     report["drawableReady"] = progress.drawableReady;
     report["presentingToWindow"] = progress.presentingToWindow;
-    report["drawableWidth"] = progress.drawableWidth;
-    report["drawableHeight"] = progress.drawableHeight;
+    report["drawableWidth"] = static_cast<std::uint64_t>(progress.drawableWidth);
+    report["drawableHeight"] = static_cast<std::uint64_t>(progress.drawableHeight);
     report["guestCallsObserved"] = progress.guestCallsObserved;
     report["forwardedCalls"] = progress.forwardedCalls;
     report["refusedCalls"] = progress.refusedCalls;
