@@ -19,12 +19,15 @@ android {
                     "-DRADEK_BUILD_COMPAT_RUNTIME=ON",
                     "-DRADEK_FETCH_UNICORN=ON",
                 )
-                // Reuse the pinned Unicorn checkout prepared by the host build
-                // (or a previous CI run) instead of cloning it a second time.
+                // Reuse the one cached pinned Unicorn checkout for both CMake
+                // consumers. FETCHCONTENT_SOURCE_DIR_UNICORN bypasses
+                // FetchContent's populate step entirely (no download, no
+                // per-consumer subbuild), so the host Makefiles build and this
+                // Ninja/NDK build cannot collide in a shared base directory.
                 // Local builds without the env var keep the default behavior.
-                System.getenv("RADEK_FETCHCONTENT_BASE_DIR")?.let { baseDir ->
-                    if (baseDir.isNotEmpty()) {
-                        arguments += listOf("-DFETCHCONTENT_BASE_DIR=$baseDir")
+                System.getenv("RADEK_UNICORN_SOURCE_DIR")?.let { srcDir ->
+                    if (srcDir.isNotEmpty()) {
+                        arguments += listOf("-DFETCHCONTENT_SOURCE_DIR_UNICORN=$srcDir")
                     }
                 }
                 // Opt-in compiler cache for CI and repeat local builds; without

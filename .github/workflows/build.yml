@@ -27,16 +27,33 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      # Unicorn is fetched by two CMake consumers (the host compat-runtime
-      # tests and the Gradle NDK build of compat-runtime-v1). Both point
-      # FETCHCONTENT_BASE_DIR at this shared directory, so the pinned checkout
-      # happens once and is then reused from cache: on a hit neither consumer
-      # talks to the network or re-clones the ~full unicorn history.
+      # Unicorn is consumed by two CMake builds (the host compat-runtime tests
+      # and the Gradle NDK build of compat-runtime-v1). The pinned checkout is
+      # prepared once into this cached directory and both consumers are pointed
+      # at it through FETCHCONTENT_SOURCE_DIR_UNICORN, which bypasses
+      # FetchContent's populate subbuild entirely. That matters: a shared
+      # FETCHCONTENT_BASE_DIR stores a per-populate CMakeCache, and a second
+      # consumer with a different generator (the NDK build uses Ninja, the host
+      # build Makefiles) fails with "generator does not match". On a cache hit
+      # neither consumer clones the ~full unicorn history.
       - name: Cache pinned Unicorn sources
         uses: actions/cache@v6
         with:
           path: .local/unicorn-fetch
           key: radek-unicorn-fetch-v1-8028ec436f2d9376525352dd38ed9ed6b9f6be10
+      - name: Prepare pinned Unicorn sources
+        run: |
+          set -euo pipefail
+          src=.local/unicorn-fetch/unicorn-src
+          pin=8028ec436f2d9376525352dd38ed9ed6b9f6be10
+          if [ -d "$src/.git" ] && [ "$(git -C "$src" rev-parse HEAD 2>/dev/null)" = "$pin" ]; then
+            echo "Pinned Unicorn checkout already present at the pinned commit."
+          else
+            rm -rf .local/unicorn-fetch
+            mkdir -p .local/unicorn-fetch
+            git clone https://github.com/unicorn-engine/unicorn.git "$src"
+            git -C "$src" checkout --detach "$pin"
+          fi
       # Reuse the pinned SDK components between runs. On a hit nothing is
       # downloaded; sdkmanager below then finds every package already installed
       # and returns immediately. Keyed by the exact pinned versions, so a version
@@ -93,10 +110,10 @@ jobs:
           if [ "${RADEK_USE_CCACHE:-0}" = "1" ]; then
             launcher="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
           fi
-          # Share the cached pinned Unicorn checkout with the Gradle NDK build.
-          echo "RADEK_FETCHCONTENT_BASE_DIR=$PWD/.local/unicorn-fetch" >> "$GITHUB_ENV"
+          # Point both consumers at the one cached pinned Unicorn checkout.
+          echo "RADEK_UNICORN_SOURCE_DIR=$PWD/.local/unicorn-fetch/unicorn-src" >> "$GITHUB_ENV"
           cmake -S native -B .local/native-cmake -DRADEK_BUILD_COMPAT_RUNTIME=ON -DRADEK_FETCH_UNICORN=ON \
-            -DFETCHCONTENT_BASE_DIR="$PWD/.local/unicorn-fetch" $launcher
+            -DFETCHCONTENT_SOURCE_DIR_UNICORN="$PWD/.local/unicorn-fetch/unicorn-src" $launcher
           cmake --build .local/native-cmake --parallel "$(nproc)"
           ctest --test-dir .local/native-cmake --output-on-failure
       - name: Validate compat-runtime-v1 smoke database
