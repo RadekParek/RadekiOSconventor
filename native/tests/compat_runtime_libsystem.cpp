@@ -139,6 +139,69 @@ void testStringAdapters() {
     CHECK(harness.read(kDestination, 6) == std::string("ab\0\0\0\0", 6));
 }
 
+void testAppSandboxRootAndSpecificMounts() {
+    const std::filesystem::path root = "/tmp/radek-native-vfs-app-sandbox-test";
+    const auto documents = root / "Documents";
+    const auto library = root / "Library";
+    const auto temporary = root / "tmp";
+    const auto bundle = root / "bundle";
+    const auto obb = root / "obb";
+    std::filesystem::remove_all(root);
+    CHECK(std::filesystem::create_directories(documents));
+    CHECK(std::filesystem::create_directories(library));
+    CHECK(std::filesystem::create_directories(temporary));
+    CHECK(std::filesystem::create_directories(bundle));
+    CHECK(std::filesystem::create_directories(obb));
+
+    VirtualFileSystem files;
+    files.mount("/", root.string(), true);
+    files.mount("/Documents", documents.string(), true);
+    files.mount("/Library", library.string(), true);
+    files.mount("/tmp", temporary.string(), true);
+    files.mount(bundleGuestPath(), bundle.string(), false);
+    files.mount("/Android/obb", obb.string(), false);
+
+    std::string hostPath;
+    bool writable = false;
+    CHECK(files.resolve("/", hostPath, writable));
+    CHECK(std::filesystem::path(hostPath) == root);
+    CHECK(writable);
+    CHECK(files.resolve("/profile.dat", hostPath, writable));
+    CHECK(std::filesystem::path(hostPath) == root / "profile.dat");
+    CHECK(writable);
+    CHECK(files.resolve("/Documents/settings.dat", hostPath, writable));
+    CHECK(std::filesystem::path(hostPath) == documents / "settings.dat");
+    CHECK(writable);
+    CHECK(files.resolve("/Library/preferences.plist", hostPath, writable));
+    CHECK(std::filesystem::path(hostPath) == library / "preferences.plist");
+    CHECK(writable);
+    CHECK(files.resolve("/tmp/session.tmp", hostPath, writable));
+    CHECK(std::filesystem::path(hostPath) == temporary / "session.tmp");
+    CHECK(writable);
+    CHECK(files.resolve("/tmpfile", hostPath, writable));
+    CHECK(std::filesystem::path(hostPath) == root / "tmpfile");
+    CHECK(writable);
+    CHECK(files.resolve("/Android/obb/main.1.com.example.obb", hostPath, writable));
+    CHECK(std::filesystem::path(hostPath) == obb / "main.1.com.example.obb");
+    CHECK(!writable);
+    std::string obbWriteReason;
+    CHECK(files.open("/Android/obb/new.obb", "wb", obbWriteReason) == 0);
+    CHECK(obbWriteReason.find("read-only") != std::string::npos);
+    CHECK(files.resolve(std::string(bundleGuestPath()) + "/level.lua", hostPath, writable));
+    CHECK(std::filesystem::path(hostPath) == bundle / "level.lua");
+    CHECK(!writable);
+    CHECK(!files.resolve("/Documents/../escape.dat", hostPath, writable));
+    CHECK(!files.resolve("/../escape.dat", hostPath, writable));
+
+    const auto handle = files.open("/profile.dat", "wb", hostPath);
+    CHECK(handle != 0);
+    const std::string payload = "sandbox-root";
+    CHECK(files.write(handle, payload.data(), payload.size(), hostPath) == payload.size());
+    CHECK(files.close(handle));
+    CHECK(std::filesystem::file_size(root / "profile.dat") == payload.size());
+    std::filesystem::remove_all(root);
+}
+
 void testSyntheticBundleFiles() {
     const std::filesystem::path root = "/tmp/radek-native-vfs-synthetic-test";
     std::filesystem::remove_all(root);
@@ -274,6 +337,7 @@ int main() {
     try {
         testMemoryAdapters();
         testStringAdapters();
+        testAppSandboxRootAndSpecificMounts();
         testSyntheticBundleFiles();
         testGuestHeapAllocator();
         testCxxOperatorAllocators();

@@ -14,6 +14,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.Surface;
 import android.view.SurfaceHolder;
@@ -32,42 +33,57 @@ import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.zip.CRC32;
 import java.util.zip.DataFormatException;
 import java.util.zip.Inflater;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 /**
  * Launcher of a game-runtime boot-attempt APK (contract "game-runtime-v1").
  *
  * <p>The APK embeds one authorized IPA main executable and its bundle assets.
- * This activity runs in fullscreen and plays the recovered bundle splash screen
- * (supporting standard PNG/JPEG, Apple CgBI PNGs, and sprite-sheet descriptors
- * such as SPLASHES.png + SPLASHES.dat) as an automatically advancing boot
- * animation while running the real guest boot through libcompat_runtime_v1.so.
- * The splash never needs a touch: it advances on its own while the guest boots
- * and stops on a stable frame when the boot attempt ends. The device runner has
- * no arbitrary instruction or wall-clock budget, so a game loop is allowed to
- * remain alive for gameplay; it stops only for a real runtime boundary or setup
- * failure. When that happens, the fullscreen diagnostic panel stays open with
- * the exact stop reason instead of crashing.
+ * This activity runs in fullscreen and plays up to three recovered bundle splash
+ * frames (standard PNG/JPEG, Apple CgBI PNGs, or sprite-sheet descriptors such
+ * as SPLASHES.png + SPLASHES.dat) as an automatically advancing boot sequence.
+ * It then starts either the compatibility guest-CPU runtime or a separately
+ * verified translated portable-C runner. The compatibility runtime has no
+ * artificial instruction or wall-clock budget and stops at a real runtime
+ * boundary or setup failure. The translated runner is not connected to Android
+ * EGL/GLES, so it makes no pixel or gameplay claim. A completed attempt leaves
+ * the fullscreen diagnostic panel open with the reported boundary instead of
+ * crashing.
  */
 public final class GameBootActivity extends Activity {
     private static final String RUNTIME_LIBRARY = "compat_runtime_v1";
     private static final String EXECUTABLE_ASSET = "gameboot/main-executable.bin";
     private static final String METADATA_ASSET = "gameboot.json";
+    private static final String TRANSLATED_PAYLOAD_ASSET = "translated-game-payload.zip";
+    private static final String TRANSLATED_PAYLOAD_CONTRACT = "translated-game-payload-v1";
+    private static final String TRANSLATED_ENTRY_SYMBOL = "Java_dev_radek_gameruntime_GameBootActivity_runTranslatedGame";
+    private static final String TRANSLATED_ABI = "arm64-v8a";
     private static final long MAX_EXECUTABLE_BYTES = 256L * 1024L * 1024L;
     private static final long MAX_METADATA_BYTES = 4L * 1024L * 1024L;
+    private static final long MAX_TRANSLATED_PAYLOAD_BYTES = 512L * 1024L * 1024L;
+    private static final long MAX_TRANSLATED_MEMORY_IMAGE_BYTES = 512L * 1024L * 1024L;
+    private static final long MAX_TRANSLATED_MANIFEST_BYTES = 1024L * 1024L;
     /** Asset directory that carries the guest's own bundle payload. */
     private static final String PAYLOAD_ASSET_ROOT = "bundle";
     private static final String PAYLOAD_MARKER_PREFIX = ".radek-payload-";
@@ -80,17 +96,28 @@ public final class GameBootActivity extends Activity {
     private static final int DEFAULT_VIEWPORT_HEIGHT = 320;
     /** Automatic boot-animation interval between recovered splash frames. */
     private static final long SPLASH_FRAME_INTERVAL_MS = 900L;
+    private static final int MAX_SPLASH_FRAMES = 3;
+    private static final long MAX_PERSISTENT_LOG_BYTES = 2L * 1024L * 1024L;
+    private static final long MAX_RUNTIME_REPORT_BYTES = 16L * 1024L * 1024L;
+    private static final String LOG_TAG = "RadekGameBoot";
     private static final byte[] PNG_SIGNATURE = new byte[] {
         (byte) 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
     };
     private static final byte[] CGBI_CHUNK_TYPE = new byte[] { 0x43, 0x67, 0x42, 0x49 };
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final CountDownLatch splashSequenceFinished = new CountDownLatch(1);
+    private final CountDownLatch gameSurfaceReady = new CountDownLatch(1);
+    private final Object persistentLogLock = new Object();
+    private File appDataRoot;
+    private File appObbDirectory;
+    private File persistentLogFile;
     private TextView titleView;
     private TextView logView;
     private ScrollView scroller;
     private ImageView splashImageView;
     private TextView splashCaptionView;
+    private TextView rendererStatusView;
     private SurfaceView gameSurfaceView;
     // Surface callbacks can run before System.loadLibrary completes. Retain the
     // latest holder surface so the runtime gets the real window as soon as its
@@ -100,33 +127,33 @@ public final class GameBootActivity extends Activity {
     private final List<SplashFrame> activeSplashFrames = new ArrayList<>();
     private int currentSplashIndex = 0;
     private boolean splashAnimationRunning = false;
-    private boolean bootFinished = false;
+    private boolean splashSequenceComplete = false;
+    private volatile boolean bootFinished = false;
     private volatile boolean destroyed = false;
+    private volatile boolean translatedPortableCMode = false;
 
     private final Runnable splashAdvance = new Runnable() {
         @Override
         public void run() {
-            if (destroyed || bootFinished || activeSplashFrames.size() <= 1) {
-                splashAnimationRunning = false;
+            if (destroyed || bootFinished) {
+                finishSplashSequenceOnMainThread();
                 return;
             }
-            // Every recovered splash frame is shown once and the sequence then
-            // stays on the last frame: the boot screen never cycles back.
-            if (currentSplashIndex >= activeSplashFrames.size() - 1) {
-                splashAnimationRunning = false;
-                return;
-            }
-            showSplashFrame(currentSplashIndex + 1);
-            if (currentSplashIndex < activeSplashFrames.size() - 1) {
+            // Give every selected frame one full interval, including the final
+            // frame, then reveal the game surface and release the boot worker.
+            if (currentSplashIndex + 1 < activeSplashFrames.size()) {
+                showSplashFrame(currentSplashIndex + 1);
                 mainHandler.postDelayed(this, SPLASH_FRAME_INTERVAL_MS);
             } else {
-                splashAnimationRunning = false;
+                finishSplashSequenceOnMainThread();
             }
         }
     };
 
     private static native String runGameBootAttempt(byte[] mainBinary, String payloadDirectory,
-            boolean authorizationConfirmed);
+            String appDataDirectory, String obbDirectory, boolean authorizationConfirmed);
+    private static native String runTranslatedGame(String memoryImagePath, String appDataDirectory,
+            String bundleDirectory, String obbDirectory);
 
     /**
      * Hands the on-screen surface to the runtime so the guest's EAGL drawable can
@@ -134,9 +161,76 @@ public final class GameBootActivity extends Activity {
      * runtime is absent in unit tests, so publishing is guarded.
      */
     private static native void setGameSurface(Surface surface);
+    private static native String getRendererProgress();
+
+    private final Runnable rendererProgressPoll = new Runnable() {
+        @Override
+        public void run() {
+            if (destroyed || bootFinished || rendererStatusView == null) return;
+            String message;
+            try {
+                JSONObject progress = new JSONObject(getRendererProgress());
+                boolean glesLoaded = progress.optBoolean("driverGlesLoaded", false);
+                boolean eglLoaded = progress.optBoolean("driverEglLoaded", false);
+                boolean drawableReady = progress.optBoolean("drawableReady", false);
+                boolean windowSurface = progress.optBoolean("presentingToWindow", false);
+                long guestCalls = progress.optLong("guestCallsObserved", 0);
+                long forwardedCalls = progress.optLong("forwardedCalls", 0);
+                long refusedCalls = progress.optLong("refusedCalls", 0);
+                long frames = progress.optLong("framesPresented", 0);
+                String counters = "GL calls " + guestCalls + " · driver calls " + forwardedCalls
+                        + " · refused " + refusedCalls;
+                if (!glesLoaded || !eglLoaded) {
+                    message = "Renderer not ready · GLES " + (glesLoaded ? "loaded" : "missing")
+                            + " · EGL " + (eglLoaded ? "loaded" : "missing")
+                            + " · no frame verified · " + counters;
+                } else if (!drawableReady) {
+                    message = "Renderer waiting · EGL/GLES loaded, drawable not ready"
+                            + " · no frame verified · " + counters;
+                } else if (frames == 0) {
+                    message = "Renderer waiting · no successful EGL swap yet · " + counters;
+                } else if (!windowSurface) {
+                    message = "Renderer is offscreen · " + frames
+                            + " EGL swap(s) to a pbuffer, not this screen · image/gameplay unverified";
+                } else {
+                    message = "Renderer · " + frames
+                            + " EGL frame(s) submitted to the Android surface · image/gameplay unverified";
+                }
+            } catch (Throwable error) {
+                message = "Live EGL/GLES status unavailable · " + error.getClass().getSimpleName();
+            }
+            rendererStatusView.setText(message);
+            mainHandler.postDelayed(this, 1000L);
+        }
+    };
+
+    private void showTranslatedRendererStatus() {
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (destroyed || rendererStatusView == null) return;
+                rendererStatusView.setVisibility(View.VISIBLE);
+                rendererStatusView.setText(
+                        "Translated portable-C runtime active · Android EGL/GLES renderer is not connected · pixels/gameplay unverified");
+            }
+        });
+    }
+
+    private void startRendererProgressPolling() {
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (destroyed || bootFinished || rendererStatusView == null) return;
+                rendererStatusView.setVisibility(View.VISIBLE);
+                mainHandler.removeCallbacks(rendererProgressPoll);
+                mainHandler.post(rendererProgressPoll);
+            }
+        });
+    }
 
     private void publishGameSurface(Surface surface) {
         latestGameSurface = surface;
+        if (surface != null && surface.isValid()) gameSurfaceReady.countDown();
         try {
             setGameSurface(surface);
         } catch (Throwable ignored) {
@@ -205,7 +299,134 @@ public final class GameBootActivity extends Activity {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
+    private void initializeAppSpecificStorage() {
+        File root = new File(getFilesDir(), "game-data");
+        try {
+            mkdirsOrThrow(root);
+            for (String relative : new String[] {
+                    "tmp", "Documents", "Library", "Library/Caches", "Library/Application Support",
+                    "Library/Autosave Information", "diagnostics"}) {
+                mkdirsOrThrow(new File(root, relative));
+            }
+        } catch (IOException error) {
+            Log.e(LOG_TAG, "Could not create internal app-private game-data directories", error);
+        }
+        appDataRoot = root;
+        persistentLogFile = new File(new File(root, "diagnostics"), "boot.log");
+        try {
+            appObbDirectory = getObbDir();
+            if (appObbDirectory != null) mkdirsOrThrow(appObbDirectory);
+        } catch (Throwable error) {
+            appObbDirectory = null;
+            Log.w(LOG_TAG, "App-specific OBB directory is unavailable", error);
+        }
+        writeStorageManifest();
+        appendLine("App-private game-data directory: " + root.getAbsolutePath());
+        appendLine("Persistent boot log: " + persistentLogFile.getAbsolutePath());
+        appendLine(appObbDirectory == null
+                ? "App-specific OBB directory unavailable; current game assets are embedded in the APK."
+                : "App-specific OBB directory: " + appObbDirectory.getAbsolutePath()
+                        + " (created; optional read-only mount; no expansion OBB is required for this packaged bundle).");
+    }
+
+    private void writeStorageManifest() {
+        try {
+            JSONArray guestMounts = new JSONArray()
+                    .put(new JSONObject().put("guestPath", "/")
+                            .put("hostPath", appDataRoot != null
+                                    ? appDataRoot.getAbsolutePath() : "")
+                            .put("writable", true))
+                    .put(new JSONObject().put("guestPath", "/Documents")
+                            .put("hostPath", appDataRoot != null
+                                    ? new File(appDataRoot, "Documents").getAbsolutePath() : "")
+                            .put("writable", true))
+                    .put(new JSONObject().put("guestPath", "/Library")
+                            .put("hostPath", appDataRoot != null
+                                    ? new File(appDataRoot, "Library").getAbsolutePath() : "")
+                            .put("writable", true))
+                    .put(new JSONObject().put("guestPath", "/tmp")
+                            .put("hostPath", appDataRoot != null
+                                    ? new File(appDataRoot, "tmp").getAbsolutePath() : "")
+                            .put("writable", true))
+                    .put(new JSONObject().put("guestPath", "/radek-bundle/App.app")
+                            .put("hostPath", new File(new File(getFilesDir(), "bundle"), "App.app").getAbsolutePath())
+                            .put("writable", false));
+            if (appObbDirectory != null) {
+                guestMounts.put(new JSONObject().put("guestPath", "/Android/obb")
+                        .put("hostPath", appObbDirectory.getAbsolutePath())
+                        .put("writable", false));
+            }
+            JSONObject storage = new JSONObject()
+                    .put("appDataDirectory", appDataRoot != null
+                            ? appDataRoot.getAbsolutePath() : "")
+                    .put("obbDirectory", appObbDirectory != null
+                            ? appObbDirectory.getAbsolutePath() : JSONObject.NULL)
+                    .put("source", "Context.getFilesDir()/game-data (internal app-private storage)")
+                    .put("appDataDirectoryExists", appDataRoot != null && appDataRoot.isDirectory())
+                    .put("temporaryDirectory", "/tmp")
+                    .put("temporaryDirectoryExists", appDataRoot != null
+                            && new File(appDataRoot, "tmp").isDirectory())
+                    .put("optionalObbMount", new JSONObject()
+                            .put("guestPath", "/Android/obb")
+                            .put("hostPath", appObbDirectory != null
+                                    ? appObbDirectory.getAbsolutePath() : JSONObject.NULL)
+                            .put("available", appObbDirectory != null && appObbDirectory.isDirectory())
+                            .put("writable", false)
+                            .put("required", false))
+                    .put("directories", new JSONArray()
+                            .put("Documents").put("Library").put("Library/Caches")
+                            .put("tmp").put("diagnostics"))
+                    .put("guestMounts", guestMounts)
+                    .put("mountResolution", "longest guest-path prefix wins; / maps to the writable app-private root")
+                    .put("bundleAssetsInApk", true)
+                    .put("expansionObbRequired", false);
+            File target = new File(new File(appDataRoot, "diagnostics"), "storage.json");
+            try (FileOutputStream output = new FileOutputStream(target, false)) {
+                output.write(storage.toString(2).getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (Throwable error) {
+            Log.w(LOG_TAG, "Could not persist the game storage manifest", error);
+        }
+    }
+
+    private void persistLogLine(String line) {
+        File target = persistentLogFile;
+        if (target == null) return;
+        synchronized (persistentLogLock) {
+            try {
+                if (target.length() > MAX_PERSISTENT_LOG_BYTES) {
+                    File previous = new File(target.getParentFile(), "boot.log.1");
+                    if (previous.exists()) previous.delete();
+                    if (target.exists()) target.renameTo(previous);
+                }
+                try (FileOutputStream output = new FileOutputStream(target, true)) {
+                    String record = System.currentTimeMillis() + " " + line + "\n";
+                    output.write(record.getBytes(StandardCharsets.UTF_8));
+                }
+            } catch (IOException error) {
+                Log.w(LOG_TAG, "Could not append the persistent boot log", error);
+            }
+        }
+    }
+
+    private void persistRuntimeReport(String reportText) {
+        if (reportText == null || reportText.length() > MAX_RUNTIME_REPORT_BYTES) {
+            appendLine("Runtime report was not saved because it exceeded the report-size limit.");
+            return;
+        }
+        if (appDataRoot == null) return;
+        File target = new File(new File(appDataRoot, "diagnostics"), "runtime-report.json");
+        try (FileOutputStream output = new FileOutputStream(target, false)) {
+            output.write(reportText.getBytes(StandardCharsets.UTF_8));
+            appendLine("Detailed runtime report saved: " + target.getAbsolutePath());
+        } catch (IOException error) {
+            appendLine("Runtime report could not be saved: " + error);
+        }
+    }
+
     private void appendLine(final String line) {
+        Log.i(LOG_TAG, line);
+        persistLogLine(line);
         mainHandler.post(new Runnable() {
             @Override
             public void run() {
@@ -232,12 +453,17 @@ public final class GameBootActivity extends Activity {
      */
     private void showTerminalState(final String title, final String detail) {
         bootFinished = true;
+        splashSequenceFinished.countDown();
+        gameSurfaceReady.countDown();
         mainHandler.post(new Runnable() {
             @Override
             public void run() {
                 if (destroyed || titleView == null || logView == null) return;
                 splashAnimationRunning = false;
+                splashSequenceComplete = true;
                 mainHandler.removeCallbacks(splashAdvance);
+                mainHandler.removeCallbacks(rendererProgressPoll);
+                if (rendererStatusView != null) rendererStatusView.setVisibility(View.GONE);
                 // The attempt is over: turn the device back to portrait and show
                 // the diagnostics the guest produced.
                 setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
@@ -287,26 +513,282 @@ public final class GameBootActivity extends Activity {
         }
     }
 
+    private boolean assetExists(String name) {
+        try (InputStream input = getAssets().open(name)) {
+            return input != null;
+        } catch (IOException missing) {
+            return false;
+        }
+    }
+
+    private File extractTranslatedMemoryImage(JSONObject gameMetadata) throws Exception {
+        JSONObject translated = gameMetadata.optJSONObject("translatedPortableC");
+        if (translated == null) throw new IOException("translated portable-C metadata is missing");
+        JSONObject executable = gameMetadata.optJSONObject("executable");
+        String executableSha = executable != null ? executable.optString("sha256", "") : "";
+        if (!executableSha.matches("[0-9a-f]{64}") ||
+                !executableSha.equals(translated.optString("sourceExecutableSha256")))
+            throw new IOException("translated payload is not bound to the packaged ARM executable");
+        if (!translated.optString("contract").equals(TRANSLATED_PAYLOAD_CONTRACT) ||
+                !translated.optString("targetAbi").equals(TRANSLATED_ABI) ||
+                !translated.optString("entryPointSymbol").equals(TRANSLATED_ENTRY_SYMBOL) ||
+                !translated.optBoolean("architectureVerified", false) ||
+                !translated.optBoolean("dependenciesVerified", false) ||
+                !translated.optBoolean("exportsVerified", false) ||
+                !translated.optBoolean("translationEntryPointVerified", false) ||
+                !translated.optBoolean("allVerificationsPassed", false))
+            throw new IOException("translated runtime did not pass ARM64 ELF, dependency, export, and JNI-entry checks");
+        if (!TRANSLATED_PAYLOAD_ASSET.equals(translated.optString("payloadAssetName")) ||
+                !translated.optString("libraryApkPath").equals("lib/arm64-v8a/libtranslated_game.so"))
+            throw new IOException("translated runtime asset or native-library path is invalid");
+        boolean abiSupported = false;
+        for (String abi : Build.SUPPORTED_ABIS) {
+            if (TRANSLATED_ABI.equals(abi)) abiSupported = true;
+        }
+        if (!abiSupported) throw new IOException("this Android device does not support the packaged arm64-v8a translated runtime");
+
+        File runtimeRoot = new File(getNoBackupFilesDir(), "translated-runtime");
+        mkdirsOrThrow(runtimeRoot);
+        File archive = new File(runtimeRoot, TRANSLATED_PAYLOAD_ASSET);
+        String archiveSha = copyAssetToFile(
+                TRANSLATED_PAYLOAD_ASSET, archive, MAX_TRANSLATED_PAYLOAD_BYTES);
+        if (!archiveSha.equals(translated.optString("payloadSha256")) ||
+                archive.length() != translated.optLong("payloadBytes", -1L))
+            throw new IOException("translated payload archive does not match its signed APK metadata");
+
+        File memoryImage = new File(runtimeRoot, "rt_mem.bin");
+        File temporaryMemory = new File(runtimeRoot, "rt_mem.bin.tmp");
+        temporaryMemory.delete();
+        JSONObject payloadManifest = null;
+        long memoryBytes = -1L;
+        String memorySha;
+        MessageDigest memoryDigest = MessageDigest.getInstance("SHA-256");
+        Set<String> entries = new HashSet<>();
+        try (ZipInputStream zip = new ZipInputStream(new FileInputStream(archive))) {
+            ZipEntry entry;
+            while ((entry = zip.getNextEntry()) != null) {
+                if (entry.isDirectory() || !entries.add(entry.getName()))
+                    throw new IOException("translated payload contains a duplicate or directory ZIP entry");
+                if ("manifest.json".equals(entry.getName())) {
+                    byte[] bytes = readCurrentZipEntry(zip, MAX_TRANSLATED_MANIFEST_BYTES);
+                    payloadManifest = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+                } else if ("rt_mem.bin".equals(entry.getName())) {
+                    if (entry.getSize() > MAX_TRANSLATED_MEMORY_IMAGE_BYTES)
+                        throw new IOException("translated memory image exceeds the 512 MiB limit");
+                    memoryBytes = copyCurrentZipEntry(
+                            zip, temporaryMemory, memoryDigest, MAX_TRANSLATED_MEMORY_IMAGE_BYTES);
+                } else {
+                    throw new IOException("translated payload contains an unexpected entry: " + entry.getName());
+                }
+                zip.closeEntry();
+            }
+        } catch (Exception error) {
+            temporaryMemory.delete();
+            throw error;
+        }
+        if (!entries.contains("manifest.json") || !entries.contains("rt_mem.bin") || entries.size() != 2 ||
+                payloadManifest == null || memoryBytes < 0)
+            throw new IOException("translated payload archive is incomplete");
+        memorySha = digestHex(memoryDigest.digest());
+        JSONObject memoryManifest = payloadManifest.optJSONObject("memoryImage");
+        if (!TRANSLATED_PAYLOAD_CONTRACT.equals(payloadManifest.optString("contract")) ||
+                payloadManifest.optInt("schemaVersion", 0) != 1 ||
+                !TRANSLATED_ABI.equals(payloadManifest.optString("targetAbi")) ||
+                !TRANSLATED_ENTRY_SYMBOL.equals(payloadManifest.optString("entryPointSymbol")) ||
+                !executableSha.equals(payloadManifest.optString("sourceExecutableSha256")) ||
+                !translated.optString("translationReportSha256").equals(payloadManifest.optString("translationReportSha256")) ||
+                !translated.optString("androidLibrarySha256").equals(payloadManifest.optString("androidLibrarySha256")) ||
+                translated.optInt("translatedFunctionCount", -1) != payloadManifest.optInt("translatedFunctionCount", -2) ||
+                memoryManifest == null || !"rt_mem.bin".equals(memoryManifest.optString("name")) ||
+                memoryBytes != memoryManifest.optLong("sizeBytes", -2L) ||
+                !memorySha.equals(memoryManifest.optString("sha256"))) {
+            temporaryMemory.delete();
+            throw new IOException("translated memory-image manifest or provenance check failed");
+        }
+        if (memoryImage.exists() && !memoryImage.delete()) {
+            temporaryMemory.delete();
+            throw new IOException("previous translated memory image could not be replaced");
+        }
+        if (!temporaryMemory.renameTo(memoryImage)) {
+            temporaryMemory.delete();
+            throw new IOException("verified translated memory image could not be staged");
+        }
+        appendLine("Verified translated memory image: " + memoryBytes + " byte(s), SHA-256 " + memorySha + ".");
+        return memoryImage;
+    }
+
+    private String copyAssetToFile(String assetName, File target, long maximum) throws Exception {
+        File temporary = new File(target.getParentFile(), target.getName() + ".tmp");
+        temporary.delete();
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        long total = 0;
+        try (InputStream input = getAssets().open(assetName);
+             FileOutputStream output = new FileOutputStream(temporary)) {
+            byte[] buffer = new byte[64 * 1024];
+            int count;
+            while ((count = input.read(buffer)) >= 0) {
+                if (count == 0) continue;
+                total += count;
+                if (total > maximum) throw new IOException(assetName + " exceeds its size limit");
+                output.write(buffer, 0, count);
+                digest.update(buffer, 0, count);
+            }
+            output.getFD().sync();
+        } catch (Exception error) {
+            temporary.delete();
+            throw error;
+        }
+        if (total <= 0) {
+            temporary.delete();
+            throw new IOException(assetName + " is empty");
+        }
+        if (target.exists() && !target.delete()) {
+            temporary.delete();
+            throw new IOException("previous " + assetName + " could not be replaced");
+        }
+        if (!temporary.renameTo(target)) {
+            temporary.delete();
+            throw new IOException(assetName + " could not be staged");
+        }
+        return digestHex(digest.digest());
+    }
+
+    private static byte[] readCurrentZipEntry(ZipInputStream input, long maximum) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        byte[] buffer = new byte[8192];
+        long total = 0;
+        int count;
+        while ((count = input.read(buffer)) >= 0) {
+            if (count == 0) continue;
+            total += count;
+            if (total > maximum) throw new IOException("translated ZIP manifest exceeds its size limit");
+            output.write(buffer, 0, count);
+        }
+        return output.toByteArray();
+    }
+
+    private static long copyCurrentZipEntry(ZipInputStream input, File target,
+            MessageDigest digest, long maximum) throws IOException {
+        long total = 0;
+        try (FileOutputStream output = new FileOutputStream(target)) {
+            byte[] buffer = new byte[64 * 1024];
+            int count;
+            while ((count = input.read(buffer)) >= 0) {
+                if (count == 0) continue;
+                total += count;
+                if (total > maximum) throw new IOException("translated memory image exceeds its size limit");
+                output.write(buffer, 0, count);
+                digest.update(buffer, 0, count);
+            }
+            output.getFD().sync();
+        }
+        return total;
+    }
+
+    private static String digestHex(byte[] bytes) {
+        StringBuilder output = new StringBuilder(bytes.length * 2);
+        for (byte value : bytes) output.append(String.format(Locale.ROOT, "%02x", value & 0xff));
+        return output.toString();
+    }
+
     private String summarizeBoot(String reportText) {
         try {
             JSONObject report = new JSONObject(reportText);
             JSONObject loader = report.optJSONObject("loader");
             JSONObject execution = report.optJSONObject("execution");
+            JSONObject translatedRunner = report.optJSONObject("translatedPortableC");
             StringBuilder summary = new StringBuilder();
-            summary.append("Loader: ").append(loader != null ? loader.optString("status", "?") : "?");
-            if (loader != null) {
-                summary.append(" (").append(loader.optInt("resolvedSymbolCount", 0)).append(" resolved, ")
-                        .append(loader.optInt("trappedSymbolCount", 0)).append(" trapped, ")
-                        .append(loader.optInt("unresolvedSymbolCount", 0)).append(" unresolved)");
+            if (translatedRunner != null) {
+                summary.append("Translated portable-C guest boot: ")
+                        .append(translatedRunner.optString("status", "?"))
+                        .append(" · modinits completed: ")
+                        .append(translatedRunner.optInt("modinitsCompleted", 0))
+                        .append(" · main reached: ")
+                        .append(translatedRunner.optBoolean("mainReached", false) ? "yes" : "no")
+                        .append("\n");
+                JSONObject renderer = report.optJSONObject("renderer");
+                summary.append("Renderer: ")
+                        .append(renderer != null ? renderer.optString("status", "unknown") : "unknown")
+                        .append(" · pixels verified: no · gameplay verified: no\n");
+            } else {
+                summary.append("Loader: ").append(loader != null ? loader.optString("status", "?") : "?");
+                if (loader != null) {
+                    summary.append(" (").append(loader.optInt("resolvedSymbolCount", 0)).append(" resolved, ")
+                            .append(loader.optInt("trappedSymbolCount", 0)).append(" trapped, ")
+                            .append(loader.optInt("unresolvedSymbolCount", 0)).append(" unresolved)");
+                }
+                summary.append("\n");
             }
-            summary.append("\n");
+            JSONObject linking = report.optJSONObject("runtimeLinking");
+            if (linking == null && loader != null) linking = loader.optJSONObject("runtimeLinking");
+            if (linking != null) {
+                summary.append("Guest import-slot fixups (runtime, not static Android linking): ")
+                        .append(linking.optString("status", "?"))
+                        .append(" · ")
+                        .append(linking.optInt("guestImageImportSlotsRelinked", 0))
+                        .append(" provider slot(s) bound · ")
+                        .append(linking.optInt("guestImageImportSlotsTrapped", 0))
+                        .append(" trap slot(s) · ")
+                        .append(linking.optInt("guestImageImportSlotsUnresolved", 0))
+                        .append(" unresolved · static game callsites rewritten: ")
+                        .append(linking.optInt("translatedGuestCodeCallsitesRewritten", 0))
+                        .append("\n");
+            }
+            JSONObject importProviders = report.optJSONObject("importProviders");
+            if (importProviders != null) {
+                summary.append("Registered provider catalogs: ")
+                        .append(importProviders.optInt("sameNameNdkProviderCount", 0))
+                        .append(" strict same-name NDK/system names · ")
+                        .append(importProviders.optInt("guestRuntimeAdapterCatalogCount", 0))
+                        .append(" guest-adapter catalog names · ")
+                        .append(importProviders.optInt("fullNdkCandidateInventoryCount", 0))
+                        .append(" broad NDK candidates; fixture NDK imports: ")
+                        .append(importProviders.optInt("fixtureSameNameNdkNonGenericProviderCount", 0))
+                        .append("/")
+                        .append(importProviders.optInt("fixtureSameNameNdkImportCount", 0))
+                        .append(" non-generic adapters (")
+                        .append(importProviders.optInt("fixtureSameNameNdkGenericProviderCount", 0))
+                        .append(" generic); registration is not semantic completeness or a link result\n");
+            }
+            JSONObject compilerRuntime = report.optJSONObject("compilerRuntime");
+            if (compilerRuntime != null) {
+                summary.append("Compiler-runtime helpers: ")
+                        .append(compilerRuntime.optInt("registeredSymbolCount", 0))
+                        .append(" ARM32 callouts registered · ")
+                        .append(compilerRuntime.optLong("callsObserved", compilerRuntime.optLong("calls", 0)))
+                        .append(" calls observed; not a static compiler-rt/libunwind link\n");
+            }
+            JSONObject appStorage = report.optJSONObject("appStorage");
+            if (appStorage != null) {
+                summary.append("App-specific data: ")
+                        .append(appStorage.optString("appDataDirectory", "unavailable"))
+                        .append(" · expansion OBB required: ")
+                        .append(appStorage.optBoolean("expansionObbRequired", false) ? "yes" : "no")
+                        .append("\n");
+            }
+            JSONObject gles = report.optJSONObject("gles");
+            if (gles != null) {
+                summary.append("Renderer: drawable ")
+                        .append(gles.optBoolean("drawableReady", false) ? "ready" : "not ready")
+                        .append(" · ")
+                        .append(gles.optInt("drawableWidth", 0)).append("×")
+                        .append(gles.optInt("drawableHeight", 0))
+                        .append(" · frames presented: ")
+                        .append(gles.optInt("framesPresented", 0))
+                        .append("\n");
+            }
             long executed = 0;
             String executionStatus = "";
             if (execution != null) {
                 executed = execution.optLong("instructions", 0);
                 executionStatus = execution.optString("status", "");
-                summary.append("Executed ").append(executed).append(" guest instruction(s); ");
-                summary.append("status ").append(executionStatus.isEmpty() ? "?" : executionStatus).append("\n");
+                if (execution.has("instructions")) {
+                    summary.append("Executed ").append(executed).append(" guest instruction(s); ");
+                    summary.append("status ").append(executionStatus.isEmpty() ? "?" : executionStatus).append("\n");
+                } else {
+                    summary.append("Translated guest execution status: ")
+                            .append(executionStatus.isEmpty() ? "?" : executionStatus).append("\n");
+                }
             }
             // A JSON null must never be printed as the literal import name "null":
             // that produced a diagnostic claiming a stop at an unnamed import.
@@ -403,11 +885,13 @@ public final class GameBootActivity extends Activity {
     }
 
     /**
-     * Fullscreen boot screen. While the guest runs, only the game is visible:
-     * the recovered splash covers the display until the guest's own EGL frames
-     * take over, and the diagnostic panel stays hidden. No viewport tap is needed
-     * or accepted for frame cycling — the splash advances by itself, once per
-     * frame. When the attempt stops, {@link #showTerminalState} switches back to
+     * Fullscreen boot screen. The recovered splash covers the display during its
+     * short once-through sequence; afterward the Android surface is revealed and
+     * guest execution starts. A small renderer-status strip remains visible over
+     * the viewport while the larger diagnostic panel stays hidden.
+     * No viewport tap is needed or accepted for frame cycling — the splash
+     * advances by itself, once per frame. When the attempt stops,
+     * {@link #showTerminalState} switches back to
      * portrait and reveals the diagnostics.
      */
     private void applyFullscreenMode() {
@@ -450,28 +934,26 @@ public final class GameBootActivity extends Activity {
         // forced game APK look like a diagnostic shell.
         root.setBackgroundColor(Color.BLACK);
 
-        splashImageView = new ImageView(this);
-        splashImageView.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        splashImageView.setContentDescription("Recovered game splash screen");
-        root.addView(splashImageView, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER));
-
         // The guest's frames land on this surface (the runtime attaches the
-        // EAGL drawable to it through EGL). It sits above the splash so the game
-        // covers the boot screen as soon as it renders.
+        // EAGL drawable to it through EGL). It starts hidden and uses the normal
+        // SurfaceView layer so Android can composite the splash over it; putting
+        // the surface Z-order on top previously allowed its black buffer to hide
+        // every recovered launch frame.
         gameSurfaceView = new SurfaceView(this);
         gameSurfaceView.setBackgroundColor(Color.BLACK);
         gameSurfaceView.setContentDescription("Guest game surface");
-        gameSurfaceView.setZOrderOnTop(true);
+        gameSurfaceView.setVisibility(View.GONE);
         gameSurfaceView.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override
             public void surfaceCreated(SurfaceHolder holder) {
                 publishGameSurface(holder.getSurface());
+                appendLine("Android game surface created; waiting for splash sequence completion.");
             }
 
             @Override
             public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
                 publishGameSurface(holder.getSurface());
+                appendLine("Android game surface size: " + width + "×" + height + ".");
             }
 
             @Override
@@ -482,6 +964,28 @@ public final class GameBootActivity extends Activity {
         root.addView(gameSurfaceView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
                 Gravity.CENTER));
+
+        // This unobtrusive live status remains available over a blank viewport:
+        // it distinguishes missing EGL/Surface/swap activity from a game frame,
+        // without ending or time-limiting the unlimited guest run.
+        rendererStatusView = new TextView(this);
+        rendererStatusView.setTextColor(Color.WHITE);
+        rendererStatusView.setTextSize(11f);
+        rendererStatusView.setTypeface(Typeface.MONOSPACE);
+        rendererStatusView.setBackgroundColor(Color.argb(200, 0, 0, 0));
+        rendererStatusView.setPadding(dp(10), dp(7), dp(10), dp(7));
+        rendererStatusView.setText("Renderer status pending · gameplay not verified");
+        rendererStatusView.setVisibility(View.GONE);
+        FrameLayout.LayoutParams rendererStatusParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
+        rendererStatusParams.setMargins(dp(8), 0, dp(8), dp(8));
+        root.addView(rendererStatusView, rendererStatusParams);
+
+        splashImageView = new ImageView(this);
+        splashImageView.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        splashImageView.setContentDescription("Recovered game splash screen");
+        root.addView(splashImageView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER));
 
         LinearLayout overlay = new LinearLayout(this);
         overlay.setOrientation(LinearLayout.VERTICAL);
@@ -541,13 +1045,12 @@ public final class GameBootActivity extends Activity {
         root.addView(overlay, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         overlayView = overlay;
-        // While the guest runs the user sees only the game; the diagnostics are
-        // revealed by showTerminalState() once the attempt stops.
+        // While the guest runs the renderer-status strip remains visible; the
+        // larger diagnostics panel is revealed once the attempt stops.
         overlayView.setVisibility(View.GONE);
 
         setContentView(root);
-
-        preloadSplashFromAssets();
+        initializeAppSpecificStorage();
 
         String appName = "";
         JSONObject metadata = null;
@@ -561,87 +1064,182 @@ public final class GameBootActivity extends Activity {
             return;
         }
         final JSONObject finalMetadata = metadata;
+        final JSONObject translatedMetadata = finalMetadata.optJSONObject("translatedPortableC");
+        final boolean translatedMode = translatedMetadata != null;
+        if (translatedMode != assetExists(TRANSLATED_PAYLOAD_ASSET)) {
+            appendLine("Translated portable-C metadata and payload asset are inconsistent.");
+            showTerminalState("Translated runtime package is incomplete", "The APK metadata and translated memory payload do not match.");
+            return;
+        }
+        translatedPortableCMode = translatedMode;
         final String displayName = appName.isEmpty() ? "embedded game" : appName;
         appendLine("Booting " + displayName + " (game-runtime-v1)...");
-        appendLine("Loading the compatibility runtime library...");
+        appendLine(translatedMode
+                ? "Loading the verified translated portable-C runtime library..."
+                : "Loading the compatibility runtime library...");
 
         new Thread(new Runnable() {
             @Override
             public void run() {
+                List<SplashFrame> discovered = Collections.emptyList();
                 try {
-                    List<SplashFrame> discovered = discoverSplashFramesFromInventory(getAssets(), finalMetadata);
-                    if (!discovered.isEmpty()) {
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                if (!destroyed && (activeSplashFrames.isEmpty()
-                                        || discovered.size() > activeSplashFrames.size())) {
-                                    installSplashFrames(discovered);
-                                }
-                            }
-                        });
-                    }
+                    discovered = discoverSplashFramesFromInventory(getAssets(), finalMetadata);
                 } catch (Throwable ignored) {
                     // Splash discovery is non-fatal to the guest boot attempt.
                 }
+                final List<SplashFrame> recoveredFrames = discovered;
+                mainHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (destroyed) {
+                            splashSequenceFinished.countDown();
+                        } else if (activeSplashFrames.isEmpty() && !recoveredFrames.isEmpty()) {
+                            installSplashFrames(recoveredFrames);
+                        } else if (activeSplashFrames.isEmpty()) {
+                            appendLine("No decodable launch splash found; starting directly on the game surface.");
+                            finishSplashSequenceOnMainThread();
+                        }
+                    }
+                });
 
                 try {
-                    try {
-                        System.loadLibrary("unicorn");
-                    } catch (Throwable ignored) {
-                        // libcompat_runtime_v1 may be linked directly or carry its own dependency.
+                    if (translatedMode) {
+                        System.loadLibrary("translated_game");
+                    } else {
+                        try {
+                            System.loadLibrary("unicorn");
+                        } catch (Throwable ignored) {
+                            // libcompat_runtime_v1 may be linked directly or carry its own dependency.
+                        }
+                        System.loadLibrary(RUNTIME_LIBRARY);
+                        // surfaceCreated/surfaceChanged can both have fired before
+                        // the library was loaded. Re-publish before the EGL runtime starts.
+                        publishGameSurface(latestGameSurface);
                     }
-                    System.loadLibrary(RUNTIME_LIBRARY);
-                    // surfaceCreated/surfaceChanged can both have fired before
-                    // the library was loaded. Re-publish the retained surface
-                    // now, before the guest creates its EAGL drawable.
-                    publishGameSurface(latestGameSurface);
                 } catch (Throwable error) {
                     appendLine("Runtime library failed to load: " + error);
-                    showTerminalState("Runtime library unavailable", "Check that the APK includes every native dependency. The diagnostic screen will remain open.");
+                    showTerminalState("Runtime library unavailable", "Check that the APK includes the verified ARM64 library and its native dependencies.");
                     return;
                 }
-                appendLine("Runtime library loaded.");
+                appendLine(translatedMode
+                        ? "Translated portable-C JNI library loaded. It does not provide an EGL/GLES renderer."
+                        : "Compatibility runtime library loaded.");
                 final byte[] executable;
-                try {
-                    executable = readAssetBounded(EXECUTABLE_ASSET, MAX_EXECUTABLE_BYTES);
-                } catch (Throwable error) {
-                    appendLine("Embedded executable could not be read: " + error);
-                    showTerminalState("Executable unavailable", "The boot attempt could not continue; the diagnostic screen will remain open.");
+                if (translatedMode) {
+                    executable = null;
+                } else {
+                    try {
+                        executable = readAssetBounded(EXECUTABLE_ASSET, MAX_EXECUTABLE_BYTES);
+                    } catch (Throwable error) {
+                        appendLine("Embedded executable could not be read: " + error);
+                        showTerminalState("Executable unavailable", "The boot attempt could not continue; the diagnostic screen will remain open.");
+                        return;
+                    }
+                    appendLine("Executable loaded: " + executable.length + " byte(s). Preparing the bundle and runtime providers...");
+                }
+                String payloadVersion = translatedMode
+                        ? "translated-" + finalMetadata.optJSONObject("executable").optString("sha256")
+                        : payloadVersion(executable);
+                final String payloadDirectory = ensurePayloadExtracted(payloadVersion);
+                if (translatedMode && (payloadDirectory == null || !new File(payloadDirectory).isDirectory())) {
+                    appendLine("Translated runtime bundle resources could not be extracted.");
+                    showTerminalState("Translated bundle unavailable", "The translated runtime needs the packaged read-only app bundle.");
                     return;
                 }
-                appendLine("Executable loaded: " + executable.length + " byte(s). Mapping and binding traps...");
-                final String payloadDirectory = ensurePayloadExtracted(executable);
+                final File translatedMemoryImage;
+                if (translatedMode) {
+                    try {
+                        translatedMemoryImage = extractTranslatedMemoryImage(finalMetadata);
+                    } catch (Throwable error) {
+                        appendLine("Translated memory payload verification failed: " + error);
+                        showTerminalState("Translated payload rejected", "The APK's translated memory image or provenance did not pass validation.");
+                        return;
+                    }
+                } else {
+                    translatedMemoryImage = null;
+                }
+                if (!awaitSplashSequenceAndSurface(!translatedMode)) return;
+                appendLine(translatedMode
+                        ? "Splash sequence finished; entering the translated portable-C guest runtime without a frame-based timeout."
+                        : "Splash sequence finished and the Android game surface is ready; starting guest execution.");
+                final String appDataDirectory = appDataRoot != null
+                        ? appDataRoot.getAbsolutePath() : "";
+                final String bundleDirectory = payloadDirectory != null ? payloadDirectory : "";
+                final String obbDirectory = appObbDirectory != null
+                        ? appObbDirectory.getAbsolutePath() : "";
                 final String reportText;
                 try {
-                    reportText = runGameBootAttempt(executable, payloadDirectory, true);
+                    if (translatedMode) {
+                        showTranslatedRendererStatus();
+                        reportText = runTranslatedGame(
+                                translatedMemoryImage.getAbsolutePath(), appDataDirectory,
+                                bundleDirectory, obbDirectory);
+                    } else {
+                        startRendererProgressPolling();
+                        reportText = runGameBootAttempt(
+                                executable, payloadDirectory, appDataDirectory, obbDirectory, true);
+                    }
                 } catch (Throwable error) {
                     appendLine("Boot attempt failed inside the runtime: " + error);
                     showTerminalState("Guest boot failed", "The runtime could not complete the boot attempt; diagnostics will remain visible.");
                     return;
+                } finally {
+                    mainHandler.removeCallbacks(rendererProgressPoll);
                 }
+                persistRuntimeReport(reportText);
                 displayBootResult(reportText);
             }
         }, "game-boot").start();
+    }
+
+    private boolean awaitSplashSequenceAndSurface() {
+        return awaitSplashSequenceAndSurface(true);
+    }
+
+    private boolean awaitSplashSequenceAndSurface(boolean requireRenderingSurface) {
+        try {
+            splashSequenceFinished.await();
+            if (destroyed || bootFinished) return false;
+            if (requireRenderingSurface && !gameSurfaceReady.await(10, TimeUnit.SECONDS)) {
+                appendLine("Android did not create a valid game surface within 10 seconds; guest rendering was not started.");
+                showTerminalState(
+                        "Game surface unavailable",
+                        "The guest was not started without a valid Android rendering surface.");
+                return false;
+            }
+            return !destroyed && !bootFinished;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            if (!destroyed) {
+                appendLine("Game boot worker was interrupted while waiting for the splash or rendering surface.");
+                showTerminalState("Boot attempt interrupted", "The guest was not started.");
+            }
+            return false;
+        }
     }
 
     /**
      * Extracts the bundled game payload (`assets/bundle/**`) into the app's files
      * directory so the runtime can serve the guest's own file reads from it, and
      * returns the app directory — or null when this artifact has no payload.
-     * The writable application directories the runtime mounts are created next to
-     * it. Extraction is versioned by the embedded executable, so a new artifact
+     * Writable user directories live in Android's app-specific data area instead
+     * of next to the read-only bundle. Extraction is versioned by the executable, so a new artifact
      * never reuses a stale payload directory.
      */
     private String ensurePayloadExtracted(byte[] executable) {
+        return ensurePayloadExtracted(payloadVersion(executable));
+    }
+
+    private String ensurePayloadExtracted(String version) {
         try {
             AssetManager assets = getAssets();
             String[] root = assets.list(PAYLOAD_ASSET_ROOT);
             if (root == null || root.length == 0) return null;
             File bundleRoot = new File(getFilesDir(), "bundle");
             File appDirectory = new File(bundleRoot, "App.app");
-            File home = new File(bundleRoot, "radek-home");
-            File marker = new File(bundleRoot, PAYLOAD_MARKER_PREFIX + payloadVersion(executable));
+            File home = appDataRoot != null
+                    ? appDataRoot : new File(bundleRoot, "radek-home");
+            File marker = new File(bundleRoot, PAYLOAD_MARKER_PREFIX + version);
             mkdirsOrThrow(new File(home, "Documents"));
             mkdirsOrThrow(new File(home, "Library"));
             if (!marker.isFile()) {
@@ -715,33 +1313,42 @@ public final class GameBootActivity extends Activity {
         return extracted;
     }
 
-    private void preloadSplashFromAssets() {
-        try {
-            List<SplashFrame> preloaded = discoverSplashFramesFromAssets(getAssets());
-            if (!preloaded.isEmpty()) {
-                installSplashFrames(preloaded);
-            }
-        } catch (Throwable ignored) {
-            // Non-fatal; worker thread will also scan resourceInventory.
-        }
-    }
-
     /**
-     * Install recovered splash frames and start the automatic boot animation.
-     * The animation is driven only by the launcher: touches never cycle frames,
-     * and the sequence stops on a stable frame when the boot attempt ends.
+     * Install at most three recovered frames. Every frame is shown for 900 ms;
+     * only after the final interval does the activity reveal the game surface
+     * and let the boot worker enter guest code.
      */
     private void installSplashFrames(List<SplashFrame> frames) {
-        if (frames == null || frames.isEmpty() || destroyed) return;
-        boolean wasEmpty = activeSplashFrames.isEmpty();
-        activeSplashFrames.clear();
-        activeSplashFrames.addAll(frames);
-        currentSplashIndex = 0;
-        showSplashFrame(0);
-        if (wasEmpty && !bootFinished && activeSplashFrames.size() > 1 && !splashAnimationRunning) {
-            splashAnimationRunning = true;
-            mainHandler.postDelayed(splashAdvance, SPLASH_FRAME_INTERVAL_MS);
+        if (destroyed || splashSequenceComplete) return;
+        if (frames == null || frames.isEmpty()) {
+            finishSplashSequenceOnMainThread();
+            return;
         }
+        mainHandler.removeCallbacks(splashAdvance);
+        activeSplashFrames.clear();
+        activeSplashFrames.addAll(frames.subList(0, Math.min(MAX_SPLASH_FRAMES, frames.size())));
+        currentSplashIndex = 0;
+        splashSequenceComplete = false;
+        if (splashImageView != null) splashImageView.setVisibility(View.VISIBLE);
+        if (gameSurfaceView != null) gameSurfaceView.setVisibility(View.GONE);
+        showSplashFrame(0);
+        splashAnimationRunning = true;
+        mainHandler.postDelayed(splashAdvance, SPLASH_FRAME_INTERVAL_MS);
+    }
+
+    private void finishSplashSequenceOnMainThread() {
+        if (splashSequenceComplete) {
+            splashSequenceFinished.countDown();
+            return;
+        }
+        splashSequenceComplete = true;
+        splashAnimationRunning = false;
+        mainHandler.removeCallbacks(splashAdvance);
+        if (!destroyed && !bootFinished) {
+            if (splashImageView != null) splashImageView.setVisibility(View.GONE);
+            if (gameSurfaceView != null) gameSurfaceView.setVisibility(View.VISIBLE);
+        }
+        splashSequenceFinished.countDown();
     }
 
     /** Test hook: number of recovered splash frames currently installed. */
@@ -752,6 +1359,16 @@ public final class GameBootActivity extends Activity {
     /** Test hook: index of the splash frame the boot screen currently shows. */
     int currentSplashFrameIndex() {
         return currentSplashIndex;
+    }
+
+    /** Test hook: whether the splash sequence released the guest boot worker. */
+    boolean splashSequenceCompleteForTest() {
+        return splashSequenceComplete;
+    }
+
+    /** Test hook: true when the guest SurfaceView is visible. */
+    boolean gameSurfaceVisibleForTest() {
+        return gameSurfaceView != null && gameSurfaceView.getVisibility() == View.VISIBLE;
     }
 
     /** Test hook: true while the diagnostic panel is on screen. */
@@ -767,8 +1384,13 @@ public final class GameBootActivity extends Activity {
      */
     void installSyntheticSplashFramesForTest(int count) {
         bootFinished = false;
+        splashSequenceComplete = false;
         mainHandler.removeCallbacks(splashAdvance);
         splashAnimationRunning = false;
+        activeSplashFrames.clear();
+        if (splashImageView != null) splashImageView.setVisibility(View.VISIBLE);
+        if (gameSurfaceView != null) gameSurfaceView.setVisibility(View.GONE);
+        if (overlayView != null) overlayView.setVisibility(View.GONE);
         List<SplashFrame> frames = new ArrayList<>();
         for (int index = 0; index < count; index++) {
             frames.add(new SplashFrame("frame " + index, "test",
@@ -1089,6 +1711,7 @@ public final class GameBootActivity extends Activity {
                     viewportBitmap,
                     entry.width,
                     entry.height));
+            if (result.size() >= MAX_SPLASH_FRAMES) break;
         }
         return result;
     }
@@ -1112,6 +1735,7 @@ public final class GameBootActivity extends Activity {
             "bundle/SPLASHES.dat"
         };
         for (String datAsset : datCandidates) {
+            if (frames.size() >= MAX_SPLASH_FRAMES) break;
             byte[] datBytes = readOptionalAssetBytes(assets, datAsset, 256 * 1024);
             if (datBytes == null) continue;
             SplashSheetDescriptor descriptor = parseSplashSheetDescriptor(datBytes);
@@ -1141,6 +1765,7 @@ public final class GameBootActivity extends Activity {
             "bundle/data/MENU.png"
         };
         for (String candidate : launchCandidates) {
+            if (frames.size() >= MAX_SPLASH_FRAMES) break;
             byte[] bytes = readOptionalAssetBytes(assets, candidate, MAX_SPLASH_IMAGE_BYTES);
             Bitmap bmp = decodeBitmapOrCgbi(bytes);
             if (bmp != null) {
@@ -1244,7 +1869,10 @@ public final class GameBootActivity extends Activity {
     protected void onDestroy() {
         destroyed = true;
         splashAnimationRunning = false;
+        splashSequenceFinished.countDown();
+        gameSurfaceReady.countDown();
         mainHandler.removeCallbacks(splashAdvance);
+        mainHandler.removeCallbacks(rendererProgressPoll);
         super.onDestroy();
     }
 }

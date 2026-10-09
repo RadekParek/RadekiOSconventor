@@ -3,6 +3,7 @@
 import json
 import os
 import plistlib
+import re
 import shutil
 import stat
 import struct
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from radek.archive import InputError
 from radek import gameruntime
+from radek.game import macho
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ANGRY_BIRDS_IPA = REPO_ROOT / "tests" / "data" / "AngryBirds_v1.0_os30.ipa"
@@ -301,6 +303,46 @@ class AngryBirdsBootTests(unittest.TestCase):
             full = json.loads((output / "gameboot-report.json").read_text())
             self.assertEqual("not_runnable", full["status"])
             self.assertTrue(full["trapMode"])
+
+
+class GlesShaderAuditTests(unittest.TestCase):
+    def test_angry_birds_gl_imports_have_explicit_forwarders_and_no_shader_api_imports(self):
+        self.assertTrue(ANGRY_BIRDS_IPA.is_file(), "committed authorized fixture is missing")
+        with zipfile.ZipFile(ANGRY_BIRDS_IPA) as archive:
+            image = macho.parse(archive.read("Payload/AngryBirds.app/AngryBirds"))
+        gl_imports = {
+            symbol.name for symbol in image.undefined_symbols
+            if symbol.name and symbol.name.startswith("_gl")
+        }
+        self.assertEqual(len(gl_imports), 51)
+
+        forwarder_source = (
+            REPO_ROOT / "native/src/compat_runtime/gles_shims.cpp"
+        ).read_text(encoding="utf-8")
+        explicitly_forwarded = set(re.findall(
+            r'bind(?:Pointer)?\s*\(\s*"(_gl[A-Za-z0-9_]+)"', forwarder_source
+        ))
+        self.assertEqual(gl_imports - explicitly_forwarded, set())
+
+        shader_surface = {
+            symbol for symbol in gl_imports
+            if re.search(r"Shader|Program|Uniform|VertexAttrib", symbol)
+        }
+        self.assertEqual(shader_surface, set())
+
+    def test_black_viewport_exposes_live_renderer_state_without_stopping_guest(self):
+        gameboot_java = (
+            REPO_ROOT / "gameruntime-template/src/main/java/dev/radek/gameruntime/GameBootActivity.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn("getRendererProgress()", gameboot_java)
+        self.assertIn("rendererProgressPoll", gameboot_java)
+        self.assertIn("no successful EGL swap yet", gameboot_java)
+        self.assertIn("framesPresented", gameboot_java)
+        self.assertIn("image/gameplay unverified", gameboot_java)
+        self.assertIn("mainHandler.postDelayed(this, 1000L)", gameboot_java)
+        self.assertIn("rendererStatusView.setVisibility(View.GONE)", gameboot_java)
+        self.assertIn("runGameBootAttempt(", gameboot_java)
+        self.assertNotIn("renderer timeout", gameboot_java.lower())
 
 
 class SplashScreenLauncherTests(unittest.TestCase):

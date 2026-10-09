@@ -33,6 +33,9 @@ class ShimAdapter {
     std::uint64_t genericCalls_ = 0;
     std::size_t genericProviders_ = 0;
     std::size_t typedProviders_ = 0;
+    std::size_t fixtureProviderCount_ = 0;
+    std::size_t fixtureNonGenericProviderCount_ = 0;
+    std::size_t fixtureGenericProviderCount_ = 0;
     std::uint32_t randomState_ = 1U;
     std::map<GuestAddressSpace *, GuestAddress> strtokCursor_;
     std::map<GuestAddressSpace *, GuestAddress> environCells_;
@@ -68,6 +71,9 @@ class ShimAdapter {
     std::uint64_t genericCallCount() const noexcept;
     std::size_t genericProviderCount() const noexcept;
     std::size_t typedProviderCount() const noexcept;
+    std::size_t fixtureProviderCount() const noexcept;
+    std::size_t fixtureNonGenericProviderCount() const noexcept;
+    std::size_t fixtureGenericProviderCount() const noexcept;
     std::size_t registeredCalloutCount() const noexcept;
 };
 

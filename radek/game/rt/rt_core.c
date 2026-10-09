@@ -1,6 +1,8 @@
 /* Native runtime core: arena, dispatch, loader, entry (host + device). */
 #include "rt_core.h"
+#include "rt_fs.h"
 
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,6 +16,8 @@ jmp_buf RT_STOP_JB;
 char RT_STOP_WHY[256];
 unsigned RT_MODINITS_DONE;
 int RT_MAIN_REACHED;
+int RT_RUN_ACTIVE;
+int RT_STOP_IS_SHIM;
 
 void rt_log(const char *fmt, ...) {
     va_list ap;
@@ -27,11 +31,20 @@ void rt_log(const char *fmt, ...) {
 void rt_fatal(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
+    if (RT_RUN_ACTIVE) {
+        va_list copy;
+        va_copy(copy, ap);
+        vsnprintf(RT_STOP_WHY, sizeof RT_STOP_WHY, fmt, copy);
+        va_end(copy);
+        RT_STOP_IS_SHIM = 0;
+    }
     fputs("RT_FATAL: ", stderr);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
     fputc('\n', stderr);
     fflush(stderr);
+    if (RT_RUN_ACTIVE)
+        longjmp(RT_STOP_JB, 1);
     abort();
 }
 
@@ -341,6 +354,7 @@ static int rt_sjlj_handler(uint32_t typeinfo,
 }
 
 static void rt_stop_at_shim(CPU *cpu, const char *symbol) {
+    RT_STOP_IS_SHIM = 1;
     snprintf(RT_STOP_WHY, sizeof RT_STOP_WHY,
              "shim=%s r0=%08x r1=%08x r2=%08x r3=%08x lr=%08x sp=%08x",
              symbol, cpu->r[0], cpu->r[1], cpu->r[2], cpu->r[3],
@@ -964,8 +978,7 @@ static void rt_objc_msg_send(CPU *cpu, int stret, int super_send) {
     if (object && class_name && !strcmp(class_name, "NSBundle") &&
         (!strcmp(selector, "resourcePath") || !strcmp(selector, "bundlePath") ||
          !strcmp(selector, "pathForResource:ofType:"))) {
-        const char *root = getenv("RADEK_GAME_DATA");
-        cpu->r[0] = rt_objc_new_string(root && *root ? root : ".")->address;
+        cpu->r[0] = rt_objc_new_string("/radek-bundle/App.app")->address;
         return;
     }
     if (!strcmp(selector, "sharedApplication") ||
@@ -1176,6 +1189,13 @@ static RT_GUEST_THREAD *rt_guest_thread(uint32_t token) {
  * guest-state operations, not host pointer calls: all pointers remain offsets
  * in MEMBASE.  Unknown or framework-dependent imports still stop at a named
  * boundary instead of receiving an unsafe fake return. */
+/* Explicit guest path resolution lives in rt_fs.c so its mount and traversal
+ * rules can be exercised independently of the generated game image. */
+static int rt_mode_writes(const char *mode) {
+    return mode && (strchr(mode, 'w') || strchr(mode, 'a') || strchr(mode, '+'));
+}
+
+
 void rt_shim(CPU *cpu, unsigned i) {
     const char *symbol = rt_shim_symbol(i);
 
@@ -1206,16 +1226,34 @@ void rt_shim(CPU *cpu, unsigned i) {
         rt_objc_application_main(cpu);
         return;
     }
+    if (!strcmp(symbol, "NSHomeDirectory") || !strcmp(symbol, "_NSHomeDirectory")) {
+        cpu->r[0] = rt_objc_new_string("/")->address;
+        return;
+    }
+    if (!strcmp(symbol, "NSTemporaryDirectory") || !strcmp(symbol, "_NSTemporaryDirectory")) {
+        cpu->r[0] = rt_objc_new_string("/tmp")->address;
+        return;
+    }
     if (!strcmp(symbol, "NSSearchPathForDirectoriesInDomains")) {
-        static uint32_t paths;
-        static uint32_t path_string;
-        if (!paths) {
-            const char *root = getenv("RADEK_GAME_DATA");
-            RT_OBJC_OBJECT *string = rt_objc_new_string(root && *root ? root : ".");
-            path_string = string->address;
-            paths = rt_objc_new_array(path_string)->address;
+        static const char *const guest_paths[] = {
+            "/", "/Documents", "/Library", "/Library/Caches",
+            "/Library/Application Support", "/tmp"
+        };
+        static uint32_t path_sets[sizeof guest_paths / sizeof guest_paths[0]];
+        static uint32_t path_strings[sizeof guest_paths / sizeof guest_paths[0]];
+        unsigned index = 0;
+        switch (cpu->r[0]) {
+        case 9: index = 1; break;  /* NSDocumentDirectory */
+        case 5: index = 2; break;  /* NSLibraryDirectory */
+        case 13: index = 3; break; /* NSCachesDirectory */
+        case 14: index = 4; break; /* NSApplicationSupportDirectory */
+        default: index = 0; break; /* app sandbox home */
         }
-        cpu->r[0] = paths;
+        if (!path_sets[index]) {
+            path_strings[index] = rt_objc_new_string(guest_paths[index])->address;
+            path_sets[index] = rt_objc_new_array(path_strings[index])->address;
+        }
+        cpu->r[0] = path_sets[index];
         return;
     }
     if (!strcmp(symbol, "AudioSessionInitialize") ||
@@ -1329,13 +1367,13 @@ void rt_shim(CPU *cpu, unsigned i) {
         if (path_address && mode_address) {
             const char *guest_path = (const char *)(MEMBASE + path_address);
             const char *mode = (const char *)(MEMBASE + mode_address);
-            if (root && *root && guest_path[0] != '/')
-                snprintf(path, sizeof path, "%s/%s", root, guest_path);
+            if (rt_guest_host_path(guest_path, mode, path, sizeof path))
+                host = fopen(path, mode);
             else
-                snprintf(path, sizeof path, "%s", guest_path);
-            rt_log("guest fopen path=%s guest=%s mode=%s host=%s", path, guest_path, mode, root ? root : "");
-            host = fopen(path, mode);
-            if (!host &&
+                errno = EACCES;
+            rt_log("guest fopen path=%s guest=%s mode=%s dataRoot=%s", host ? path : "<refused>",
+                   guest_path, mode, root ? root : "");
+            if (!host && !rt_mode_writes(mode) &&
                 (!strcmp(guest_path, "data/bundleIndex.idx") ||
                  !strcmp(guest_path, "./data/bundleIndex.idx") ||
                  strstr(guest_path, "/data/bundleIndex.idx") != NULL) &&
@@ -1361,7 +1399,8 @@ void rt_shim(CPU *cpu, unsigned i) {
                     rt_log("guest fopen: using %s bundle index",
                            getenv("RADEK_BUNDLE_INDEX_FILE") ? "host override" : "loose-file synthetic");
             }
-            if (!host && (strstr(guest_path, "/highscores.lua") != NULL ||
+            if (!host && !rt_mode_writes(mode) &&
+                (strstr(guest_path, "/highscores.lua") != NULL ||
                           !strcmp(guest_path, "highscores.lua") ||
                           !strcmp(guest_path, "./highscores.lua") ||
                           strstr(guest_path, "/settings.lua") != NULL ||
@@ -1534,17 +1573,21 @@ void rt_shim(CPU *cpu, unsigned i) {
         uint32_t old_address = rt_find_guest_cstring(cpu->r[0]);
         uint32_t new_address = !strcmp(symbol, "rename") ? rt_find_guest_cstring(cpu->r[1]) : 0;
         char old_path[1024], new_path[1024];
-        const char *root = getenv("RADEK_GAME_DATA");
-        if (!old_address) { cpu->r[0] = (uint32_t)-1; return; }
-        if (root && *root && MEMBASE[old_address] != '/')
-            snprintf(old_path, sizeof old_path, "%s/%s", root, MEMBASE + old_address);
-        else snprintf(old_path, sizeof old_path, "%s", MEMBASE + old_address);
+        const char *old_guest = old_address ? (const char *)(MEMBASE + old_address) : NULL;
+        const char *new_guest = new_address ? (const char *)(MEMBASE + new_address) : NULL;
+        if (!old_address || !rt_guest_host_path(old_guest, "w", old_path, sizeof old_path)) {
+            cpu->r[0] = (uint32_t)-1;
+            return;
+        }
         if (!strcmp(symbol, "rename")) {
-            if (root && *root && new_address && MEMBASE[new_address] != '/')
-                snprintf(new_path, sizeof new_path, "%s/%s", root, MEMBASE + new_address);
-            else snprintf(new_path, sizeof new_path, "%s", new_address ? (char *)(MEMBASE + new_address) : "");
+            if (!new_address || !rt_guest_host_path(new_guest, "w", new_path, sizeof new_path)) {
+                cpu->r[0] = (uint32_t)-1;
+                return;
+            }
             cpu->r[0] = (uint32_t)rename(old_path, new_path);
-        } else cpu->r[0] = (uint32_t)remove(old_path);
+        } else {
+            cpu->r[0] = (uint32_t)remove(old_path);
+        }
         return;
     }
     if (!strcmp(symbol, "strlen")) { cpu->r[0] = rt_guest_strlen(cpu); return; }

@@ -940,6 +940,35 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
     nextCallout_ += 4U;
     registry.registerBinding(std::move(searchPathsBinding));
 
+    // Foundation's path functions return virtual guest paths, never host
+    // filesystem names. The runtime mounts "/" to app-private storage and
+    // gives Documents/Library/tmp more-specific mounts.
+    const auto registerFoundationPath = [this, &registry](const std::string &symbol,
+                                                         const std::string &adapter,
+                                                         const std::string &path) {
+        if (nextCallout_ > 0xf000ffffU - 4U)
+            throw std::overflow_error("Foundation path callout range is exhausted");
+        ShimBinding binding;
+        binding.darwinSymbol = symbol;
+        binding.library = "Foundation";
+        binding.adapterName = adapter;
+        binding.guestAddress = nextCallout_;
+        binding.invoke = [this, path](CpuRegisterState &registers, GuestAddressSpace &memory,
+                                      std::string &reason) {
+            try {
+                registers.r[0] = createGuestString(memory, path, true);
+                return registers.r[0] != 0;
+            } catch (const std::exception &error) {
+                reason = error.what();
+                return false;
+            }
+        };
+        nextCallout_ += 4U;
+        registry.registerBinding(std::move(binding));
+    };
+    registerFoundationPath("_NSHomeDirectory", "foundation-home-directory-app-sandbox-root", "/");
+    registerFoundationPath("_NSTemporaryDirectory", "foundation-temporary-directory-app-sandbox", "/tmp");
+
     // --- bounded application lifecycle ("startup chain") ------------------
     if (nextCallout_ > 0xf000ffffU - 4U)
         throw std::overflow_error("Objective-C lifecycle callout range is exhausted");

@@ -261,14 +261,16 @@ class AndroidApiMapperTest {
         assertEquals(5, mapping.getInt("compilerRuntimeCandidateCount"))
         assertEquals(0, mapping.getInt("unmappedSymbolCount"))
         assertEquals(100, mapping.getInt("classificationCoveragePercent"))
-        // divdi3 now has a concrete, host-tested compatibility body; the
-        // remaining compiler-runtime/unwind names stay honest toolchain
-        // candidates rather than being relabelled as direct NDK exports.
+        // ___divdi3 has a separate host-tested compatibility body, but it is
+        // also in the guest-adapter catalog. Keep the per-import classification
+        // on the guest runtime path; neither record is a direct NDK link.
         assertEquals(4, decoded.count { it.getString("classification") == "COMPILER_RUNTIME_CANDIDATE" })
-        assertEquals(1, decoded.count { it.getString("classification") == "IMPLEMENTED_API_REPLACEMENT_AVAILABLE" })
+        assertEquals(0, decoded.count { it.getString("classification") == "IMPLEMENTED_API_REPLACEMENT_AVAILABLE" })
+        assertEquals(1, mapping.getInt("implementedApiReplacementCount"))
         val divdi3 = decoded.single { it.getString("sourceSymbol") == "___divdi3" }
-        assertEquals("IMPLEMENTED_API_REPLACEMENT_AVAILABLE", divdi3.getString("classification"))
-        assertEquals("radek_compat___divdi3", divdi3.getString("targetSymbol"))
+        assertEquals("GUEST_RUNTIME_ADAPTER_CATALOGUED", divdi3.getString("classification"))
+        assertEquals("compiler-runtime.divdi3", divdi3.getString("targetSymbol"))
+        assertTrue(divdi3.getJSONObject("evidence").getBoolean("hostTestedImplementation"))
         assertTrue(decoded.all { !it.getBoolean("linkedOrRewritten") && !it.getBoolean("codeGenerated") })
         assertTrue(decoded.any { it.getString("reason").contains("does not provide a drop-in libgcc_s.so") })
     }
@@ -339,6 +341,47 @@ class AndroidApiMapperTest {
         assertEquals("SEMANTIC_REWRITE_CANDIDATE", item.getString("classification"))
         assertTrue(item.getString("targetApi").contains("not the Objective-C CADisplayLink ABI"))
         assertFalse(item.getBoolean("codeGenerated"))
+    }
+
+    @Test fun guestRuntimeAdapterCatalogIsSeparateFromStrictNdkAndCompilerRuntimeLinking() {
+        val imports = JSONArray()
+            .put(JSONObject().put("name", "_OBJC_CLASS_" + '$' + "_NSObject"))
+            .put(JSONObject().put("name", "___divdi3"))
+            .put(JSONObject().put("name", "__Unwind_SjLj_Register"))
+            .put(JSONObject().put("name", "_malloc"))
+        val nodes = JSONArray().put(JSONObject().put("analysis", JSONObject()
+            .put("slices", JSONArray().put(JSONObject().put("imports", imports)))))
+
+        val mapping = AndroidApiMapper.analyze(nodes)
+        val symbols = mapping.getJSONArray("symbols")
+        val guestRows = (0 until symbols.length())
+            .map { symbols.getJSONObject(it) }
+            .filter { it.optBoolean("guestRuntimeProviderCatalogued") }
+
+        assertEquals(4, mapping.getInt("distinctImportSymbols"))
+        assertEquals(1, mapping.getInt("sameNameNdkProviderCount"))
+        assertEquals(25, mapping.getInt("sameNameNdkProviderCoveragePercent"))
+        assertEquals(3, mapping.getInt("guestRuntimeProviderCount"))
+        assertEquals(3, mapping.getInt("guestRuntimeAdapterCataloguedCount"))
+        assertEquals(75, mapping.getInt("guestRuntimeAdapterCatalogInventoryCount"))
+        assertEquals("libcompat_runtime_v1.so", mapping.getString("guestRuntimeProviderLibrary"))
+        assertEquals("CATALOG_ONLY_NOT_RUNTIME_LINKED", mapping.getString("guestRuntimeProviderCatalogStatus"))
+        assertEquals(2, mapping.getInt("compilerRuntimeCandidateCount"))
+        assertEquals(2, mapping.getInt("compilerRuntimeGuestProviderCount"))
+        assertEquals(4, mapping.getInt("runtimeProviderCount"))
+        assertEquals(3, guestRows.size)
+        assertTrue(guestRows.all { it.getString("classification") == "GUEST_RUNTIME_ADAPTER_CATALOGUED" })
+        assertTrue(guestRows.all { it.getString("targetLibrary").contains("libcompat_runtime_v1.so") })
+        assertTrue(guestRows.all { it.getString("staticRecompilationStrategy").contains("no static Android code-callsite rewrite") })
+        assertEquals(0, mapping.getInt("runtimeVerifiedNdkCandidates"))
+        assertEquals(1, mapping.getInt("runtimeVerifiedCandidateCount"))
+        assertEquals(0, mapping.getInt("linkedImplementationCount"))
+        val breakdown = mapping.getJSONObject("reviewedMapping").getJSONObject("breakdown")
+        assertEquals(3, breakdown.getInt("guestRuntimeAdapterCatalogued"))
+        assertEquals(1, breakdown.getInt("sameNameNdkOrSystemExport"))
+        assertEquals(0, breakdown.getInt("compilerRuntimeToolchain"))
+        assertEquals(4, breakdown.getInt("kindCountsSum"))
+        assertTrue(mapping.getString("measure").contains("actual bind/relocation results"))
     }
 
     @Test fun reviewedAndroidMappingCoverageCountsEveryMappingKindButNeverImplementation() {
@@ -507,6 +550,45 @@ class AndroidApiMapperTest {
         assertEquals(total, evidence.getInt("hostTestedImplementations"))
         assertEquals(0, evidence.getInt("stubOnlyCount"))
         assertEquals(0, evidence.getInt("noneCount"))
+    }
+
+    @Test fun compatibilityNeedsListSeparatesNdkCandidatesCatalogEntriesAndUnimplementedStubs() {
+        val mapping = JSONObject()
+            .put("distinctImportSymbols", 3)
+            .put("mappedNameCandidates", 1)
+            .put("runtimeVerifiedNdkCandidates", 0)
+            .put("guestRuntimeProviderCount", 1)
+            .put("compatStubHandlerCount", 1)
+            .put("unmappedSymbolCount", 1)
+            .put("symbols", JSONArray()
+                .put(JSONObject()
+                    .put("sourceSymbol", "_malloc")
+                    .put("classification", "BIONIC_SYMBOL_CANDIDATE")
+                    .put("targetLibrary", "libc.so")
+                    .put("targetSymbol", "malloc")
+                    .put("reason", "Candidate only; not linked."))
+                .put(JSONObject()
+                    .put("sourceSymbol", "_OBJC_CLASS_" + '$' + "_UIView")
+                    .put("classification", "GUEST_RUNTIME_ADAPTER_CATALOGUED")
+                    .put("targetLibrary", "libcompat_runtime_v1.so")
+                    .put("targetSymbol", "objc.class.UIView")
+                    .put("reason", "Catalog presence is not API completeness."))
+                .put(JSONObject()
+                    .put("sourceSymbol", "_UnknownApi")
+                    .put("classification", "COMPAT_STUB_HANDLER_REGISTERED")
+                    .put("targetLibrary", "libioscompat.so")
+                    .put("targetSymbol", "radek_compat_stub")
+                    .put("reason", "The stub does not implement the API.")))
+
+        val output = ApiNeedReport.format(mapping)
+
+        assertTrue(output.contains("_malloc"))
+        assertTrue(output.contains("device export verification"))
+        assertTrue(output.contains("_OBJC_CLASS_\$_UIView"))
+        assertTrue(output.contains("not a same-name NDK export"))
+        assertTrue(output.contains("_UnknownApi"))
+        assertTrue(output.contains("UNIMPLEMENTED"))
+        assertTrue(output.contains("not a linked-game or complete-API count"))
     }
 
     @Test fun compatResolverExceptionsFallBackToUnmapped() {

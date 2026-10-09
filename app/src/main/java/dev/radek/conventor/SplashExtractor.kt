@@ -22,6 +22,7 @@ import java.util.zip.ZipFile
  */
 internal object SplashExtractor {
     private const val MAX_ENTRY_BYTES = 16 * 1024 * 1024
+    private const val MAX_SPLASH_FRAMES = 3
     private const val VIEWPORT_WIDTH = 480
     private const val VIEWPORT_HEIGHT = 320
 
@@ -40,8 +41,12 @@ internal object SplashExtractor {
         val entries: List<SpriteEntry>,
     )
 
-    fun extractSplashPng(ipaFile: File): ByteArray? {
-        if (!ipaFile.isFile) return null
+    fun extractSplashPng(ipaFile: File): ByteArray? = extractSplashPngs(ipaFile, 1).firstOrNull()
+
+    /** Extracts up to three distinct launch/sprite frames, preserving the old single-frame API. */
+    fun extractSplashPngs(ipaFile: File, maxFrames: Int = MAX_SPLASH_FRAMES): List<ByteArray> {
+        if (!ipaFile.isFile || maxFrames <= 0) return emptyList()
+        val limit = maxFrames.coerceAtMost(MAX_SPLASH_FRAMES)
         return try {
             ZipFile(ipaFile).use { zip ->
                 val entriesByPath = LinkedHashMap<String, java.util.zip.ZipEntry>()
@@ -52,24 +57,27 @@ internal object SplashExtractor {
                         entriesByPath[entry.name] = entry
                     }
                 }
-                // 1. Check for *SPLASH*.dat + companion sheet PNG inside Payload/*.app/
+                // Sprite sheets hold several separately designed publisher/game
+                // splashes. Keep their reviewed priority and emit at most three.
                 for ((path, datEntry) in entriesByPath) {
                     val lower = path.lowercase(Locale.US)
-                    if (lower.startsWith("payload/") && lower.endsWith(".dat") && "splash" in lower && datEntry.size <= 256 * 1024) {
-                        val datBytes = zip.getInputStream(datEntry).use { it.readBytes() }
-                        val descriptor = parseSplashSheetDescriptor(datBytes) ?: continue
-                        val parentDir = path.substringBeforeLast('/', "")
-                        val sheetPath = if (parentDir.isEmpty()) descriptor.sheetName else "$parentDir/${descriptor.sheetName}"
-                        val sheetEntry = entriesByPath[sheetPath] ?: continue
-                        val sheetBytes = zip.getInputStream(sheetEntry).use { it.readBytes() }
-                        val sheetBitmap = IconDecoder.decode(sheetBytes, 2048) ?: continue
-                        val cropped = cropBestSprite(sheetBitmap, descriptor)
-                        if (cropped != null) {
-                            return encodePng(cropped)
-                        }
-                    }
+                    if (!lower.startsWith("payload/") || !lower.endsWith(".dat") ||
+                        !lower.contains("splash") || datEntry.size > 256 * 1024
+                    ) continue
+                    val datBytes = zip.getInputStream(datEntry).use { it.readBytes() }
+                    val descriptor = parseSplashSheetDescriptor(datBytes) ?: continue
+                    val parentDir = path.substringBeforeLast('/', "")
+                    val sheetPath = if (parentDir.isEmpty()) descriptor.sheetName else "$parentDir/${descriptor.sheetName}"
+                    val sheetEntry = entriesByPath[sheetPath] ?: continue
+                    val sheetBytes = zip.getInputStream(sheetEntry).use { it.readBytes() }
+                    val sheetBitmap = IconDecoder.decode(sheetBytes, 2048) ?: continue
+                    val frames = cropSplashSprites(sheetBitmap, descriptor, limit)
+                        .mapNotNull(::encodePng)
+                    if (frames.isNotEmpty()) return frames
                 }
-                // 2. Check for standard or CgBI launch/splash images inside Payload/*.app/
+
+                // Standard launch images are distinct frame candidates. Keep
+                // Apple CgBI normalization in IconDecoder and avoid duplicate paths.
                 val preferredNames = listOf(
                     "default-landscape.png",
                     "default-landscape@2x.png",
@@ -80,19 +88,23 @@ internal object SplashExtractor {
                     "splash.png",
                     "menu.png",
                 )
+                val seenPaths = HashSet<String>()
+                val frames = ArrayList<ByteArray>(limit)
                 for (targetName in preferredNames) {
                     val matched = entriesByPath.entries.firstOrNull { (path, _) ->
                         path.lowercase(Locale.US).startsWith("payload/") &&
                             path.substringAfterLast('/').lowercase(Locale.US) == targetName
-                    }?.value ?: continue
-                    val raw = zip.getInputStream(matched).use { it.readBytes() }
+                    } ?: continue
+                    if (!seenPaths.add(matched.key)) continue
+                    val raw = zip.getInputStream(matched.value).use { it.readBytes() }
                     val decoded = IconDecoder.decode(raw, 1024) ?: continue
-                    return encodePng(decoded)
+                    encodePng(decoded)?.let(frames::add)
+                    if (frames.size >= limit) break
                 }
-                null
+                frames
             }
         } catch (_: Throwable) {
-            null
+            emptyList()
         }
     }
 
@@ -128,39 +140,47 @@ internal object SplashExtractor {
         return SheetDescriptor(sheetName, entries)
     }
 
-    private fun cropBestSprite(sheet: Bitmap, descriptor: SheetDescriptor): Bitmap? {
-        val valid = descriptor.entries.filter {
-            it.x >= 0 && it.y >= 0 &&
-                it.x + it.width <= sheet.width &&
-                it.y + it.height <= sheet.height
-        }
-        if (valid.isEmpty()) return null
-        val best = valid.maxByOrNull { entry ->
-            val upper = entry.name.uppercase(Locale.US)
-            val bonus = when {
-                "ANGRY" in upper || "GAME" in upper || "TITLE" in upper || "MAIN" in upper -> 1_000_000
-                "ROVIO" in upper -> 500_000
-                else -> 0
+    private fun cropSplashSprites(
+        sheet: Bitmap,
+        descriptor: SheetDescriptor,
+        limit: Int,
+    ): List<Bitmap> {
+        val selected = descriptor.entries
+            .filter {
+                it.x >= 0 && it.y >= 0 &&
+                    it.x + it.width <= sheet.width &&
+                    it.y + it.height <= sheet.height
             }
-            bonus + entry.width * entry.height
-        } ?: return null
-        val cropped = Bitmap.createBitmap(sheet, best.x, best.y, best.width, best.height)
-        if (cropped.width >= VIEWPORT_WIDTH && cropped.height >= VIEWPORT_HEIGHT) {
-            return cropped
+            .sortedByDescending { entry ->
+                val upper = entry.name.uppercase(Locale.US)
+                val bonus = when {
+                    "ANGRY" in upper || "GAME" in upper || "TITLE" in upper || "MAIN" in upper -> 1_000_000
+                    "ROVIO" in upper -> 500_000
+                    else -> 0
+                }
+                bonus + entry.width * entry.height
+            }
+            .take(limit)
+        return selected.map { entry ->
+            val cropped = Bitmap.createBitmap(sheet, entry.x, entry.y, entry.width, entry.height)
+            if (cropped.width >= VIEWPORT_WIDTH && cropped.height >= VIEWPORT_HEIGHT) {
+                cropped
+            } else {
+                val targetW = maxOf(VIEWPORT_WIDTH, cropped.width)
+                val targetH = maxOf(VIEWPORT_HEIGHT, cropped.height)
+                val composed = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(composed)
+                canvas.drawColor(Color.BLACK)
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+                canvas.drawBitmap(
+                    cropped,
+                    (targetW - cropped.width) * 0.5f,
+                    (targetH - cropped.height) * 0.5f,
+                    paint,
+                )
+                composed
+            }
         }
-        val targetW = maxOf(VIEWPORT_WIDTH, cropped.width)
-        val targetH = maxOf(VIEWPORT_HEIGHT, cropped.height)
-        val composed = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(composed)
-        canvas.drawColor(Color.BLACK)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        canvas.drawBitmap(
-            cropped,
-            (targetW - cropped.width) * 0.5f,
-            (targetH - cropped.height) * 0.5f,
-            paint,
-        )
-        return composed
     }
 
     private fun encodePng(bitmap: Bitmap): ByteArray? {

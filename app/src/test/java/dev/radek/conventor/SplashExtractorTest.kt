@@ -39,13 +39,16 @@ class SplashExtractorTest {
             File("../tests/data/AngryBirds_v1.0_os30.ipa"),
         )
         val ipa = ipaCandidates.firstOrNull { it.isFile } ?: return
-        val splashPng = SplashExtractor.extractSplashPng(ipa)
-        assertNotNull("Expected splash PNG to be extracted from AngryBirds_v1.0_os30.ipa", splashPng)
-        assertTrue(splashPng!!.size > 64)
-        val decoded = BitmapFactory.decodeByteArray(splashPng, 0, splashPng.size)
-        assertNotNull(decoded)
-        assertEquals(480, decoded.width)
-        assertEquals(320, decoded.height)
+        val splashFrames = SplashExtractor.extractSplashPngs(ipa)
+        assertEquals(3, splashFrames.size)
+        assertTrue("Expected splash PNG to be extracted from AngryBirds_v1.0_os30.ipa", splashFrames[0].size > 64)
+        splashFrames.forEach { frame ->
+            val decoded = BitmapFactory.decodeByteArray(frame, 0, frame.size)
+            assertNotNull(decoded)
+            assertEquals(480, decoded!!.width)
+            assertEquals(320, decoded.height)
+        }
+        assertNotNull(SplashExtractor.extractSplashPng(ipa))
     }
 
     private fun ByteArrayOutputStream.writeU16Be(value: Int) {

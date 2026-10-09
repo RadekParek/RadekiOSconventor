@@ -1,15 +1,15 @@
 """Bounded host-side static-recompilation plan for one selected Mach-O slice.
 
 The bounded complete-game prover accepts only an executable that is *exactly one*
-closed-integer routine. Everything else reports ``portProgress.percent: 0``, which
-is honest but uninformative: a real game is not zero percent understood, it is
-outside the packaging subset for other reasons (imports, lifecycle, resources).
+closed-integer routine. Without a verified Android link, ``portProgress.percent``
+remains zero; a host-only plan or portable-C translation must not inflate it.
 
 This module answers the narrower, measurable question: *how much of this slice's
 executable ``__text`` does the host static recompiler actually translate into
 portable code?* It runs the same lifter the differential test proves
-(:mod:`radek.game.lift`) over every discovered function, counts the source bytes
-it emits for, and reports the coverage together with its limits.
+(:mod:`radek.game.lift`) over every discovered function, counts the unique source
+instruction bytes emitted inside ``__text``, and reports that host-only coverage
+separately from Android-linked progress, together with its limits.
 
 What this number is and is not:
 
@@ -118,8 +118,8 @@ def plan_coverage(
     except Exception as exc:
         return _unavailable(f"the bounded disassembler could not decode this input: {exc}")
 
-    discovered_bytes = 0
-    recompiled_bytes = 0
+    discovered_addresses: list[int] = []
+    recompiled_addresses: list[int] = []
     recompiled = 0
     failed = 0
     skipped_loader_glue = 0
@@ -127,7 +127,6 @@ def plan_coverage(
     skip_names = getattr(lift, "SKIP_NAMES", frozenset())
     for address in sorted(functions):
         function = functions[address]
-        size = 4 * len(function.instructions)
         if time.monotonic() - started > time_budget:
             truncated = True
             break
@@ -137,14 +136,29 @@ def plan_coverage(
         if function.name in skip_names or address in context.import_of_stub:
             skipped_loader_glue += 1
             continue
-        discovered_bytes += size
+        discovered_addresses.append(address)
         try:
             lift.lift_function(context, function)
         except lift.LiftError:
             failed += 1
             continue
         recompiled += 1
-        recompiled_bytes += size
+        recompiled_addresses.append(address)
+
+    # Count the actual decoded instruction-byte intervals inside __text. Function
+    # symbols can overlap, so summing per-function sizes would double-count the
+    # same source bytes and can inflate host-only coverage beyond the section.
+    from .game.codegen import _translated_text_coverage
+
+    text_address = int(getattr(text_section, "address", 0) or 0)
+    discovered_coverage = _translated_text_coverage(
+        functions, discovered_addresses, text_address, text_bytes
+    )
+    recompiled_coverage = _translated_text_coverage(
+        functions, recompiled_addresses, text_address, text_bytes
+    )
+    discovered_bytes = discovered_coverage["uniqueTextBytes"]
+    recompiled_bytes = recompiled_coverage["uniqueTextBytes"]
 
     percent = 0.0
     if text_bytes > 0:
@@ -159,6 +173,14 @@ def plan_coverage(
         "functionsNotRecompiled": failed,
         "discoveredFunctionBytes": discovered_bytes,
         "staticallyRecompiledBytes": recompiled_bytes,
+        "discoveredUniqueTextBytes": discovered_bytes,
+        "staticallyRecompiledUniqueTextBytes": recompiled_bytes,
+        "summedDiscoveredFunctionInstructionBytes": discovered_coverage["summedFunctionInstructionBytes"],
+        "summedDiscoveredTextInstructionBytes": discovered_coverage["summedTextInstructionBytes"],
+        "overlappingDiscoveredTextInstructionBytes": discovered_coverage["overlappingTextInstructionBytes"],
+        "summedRecompiledFunctionInstructionBytes": recompiled_coverage["summedFunctionInstructionBytes"],
+        "summedRecompiledTextInstructionBytes": recompiled_coverage["summedTextInstructionBytes"],
+        "overlappingRecompiledTextInstructionBytes": recompiled_coverage["overlappingTextInstructionBytes"],
         "executableTextBytes": text_bytes,
         "processedFunctions": recompiled + failed,
         "skippedLoaderGlueFunctions": skipped_loader_glue,

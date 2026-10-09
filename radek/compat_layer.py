@@ -1,26 +1,23 @@
-"""Generate the full per-IPA libioscompat compatibility registry source.
+"""Generate per-IPA libioscompat registry source and provider-catalog diagnostics.
 
-Every Darwin/iOS import observed in the analyzed images receives exactly one
-resolution target in the generated ``libioscompat`` source. The legacy generated
-export/stub split is retained for source compatibility, while the report also
-carries the stricter provider ledger:
+Every observed import gets an implementation or explicit stub target in the
+generated ``libioscompat`` source. That generated registry is not linked into
+the game here. A separate provider ledger reports:
 
-- ``concreteDarwinProviderCount`` counts only names in the typed
-  ``compat-runtime-v1`` Darwin catalog;
-- ``sameNameNdkCandidateCount`` and ``sameNameNdkProviderCount`` count exact
-  Android NDK/system-library name candidates without relabelling Darwin symbols;
-  the latter names the registered ARM32-wrapper axis; and
-- ``fullNdkCandidateInventoryCount`` reports the complete reviewed NDK candidate
-  inventory (currently 1229 names), while the per-input counts remain separate;
-  and
-- ``reviewedImportProviderCount`` is their disjoint union.
+- ``guestRuntimeAdapterCatalogCount``: imports present in the compat-runtime-v1
+  ARM32 callout/data-provider catalog (``concreteDarwinProviderCount`` remains
+  as a legacy alias); this is not a per-image runtime fixup or API-completeness
+  count;
+- ``sameNameNdkCandidateCount`` and ``sameNameNdkProviderCount``: exact
+  Android NDK/system-library name candidates, without relabelling Darwin names;
+- ``fullNdkCandidateInventoryCount``: the reviewed NDK candidate inventory; and
+- ``reviewedImportProviderCount``: the disjoint union of the first two catalogs.
 
-An explicitly labelled **stub** handler owns a stable function address that
-records invocations and returns a documented safe default. It exists so a
-future linker can resolve the symbol and so an accidental invocation is
-observable; it is never an implementation of the Darwin API. Stub presence is
-resolution coverage, not static recompilation coverage, and is reported
-separately from concrete provider coverage.
+An explicitly labelled **stub** in generated ``libioscompat`` source owns a
+stable resolution-target address, records invocations and returns a documented
+safe default. It is never an API implementation. Stub presence is resolution
+coverage, not static recompilation or runtime-link coverage. Actual guest import
+slot binding is only reported by ``runtimeLinking`` after a game-runtime load.
 """
 
 from __future__ import annotations
@@ -243,6 +240,12 @@ def generate(reconstruction: dict, output: Path) -> dict:
             "totalObservedImports": 0,
             "unresolvedImports": 0,
             "concreteDarwinProviderCount": 0,
+            "guestRuntimeAdapterCatalogCount": 0,
+            "guestRuntimeAdapterCatalogInventoryCount": len(CONCRETE_DARWIN_COMPAT_PROVIDERS),
+            "guestRuntimeAdapterCatalogCoveragePercent": 0,
+            "guestRuntimeAdapterCatalogStatus": "NO_MATCHES",
+            "guestRuntimeSlotFixupsStatus": "NOT_RUN",
+            "staticGameCallsitesRewritten": 0,
             "sameNameNdkCandidateCount": 0,
             "sameNameNdkProviderCount": 0,
             "fullNdkCandidateInventoryCount": len(BIONIC_SYMBOL_CANDIDATES),
@@ -262,11 +265,11 @@ def generate(reconstruction: dict, output: Path) -> dict:
     selected = embeddable[:MAX_GENERATED_ENTRIES]
     verified = [name for name in selected if classify(name) == "verified"]
     stubbed = [name for name in selected if classify(name) == "stubbed"]
-    concrete_darwin = [name for name in selected if name in CONCRETE_DARWIN_COMPAT_PROVIDERS]
+    guest_adapter_names = [name for name in selected if name in CONCRETE_DARWIN_COMPAT_PROVIDERS]
     ndk_candidates = [
         name for name in selected if name.removeprefix("_") in BIONIC_SYMBOL_CANDIDATES
     ]
-    reviewed_provider_names = set(concrete_darwin) | set(ndk_candidates)
+    reviewed_provider_names = set(guest_adapter_names) | set(ndk_candidates)
     reviewed_provider_count = len(reviewed_provider_names)
 
     source_root = Path(__file__).resolve().parent.parent / "native"
@@ -296,9 +299,10 @@ def generate(reconstruction: dict, output: Path) -> dict:
             slot = stub_index
             stub_index += 1
         entries.append((name, android, kind, slot))
+        guest_provider = CONCRETE_DARWIN_COMPAT_PROVIDERS.get(name)
         provider_kind = (
-            "concrete-darwin-compatibility"
-            if name in CONCRETE_DARWIN_COMPAT_PROVIDERS
+            "guest-runtime-adapter-catalogued"
+            if guest_provider is not None
             else "android-ndk-name-candidate"
             if name.removeprefix("_") in BIONIC_SYMBOL_CANDIDATES
             else "generated-compat-export-catalog"
@@ -309,9 +313,14 @@ def generate(reconstruction: dict, output: Path) -> dict:
                 "classification": "verified" if kind == KIND_VERIFIED else "stubbed-unimplemented",
                 "androidSymbol": android,
                 "implementationPresent": kind == KIND_VERIFIED,
+                "generatedRegistryImplementationPresent": kind == KIND_VERIFIED,
                 "providerKind": provider_kind,
-                "concreteDarwinProvider": CONCRETE_DARWIN_COMPAT_PROVIDERS.get(name),
+                "guestRuntimeProvider": guest_provider,
+                "guestRuntimeProviderLibrary": "libcompat_runtime_v1.so" if guest_provider is not None else None,
+                # Legacy key retained for consumers of the v1 registry schema.
+                "concreteDarwinProvider": guest_provider,
                 "sameNameNdkCandidate": name.removeprefix("_") in BIONIC_SYMBOL_CANDIDATES,
+                "staticGameCallsiteRewritten": False,
             }
         )
 
@@ -332,6 +341,15 @@ def generate(reconstruction: dict, output: Path) -> dict:
     source_path = source_dir / "libioscompat.cpp"
     source_path.write_text("\n".join(sections), encoding="utf-8")
     source_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    coverage = round(100.0 * len(selected) / len(imports), 4) if imports else 0
+    guest_adapter_coverage = round(100.0 * len(guest_adapter_names) / len(imports), 4) if imports else 0
+    guest_adapter_catalog_status = (
+        "CATALOG_ONLY_NOT_RUNTIME_LINKED" if guest_adapter_names else "NO_MATCHES"
+    )
+    provider_catalog_measure = (
+        "reviewed name-catalog coverage: exact Android NDK/system candidates plus "
+        "compat-runtime-v1 guest adapter entries; not static code linking or per-image fixups"
+    )
 
     registry = {
         "schemaVersion": 1,
@@ -340,7 +358,14 @@ def generate(reconstruction: dict, output: Path) -> dict:
         "stubbedHandlers": len(stubbed),
         "totalObservedImports": len(imports),
         "unresolvedImports": len(imports) - len(selected),
-        "concreteDarwinProviderCount": len(concrete_darwin),
+        "concreteDarwinProviderCount": len(guest_adapter_names),
+        "guestRuntimeAdapterCatalogCount": len(guest_adapter_names),
+        "guestRuntimeAdapterCatalogInventoryCount": len(CONCRETE_DARWIN_COMPAT_PROVIDERS),
+        "guestRuntimeAdapterCatalogCoveragePercent": guest_adapter_coverage,
+        "guestRuntimeAdapterCatalogStatus": guest_adapter_catalog_status,
+        "guestRuntimeSlotFixupsStatus": "NOT_RUN",
+        "staticGameCallsitesRewritten": 0,
+        "providerCoverageMeasure": provider_catalog_measure,
         "sameNameNdkCandidateCount": len(ndk_candidates),
         "sameNameNdkProviderCount": len(ndk_candidates),
         "fullNdkCandidateInventoryCount": len(BIONIC_SYMBOL_CANDIDATES),
@@ -357,7 +382,6 @@ def generate(reconstruction: dict, output: Path) -> dict:
         json.dumps(registry, indent=2, ensure_ascii=True), encoding="utf-8"
     )
 
-    coverage = round(100.0 * len(selected) / len(imports), 4) if imports else 0
     return {
         "schemaVersion": 1,
         "contract": CONTRACT,
@@ -366,7 +390,14 @@ def generate(reconstruction: dict, output: Path) -> dict:
         "stubbedHandlers": len(stubbed),
         "totalObservedImports": len(imports),
         "unresolvedImports": len(imports) - len(selected),
-        "concreteDarwinProviderCount": len(concrete_darwin),
+        "concreteDarwinProviderCount": len(guest_adapter_names),
+        "guestRuntimeAdapterCatalogCount": len(guest_adapter_names),
+        "guestRuntimeAdapterCatalogInventoryCount": len(CONCRETE_DARWIN_COMPAT_PROVIDERS),
+        "guestRuntimeAdapterCatalogCoveragePercent": guest_adapter_coverage,
+        "guestRuntimeAdapterCatalogStatus": guest_adapter_catalog_status,
+        "guestRuntimeSlotFixupsStatus": "NOT_RUN",
+        "staticGameCallsitesRewritten": 0,
+        "providerCoverageMeasure": provider_catalog_measure,
         "sameNameNdkCandidateCount": len(ndk_candidates),
         "sameNameNdkProviderCount": len(ndk_candidates),
         "fullNdkCandidateInventoryCount": len(BIONIC_SYMBOL_CANDIDATES),
@@ -408,7 +439,7 @@ def generate(reconstruction: dict, output: Path) -> dict:
         "message": (
             f"Every observed Darwin import has a resolution target in the generated libioscompat "
             f"source: {len(verified)} generated export-catalog implementation(s), "
-            f"{len(concrete_darwin)} concrete Darwin provider(s), and "
+            f"{len(guest_adapter_names)} concrete Darwin provider(s), and "
             f"{len(stubbed)} explicitly unimplemented stub handler(s). A stub records invocations and returns a safe default; "
             "it does not implement the API, rewrites no IPA callsites, and its presence is "
             "resolution coverage, not static recompilation coverage."

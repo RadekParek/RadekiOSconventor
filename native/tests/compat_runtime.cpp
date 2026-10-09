@@ -978,9 +978,17 @@ void testFoundationSearchPathsReturnGuestNSStringArray() {
     radek::compat_runtime::objc::ShimAdapter objcShims;
     objcShims.registerBindings(registry);
     const auto searchPaths = registry.resolve("_NSSearchPathForDirectoriesInDomains");
+    const auto homeDirectory = registry.resolve("_NSHomeDirectory");
+    const auto temporaryDirectory = registry.resolve("_NSTemporaryDirectory");
     const auto messageSend = registry.resolve("_objc_msgSend");
     const auto release = registry.resolve("_objc_release");
     CHECK(searchPaths.has_value() && searchPaths->invoke);
+    CHECK(homeDirectory.has_value() && homeDirectory->invoke);
+    CHECK(temporaryDirectory.has_value() && temporaryDirectory->invoke);
+    CHECK(homeDirectory->library == "Foundation");
+    CHECK(temporaryDirectory->library == "Foundation");
+    CHECK(homeDirectory->adapterName == "foundation-home-directory-app-sandbox-root");
+    CHECK(temporaryDirectory->adapterName == "foundation-temporary-directory-app-sandbox");
     CHECK(searchPaths->library == "Foundation");
     CHECK(searchPaths->adapterName == "foundation-search-paths-virtual-user-domain");
     CHECK(messageSend.has_value() && messageSend->invokeTransfer);
@@ -1034,6 +1042,47 @@ void testFoundationSearchPathsReturnGuestNSStringArray() {
     std::array<char, 32> path{};
     CHECK(memory.read(registers.r[0], path.data(), path.size()));
     CHECK(std::string(path.data()) == "/Documents");
+
+    std::vector<GuestAddress> foundationPathObjects;
+    const auto assertFoundationPath = [&](const ShimBinding &binding,
+                                          const std::string &expectedPath) {
+        CpuRegisterState pathRegisters;
+        std::string pathReason;
+        CHECK(registry.invokeCallout(binding.guestAddress, pathRegisters, memory, pathReason) ==
+              GuestCalloutResult::Returned);
+        const auto pathObject = pathRegisters.r[0];
+        CHECK(pathObject != 0);
+        foundationPathObjects.push_back(pathObject);
+        pathRegisters = {};
+        pathRegisters.r[0] = pathObject;
+        pathRegisters.r[1] = selectorMemory + 48;
+        CHECK(registry.invokeCallout(messageSend->guestAddress, pathRegisters, memory, pathReason) ==
+              GuestCalloutResult::Returned);
+        std::array<char, 32> actualPath{};
+        CHECK(memory.read(pathRegisters.r[0], actualPath.data(), actualPath.size()));
+        CHECK(std::string(actualPath.data()) == expectedPath);
+    };
+    const auto pushPool = registry.resolve("_objc_autoreleasePoolPush");
+    const auto popPool = registry.resolve("_objc_autoreleasePoolPop");
+    CHECK(pushPool.has_value() && pushPool->invoke);
+    CHECK(popPool.has_value() && popPool->invoke);
+    CpuRegisterState poolRegisters;
+    CHECK(registry.invokeCallout(pushPool->guestAddress, poolRegisters, memory, reason) ==
+          GuestCalloutResult::Returned);
+    const auto foundationPool = poolRegisters.r[0];
+    CHECK(foundationPool != 0);
+
+    assertFoundationPath(*homeDirectory, "/");
+    assertFoundationPath(*temporaryDirectory, "/tmp");
+
+    poolRegisters = {};
+    poolRegisters.r[0] = foundationPool;
+    CHECK(registry.invokeCallout(popPool->guestAddress, poolRegisters, memory, reason) ==
+          GuestCalloutResult::Returned);
+    CHECK(poolRegisters.r[0] == 0);
+    for (const auto pathObject : foundationPathObjects)
+        CHECK(!memory.contains(pathObject, sizeof(std::uint32_t)));
+
     registers.r[0] = directoryString;
     registers.r[1] = selectorMemory + 64;
     CHECK(registry.invokeCallout(messageSend->guestAddress, registers, memory, reason) ==
@@ -1761,6 +1810,48 @@ void testLegacyExternalRelocationBindsGuestData() {
     CHECK(unresolved.unresolvedSymbols[0].fields.at("dylibOrdinal").value == "1");
 }
 
+void testRuntimeLinkReportCountsOnlyInstalledProviders() {
+    MachOptions options;
+    options.includeDataSegment = true;
+    options.includeDependency = true;
+    options.includeIndirectFunctionPointer = true;
+    options.indirectSymbolName = "_runtimeLinked";
+    const auto bytes = makeMachO(options);
+
+    ShimRegistry shims;
+    shims.registerBinding(testBinding("_runtimeLinked", 0xf0002340));
+    GuestAddressSpace memory;
+    const auto loaded = MachOLoader().load(bytes, memory, shims);
+    CHECK(loaded.status == "LOADED");
+    const auto linked = loaded.toJson().fields.at("runtimeLinking");
+    CHECK(linked.fields.at("status").value == "COMPLETE");
+    CHECK(linked.fields.at("guestImageImportSlotsRelinked").value == "1");
+    CHECK(linked.fields.at("distinctResolvedImportSymbols").value == "1");
+    CHECK(linked.fields.at("translatedGuestCodeCallsitesRewritten").value == "0");
+    CHECK(linked.fields.at("providerLinkMap").items.size() == 1);
+    CHECK(linked.fields.at("providerLinkMap").items[0].fields.at("symbol").value ==
+          "_runtimeLinked");
+    CHECK(linked.fields.at("providerLinkMap").items[0].fields.at("status").value ==
+          "RELINKED_TO_GUEST_PROVIDER");
+    CHECK(linked.fields.at("providerLinkMap").items[0].fields.at("adapter").value ==
+          "host-tested-test-adapter");
+
+    GuestAddressSpace trappedMemory;
+    ShimRegistry emptyRegistry;
+    TrapShimAdapter traps;
+    const auto trapped = MachOLoader().loadWithTraps(bytes, trappedMemory, emptyRegistry, traps);
+    CHECK(trapped.status == "LOADED_WITH_TRAPS");
+    const auto trappedLinking = trapped.toJson().fields.at("runtimeLinking");
+    CHECK(trappedLinking.fields.at("status").value ==
+          "BOUND_WITH_RUNTIME_TRAPS_OR_NLIST_ONLY");
+    CHECK(trappedLinking.fields.at("guestImageImportSlotsRelinked").value == "0");
+    CHECK(trappedLinking.fields.at("guestImageImportSlotsTrapped").value == "1");
+    CHECK(trappedLinking.fields.at("providerLinkMap").items[0].fields.at("status").value ==
+          "BOUND_TO_ABORT_ON_CALL_TRAP");
+    CHECK(trappedLinking.fields.at("providerLinkMap").items[0].fields.at("adapter").kind ==
+          radek::Json::Null);
+}
+
 void testRunnerReportsFirstMissingImport() {
     MachOptions options;
     options.includeDataSegment = true;
@@ -1777,6 +1868,8 @@ void testRunnerReportsFirstMissingImport() {
     CHECK(report.fields.at("reportArtifactName").value == "compat-runtime-v1-report.json");
     CHECK(report.fields.at("runtimeLibrary").value == "libcompat_runtime_v1.so");
     CHECK(report.fields.at("cpu").fields.at("status").value == "BLOCKED_BY_UNRESOLVED_IMPORT");
+    CHECK(report.fields.at("runtimeLinking").fields.at("status").value == "PARTIAL_UNRESOLVED");
+    CHECK(report.fields.at("runtimeLinking").fields.at("translatedGuestCodeCallsitesRewritten").value == "0");
 
     const auto unauthorized = GuestRunner(shims, *cpu).runMainBinary(bytes, false);
     CHECK(unauthorized.fields.at("status").value == "not_runnable");
@@ -1953,6 +2046,7 @@ int main() {
     testNlistFatAndThreadState();
     testLegacyIndirectSymbolPointerBindsCallout();
     testLegacyExternalRelocationBindsGuestData();
+    testRuntimeLinkReportCountsOnlyInstalledProviders();
     testRunnerReportsFirstMissingImport();
     testRunnerReportsTimeLimitWithoutClaimingCompatibility();
     testGuestFunctionReachesImportedCalloutAndReturns();

@@ -83,12 +83,19 @@ void VirtualFileSystem::mount(std::string guestPrefix, std::string hostDirectory
 bool VirtualFileSystem::resolve(const std::string &guestPath, std::string &hostPath,
                                 bool &writable) const {
     for (const auto &mount : mounts_) {
-        if (guestPath.size() < mount.guestPrefix.size())
-            continue;
-        if (guestPath.compare(0, mount.guestPrefix.size(), mount.guestPrefix) != 0)
-            continue;
-        const auto remainder = guestPath.substr(mount.guestPrefix.size());
-        if (!remainder.empty() && remainder.front() != '/')
+        if (mount.guestPrefix == "/") {
+            if (guestPath.empty() || guestPath.front() != '/')
+                continue;
+        } else {
+            if (guestPath.size() < mount.guestPrefix.size())
+                continue;
+            if (guestPath.compare(0, mount.guestPrefix.size(), mount.guestPrefix) != 0)
+                continue;
+        }
+        const auto remainder = mount.guestPrefix == "/"
+            ? guestPath.substr(1)
+            : guestPath.substr(mount.guestPrefix.size());
+        if (mount.guestPrefix != "/" && !remainder.empty() && remainder.front() != '/')
             continue;
         const auto relative = trimLeadingSlashes(remainder);
         if (!isContainedRelativePath(relative))

@@ -37,5 +37,7 @@ extern jmp_buf RT_STOP_JB;
 extern char RT_STOP_WHY[256];
 extern unsigned RT_MODINITS_DONE;
 extern int RT_MAIN_REACHED;
+extern int RT_RUN_ACTIVE;
+extern int RT_STOP_IS_SHIM;
 
 #endif

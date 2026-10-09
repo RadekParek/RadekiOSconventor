@@ -2,7 +2,7 @@
 
 An **offline IPA inspection and bounded native-reconstruction workbench** for authorized inputs. It includes an Android importer/analyzer, a C++ Mach-O parser, and Python reconstruction tools.
 
-> **One bounded subset converts for real; everything else stays honestly unbuilt.** When an IPA's whole executable is statically proven to be exactly one closed-integer ARM entry routine (MOV-immediate, MOVK, register MOV, immediate ADD/SUB, RET) with no imports, dependencies, fixups or runtime metadata, both the host CLI and the on-device app convert it end to end into a signed, installable APK (`complete-game-v1`) — on Android this happens automatically during import, no extra button needed: the statically recompiled entry is packaged as `libconverted.so` and runs through JNI when the launcher opens, showing the message recovered from the IPA. The three-instruction `tests/data/hello-test.ipa` displays `hello test succesfull`; `tests/data/simple.ipa` adds a deterministic 128-operation ARM64 routine and also converts through the same path. Outside that proven subset nothing is statically recompiled: the host can still lower the entry routine into a standalone shared object and report compatibility registries, and on the `convert` path it packages those artifacts into a signed, explicitly labelled **experimental shell** APK (`experimental-shell-v1`) that states on screen that no game code is statically recompiled. For an unconvertible IPA, the Android app's **Force convert to game APK** action builds a separate `game-runtime-v1` boot-attempt APK containing the original ARM executable, bundle, and guest runtime (including its shared Unicorn dependency). The device runner has no artificial instruction-count or wall-clock cutoff: it stays alive when the guest reaches its own render loop and stops only at a real runtime boundary such as an unimplemented import, guest exception, memory/execution fault, unavailable backend, or setup failure. The launcher keeps a black game viewport visible while it runs and leaves diagnostics open if it stops; this is not the complete-game static recompilation contract. A source-free preview shell remains an explicit fallback. The host-only `--diagnostic-probe` flag uses a finite time window so CI can inspect an infinite-looping guest without changing the APK behavior. Device gameplay remains dependent on the implemented framework/input surface and is not claimed merely from a boot trace.
+> **One bounded subset converts for real; everything else stays honestly unbuilt.** When an IPA's whole executable is statically proven to be exactly one closed-integer ARM entry routine (MOV-immediate, MOVK, register MOV, immediate ADD/SUB, RET) with no imports, dependencies, fixups or runtime metadata, both the host CLI and the on-device app convert it end to end into a signed, installable APK (`complete-game-v1`) — on Android this happens automatically during import, no extra button needed: the statically recompiled entry is packaged as `libconverted.so` and runs through JNI when the launcher opens, showing the message recovered from the IPA. The three-instruction `tests/data/hello-test.ipa` displays `hello test succesfull`; `tests/data/simple.ipa` adds a deterministic 128-operation ARM64 routine and also converts through the same path. Outside that proven subset nothing is statically recompiled: the host can still lower the entry routine into a standalone shared object and report compatibility registries, and on the `convert` path it packages those artifacts into a signed, explicitly labelled **experimental shell** APK (`experimental-shell-v1`) that states on screen that no game code is statically recompiled. For an unconvertible IPA, the Android app's **Force convert to game APK** action builds a separate `game-runtime-v1` boot-attempt APK containing the original ARM executable, bundle, and guest runtime (including its shared Unicorn dependency). A separately generated portable-C handoff can also be imported; the on-device builder revalidates the ARM64 ELF, Android dependencies, all translated-function exports, JNI entry point, executable binding, and payload hashes before packaging and selecting it at boot. That translated runner is not connected to Android EGL/GLES, so pixels and gameplay remain unverified. The compatibility guest-CPU runner has no artificial instruction-count or wall-clock cutoff and may stay alive in its render loop; both paths stop only at a real runtime boundary or setup failure. The launcher keeps a black game viewport visible while it runs and leaves diagnostics open if it stops; this is not the complete-game static recompilation contract. A source-free preview shell remains an explicit fallback. The host-only `--diagnostic-probe` flag uses a finite time window so CI can inspect an infinite-looping guest without changing the APK behavior. Device gameplay remains dependent on the implemented framework/input surface and is not claimed merely from a boot trace.
 
 ## Offline reconstruction
 
@@ -43,7 +43,8 @@ When (and only when) the entry routine passes the closed-integer proof, the host
 
 - `recompiled-entry.bin`: lowered ARM64/ARMv7 function bytes;
 - `librecompiled-entry.so`: a minimal, relocation-free Android ET_DYN library exporting
-  `radek_recompiled_entry`, statically checked for ABI, export size/hash, and undefined symbols;
+  `radek_recompiled_entry`, statically checked for ABI/class, zero `DT_NEEDED` dependencies and
+  undefined symbols, and the export's type/size/hash;
 - `recompiled-entry.c`: a portable C rendering of the same proof-carrying integer operations,
   executable in host tests to compare return-value semantics;
 - `leaf-experiment.ll`: supplementary textual LLVM IR for the same proven leaf.
@@ -57,17 +58,31 @@ shell that drops the disclosure or claims game code. The shell never satisfies
 stays 0 / `NOT_BUILT` unless the IPA passed the bounded complete-conversion gate and a signed
 `complete-game-v1` APK was actually built and statically validated.
 
-These files contain one isolated function only. The shared object has no JNI entry, imports, game
-resources, lifecycle, or callsites into the original game. The reported `portProgress.percent` is
-source instruction-byte coverage of the selected slice's executable `__text` sections, not a
-whole-app or playability percentage. For an input the bounded prover refuses, the host CLI now also
-runs a bounded **static-recompilation plan** (`radek/plan.py`, needs the optional `capstone`
-package): it lifts every discovered function with the same fail-closed emitter the differential test
-proves and records `staticRecompilationPlan` plus the resulting `portProgress` figure — statically
-recompiled source bytes of the game's own code. That number is host coverage only: it links nothing,
-ships nothing, runs nothing on a device, and always leaves `conversionProgress` at `NOT_BUILT`.
-Reconstruction is an engineering artifact, not original source; uncertain instructions and control
-flow are marked, and imported code is never executed.
+These files contain one isolated function only. The shared object has no game JNI entry, game
+resources, lifecycle, or callsites into the original game. `portProgress.percent` is nonzero only
+after a standalone Android ELF or verified APK contains the statically recompiled code; it measures
+source instruction bytes represented by that Android artifact, not whole-app or playability coverage.
+A standalone `.so` is not linked into the game boot path or packaged as a game APK. The report's
+`androidLink` field records the target architecture/dependencies and exported-function verification
+behind that figure.
+
+For an input the bounded prover refuses, the host CLI also runs a bounded **static-recompilation
+plan** (`radek/plan.py`, needs optional `capstone`): it lifts discovered functions with the same
+fail-closed emitter the differential test proves. Its host-only coverage is reported separately in
+`staticRecompilationPlan` and `hostStaticRecompilationProgress`; it never increments `portProgress`.
+Whole-game portable-C coverage is reported as unique emitted instruction bytes in
+`bytecodeTranslation`, separately from the host plan. When an Android NDK is available, the host may
+link a standalone translation library; Android-linked progress becomes positive only when the
+artifact exists and its ABI/ELF class, dynamic-dependency policy, all translated-function exports,
+JNI entry point, and linker-to-translation function/byte counts verify. The host can then prepare a
+hash-bound `translated-game-runtime-input.zip`; this is still only input for the Android builder,
+not an APK or game-runtime link. After the app revalidates it and successfully packages the library
+and payload into `game-runtime-v1`, the report marks translated code as linked into that boot path.
+That runner is not connected to EGL/GLES; APK inclusion/linkage is not execution, pixel, gameplay, or
+playability evidence. `conversionProgress` remains `NOT_BUILT`. Reconstruction is an engineering
+artifact, not original source; uncertain instructions and control flow are marked. The generated
+portable-C Android library is not executed by the host; any bounded guest-boot probe is a separate
+diagnostic path.
 Objective-C `__objc_msgrefs` selector references are followed through their `__objc_selrefs`
 pointer slots when statically readable.
 
@@ -110,14 +125,21 @@ future conversion targeting; they do not imply that an APK was generated.
 The Android mapper reports same-named NDK symbols and semantic rewrite targets (for example,
 `UIView` → `android.view.View`) as **candidates only**. Two coverage figures are reported separately
 and are never interchangeable. *Reviewed Android mapping coverage* counts every observed import the
-classifier assigned exactly one reviewed mapping kind to (same-name NDK/system export, NDK
-compiler-rt/libunwind toolchain symbol, concrete `libioscompat.so` implementation export, or
-reviewed semantic target) and therefore reaches 100% for a fully triaged IPA. The *same-name NDK
-candidate subset* is the strict count of symbols whose name exists in the reviewed Android catalog;
-it is deliberately smaller and is divided by all distinct imports. Device `dlsym` export
-verification is shown both as a fraction of those candidates and as a fraction of all imports
-(167/264 is 63%, not 65%). This is evidence for the current device/API only.
-A name resolving at runtime does not prove Darwin/Android ABI compatibility or link the imported code.
+classifier assigned exactly one reviewed mapping kind to (same-name NDK/system export, compiler-runtime
+candidate, `libcompat_runtime_v1.so` guest-adapter catalog entry, compiled `libioscompat.so`
+implementation export, or reviewed semantic target) and therefore reaches 100% for a fully triaged
+IPA. The *same-name NDK candidate subset* is the strict count of symbols whose exact name exists in
+the reviewed Android catalog; it is divided by all distinct imports and excludes Darwin spellings
+and guest-runtime adapters. The provider-catalog count is another, separate measure: in the checked-in
+Angry Birds v1.0 fixture, `181/254` are strict same-name candidates and `73/254` have non-same-name
+guest-runtime adapter catalog entries. Those 73 are not static NDK links, per-image fixup results, or
+proof of full API semantics. The eight compiler-runtime/unwind candidates are reported on their own
+axis, and all eight happen to have guest-adapter catalog entries in this fixture; that is not a static
+NDK compiler-rt/libunwind link or proof those imports were bound for a loaded image. At runtime, the
+game report's `runtimeLinking` block records actual import-slot bind/relocation
+results. Device `dlsym` export verification is shown both as a fraction of same-name candidates and
+of all imports (167/264 is 63%, not 65%); it is evidence for the current device/API only. A name
+resolving at runtime does not prove Darwin/Android ABI compatibility or link the imported code.
 Dependency grades are deliberately distinct: `provided` means a reviewed Android system ABI is a
 possible target; `compatibility` is reserved for bounded, tested implementation subsets;
 `candidate` means only a semantic/API target exists; `no-execution-path-yet` means no Android
@@ -140,9 +162,10 @@ still claims no per-callsite API replacement.
 
 A native C frame-callback service is driven by Android `Choreographer` in the bounded launcher's
 lifecycle. It is not the Objective-C `CADisplayLink` class/selector ABI, and no game callsite uses
-it yet. The `libgcc_s.1.dylib` mapping is only triage: Android has no drop-in `libgcc_s.so`; compiler
-helpers and unwind/personality symbols need NDK compiler-rt/libunwind toolchain integration and ABI
-validation before a link can be claimed. GNU `libstdc++.6.dylib` is also only a candidate: LLVM
+it yet. The `libgcc_s.1.dylib` mapping is not a drop-in `libgcc_s.so` alias: some ARM32 arithmetic
+helpers and unwind boundaries have guest-runtime adapters, while static NDK compiler-rt/libunwind
+linking and full SjLj/personality/landing-pad semantics remain separate and unclaimed. GNU
+`libstdc++.6.dylib` is also only a candidate: LLVM
 `libc++_shared.so` is not a drop-in GNU C++ ABI substitute, and low-level symbol overlap is not
 proof of compatible C++ objects, exceptions, or linkage.
 
@@ -172,8 +195,8 @@ python3 -m unittest discover -v
 
 Java 17, Python 3.10+, C++17, Android platform 35, build-tools 35.0.0, NDK 27.2.12479018,
 CMake 3.22.1; the Gradle wrapper is included. No Python packages are required for the
-analyzer, tests or conversions; the optional `capstone` package (`pip install capstone`)
-enables the host static-recompilation plan (`staticRecompilationPlan`) and the game-path
+analyzer, tests or conversions; the optional `capstone==5.0.7` package
+(`pip install 'capstone==5.0.7'`) enables the host static-recompilation plan (`staticRecompilationPlan`) and the game-path
 disassembly tests, which otherwise report `UNAVAILABLE` or skip.
 
 A small synthetic sample IPA (`tests/data/sample-leaf.ipa`, regenerable with

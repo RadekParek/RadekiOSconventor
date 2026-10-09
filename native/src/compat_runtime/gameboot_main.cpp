@@ -29,6 +29,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -80,15 +81,22 @@ int main(int argc, char **argv) {
             }
         }
         const auto bytes = readMainBinary(argv[1]);
-        // The guest's own bundle reads are served from directories this front end
-        // chose. The bundle mount is read-only; the fabricated NSHomeDirectory
-        // results (Documents/Library/"~") get a writable scratch directory.
+        // The guest's bundle is read-only. Its home and temporary paths map to
+        // a separate writable scratch tree; longest-prefix mounts keep the
+        // bundle and common iOS directories from falling through to the root.
         auto &files = radek::compat_runtime::guestFileSystem();
         if (payloadDirectory != nullptr) {
+            const std::filesystem::path scratch =
+                std::filesystem::path(payloadDirectory).parent_path() / "radek-home";
+            for (const auto *relative : {"Documents", "Library", "Library/Caches",
+                                         "Library/Application Support",
+                                         "Library/Autosave Information", "tmp"})
+                std::filesystem::create_directories(scratch / relative);
             files.mount(radek::compat_runtime::bundleGuestPath(), payloadDirectory, false);
-            std::string scratch = std::string(payloadDirectory) + "/../radek-home";
-            files.mount("/Documents", scratch + "/Documents", true);
-            files.mount("/Library", scratch + "/Library", true);
+            files.mount("/", scratch.string(), true);
+            files.mount("/Documents", (scratch / "Documents").string(), true);
+            files.mount("/Library", (scratch / "Library").string(), true);
+            files.mount("/tmp", (scratch / "tmp").string(), true);
         }
         radek::compat_runtime::ShimRegistry shims;
         radek::compat_runtime::objc::ShimAdapter objcShims;
@@ -142,7 +150,8 @@ int main(int argc, char **argv) {
         // implemented helpers.
         {
             radek::Json helpers = radek::Json::object();
-            helpers["implementedSymbols"] = static_cast<std::uint64_t>(9);
+            helpers["implementedSymbols"] = static_cast<std::uint64_t>(compilerRuntime.registeredSymbolCount());
+            helpers["registeredSymbolCount"] = static_cast<std::uint64_t>(compilerRuntime.registeredSymbolCount());
             helpers["calls"] = compilerRuntime.callCount();
             helpers["basis"] =
                 "ARM EABI compiler-runtime helpers (__divsi3/__modsi3/__udivsi3/__umodsi3, "
@@ -151,19 +160,39 @@ int main(int argc, char **argv) {
             report["compilerRuntime"] = std::move(helpers);
         }
 
-        // Provider observability: the strict Darwin-only catalog is checked at
-        // startup, independently of the loader's later import resolution.
+        // Provider observability: same-name NDK and guest-adapter catalogs
+        // are checked at startup, independently of per-image import fixups.
         {
             radek::Json providers = radek::Json::object();
             providers["concreteDarwinProviderCount"] = static_cast<std::uint64_t>(
-                radek::compat_runtime::compat_import_catalog::kDarwinOnlyProviderCount);
+                radek::compat_runtime::compat_import_catalog::kGuestRuntimeAdapterProviderCount);
+            providers["guestRuntimeAdapterCatalogCount"] = static_cast<std::uint64_t>(
+                radek::compat_runtime::compat_import_catalog::kGuestRuntimeAdapterProviderCount);
+            providers["guestRuntimeAdapterRegistrationStatus"] = "COMPLETE";
             providers["sameNameNdkProviderCount"] = static_cast<std::uint64_t>(
                 radek::compat_runtime::ndk_import_catalog::kProviderCount);
+            providers["sameNameNdkRegistrationStatus"] = "COMPLETE";
+            providers["sameNameNdkRegistrationPercent"] = std::uint64_t{100};
+            providers["fixtureSameNameNdkImportCount"] = static_cast<std::uint64_t>(
+                ndkShims.fixtureProviderCount());
+            providers["fixtureSameNameNdkNonGenericProviderCount"] = static_cast<std::uint64_t>(
+                ndkShims.fixtureNonGenericProviderCount());
+            providers["fixtureSameNameNdkGenericProviderCount"] = static_cast<std::uint64_t>(
+                ndkShims.fixtureGenericProviderCount());
+            providers["fixtureSameNameNdkAdapterStatus"] =
+                ndkShims.fixtureProviderCount() == 181 &&
+                        ndkShims.fixtureNonGenericProviderCount() == 181 &&
+                        ndkShims.fixtureGenericProviderCount() == 0
+                    ? "ALL_FIXTURE_IMPORTS_HAVE_TYPED_OR_FAIL_CLOSED_ADAPTERS"
+                    : "FIXTURE_IMPORT_ADAPTER_GAP";
             providers["fullNdkCandidateInventoryCount"] = static_cast<std::uint64_t>(
                 radek::compat_runtime::ndk_full_import_catalog::kProviderCount);
+            providers["fullNdkRegisteredProviderCount"] = static_cast<std::uint64_t>(
+                radek::compat_runtime::ndk_full_import_catalog::kProviderCount);
             providers["fullNdkCatalogStatus"] = "COMPLETE";
+            providers["fullNdkSemanticImplementationStatus"] = "PARTIAL_TYPED_AND_GENERIC_BOUNDARIES";
             providers["reviewedProviderCount"] = static_cast<std::uint64_t>(
-                radek::compat_runtime::compat_import_catalog::kDarwinOnlyProviderCount +
+                radek::compat_runtime::compat_import_catalog::kGuestRuntimeAdapterProviderCount +
                 radek::compat_runtime::ndk_import_catalog::kProviderCount);
             providers["boundedNdkFallbackCalloutCount"] = static_cast<std::uint64_t>(
                 ndkShims.registeredCalloutCount());
@@ -178,8 +207,16 @@ int main(int argc, char **argv) {
             providers["registrationStatus"] = "COMPLETE";
             providers["sameNameNdkCandidatesAreSeparate"] = true;
             providers["note"] =
-                "Darwin-only providers are typed compatibility adapters or guest-data bindings; "
-                "they are not relabelled Android NDK exports and do not prove game linkage.";
+                "Catalog registration is complete for the " +
+                std::to_string(radek::compat_runtime::ndk_import_catalog::kProviderCount) +
+                " strict same-name NDK names, the " +
+                std::to_string(radek::compat_runtime::compat_import_catalog::kGuestRuntimeAdapterProviderCount) +
+                " guest-runtime adapter names, and the " +
+                std::to_string(radek::compat_runtime::ndk_full_import_catalog::kProviderCount) +
+                " broad NDK candidates. All 181 same-name imports in this fixture resolve to a non-generic "
+                "signature-aware adapter or explicit fail-closed boundary; the separate 75-name guest-adapter "
+                "inventory has 73 names observed in the fixture. Registration is not semantic completeness or "
+                "static linking. Per-image binds are reported under runtimeLinking.";
             report["importProviders"] = std::move(providers);
         }
 

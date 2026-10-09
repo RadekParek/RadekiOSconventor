@@ -757,7 +757,12 @@ class _Emitter:
         """
         from capstone.arm import ARM_OP_IMM, ARM_OP_MEM, ARM_OP_REG
         ops = insn.operands
-        memop = next(o for o in ops[1:] if o.type == ARM_OP_MEM)
+        memop = next((operand for operand in ops[1:] if operand.type == ARM_OP_MEM), None)
+        if memop is None:
+            raise LiftError(
+                "memory transfer has no ARM_OP_MEM detail operand; "
+                "install capstone >= 5.0.6 or report the instruction detail"
+            )
         mem = memop.mem
         if mem.base == 0:
             raise LiftError("memory operand without base")
@@ -875,7 +880,12 @@ class _Emitter:
 
     def emit_ldr_pc(self, addr: int, insn, prefix: list[str]) -> list[str]:
         from capstone.arm import ARM_OP_MEM
-        memop = next(o for o in insn.operands[1:] if o.type == ARM_OP_MEM)
+        memop = next((operand for operand in insn.operands[1:] if operand.type == ARM_OP_MEM), None)
+        if memop is None:
+            raise LiftError(
+                "ldr pc has no ARM_OP_MEM detail operand; "
+                "install capstone >= 5.0.6 or report the instruction detail"
+            )
         mem = memop.mem
         base_no = _reg_no(_cs(), mem.base)
         if base_no == 15 and mem.index != 0:

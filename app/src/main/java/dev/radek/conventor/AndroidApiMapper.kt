@@ -14,14 +14,16 @@ internal object AndroidApiMapper {
 
     /**
      * Classifications that describe a *reviewed Android mapping* of some kind:
-     * a same-name NDK/system export, an NDK compiler-runtime toolchain symbol, a
-     * concrete compiled compatibility implementation, or a reviewed semantic
-     * target. `COMPAT_STUB_HANDLER_REGISTERED` (an explicitly unimplemented
+     * a same-name NDK/system candidate, an NDK compiler-runtime toolchain
+     * candidate, a guest-runtime adapter catalog entry, a compiled
+     * compatibility implementation, or a reviewed semantic target.
+     * `COMPAT_STUB_HANDLER_REGISTERED` (an explicitly unimplemented
      * handler) and `UNMAPPED` are deliberately not members.
      */
     private val REVIEWED_MAPPING_CLASSIFICATIONS = setOf(
         "BIONIC_SYMBOL_CANDIDATE",
         "COMPILER_RUNTIME_CANDIDATE",
+        "GUEST_RUNTIME_ADAPTER_CATALOGUED",
         "IMPLEMENTED_API_REPLACEMENT_AVAILABLE",
         "COMPAT_VERIFIED_HANDLER_RESOLVED",
         "SEMANTIC_REWRITE_CANDIDATE",
@@ -1312,15 +1314,16 @@ internal object AndroidApiMapper {
         var directCandidates = 0
         var runtimeVerifiedCandidates = 0
         // A reviewed provider is either an exact Android NDK/system-library
-        // candidate or an entry in the concrete Darwin compatibility catalog.
-        // This denominator is deliberately separate from the strict same-name
-        // candidate count above: Darwin spellings are not relabelled as Bionic.
+        // candidate or an entry in the compat-runtime-v1 guest-adapter catalog.
+        // This denominator is separate from strict same-name candidates: Darwin
+        // spellings are never relabelled as Bionic exports.
         var reviewedRuntimeProviders = 0
         var concreteDarwinProviders = 0
         var implementedReplacementCandidates = 0
         var runtimeVerifiedApiReplacements = 0
         var semanticCandidates = 0
         var compilerRuntimeCandidates = 0
+        var compilerRuntimeGuestProviders = 0
         var compatStubHandlers = 0
         var compatVerifiedHandlers = 0
         var unmappedSymbols = 0
@@ -1334,6 +1337,7 @@ internal object AndroidApiMapper {
         var reviewedMappedSameName = 0
         var reviewedMappedCompilerRuntime = 0
         var reviewedMappedCompatImplementation = 0
+        var reviewedMappedGuestRuntimeAdapter = 0
         var reviewedMappedSemantic = 0
         symbols.sorted().forEach { source ->
             // Mach-O C symbols conventionally carry one leading underscore. Remove
@@ -1365,7 +1369,7 @@ internal object AndroidApiMapper {
             val verifiedOnDevice = resolvedLibrary != null
             val reviewedProvider = when {
                 direct -> "ndk:$library:$candidate"
-                concreteDarwinProvider != null -> "libioscompat.so:$concreteDarwinProvider"
+                concreteDarwinProvider != null -> "libcompat_runtime_v1.so:$concreteDarwinProvider"
                 else -> null
             }
             val concreteProvider = concreteDarwinProvider != null
@@ -1376,6 +1380,7 @@ internal object AndroidApiMapper {
             if (replacementTarget != null) implementedReplacementCandidates++
             if (replacementVerified) runtimeVerifiedApiReplacements++
             if (compilerRuntimeCandidate != null) compilerRuntimeCandidates++
+            if (compilerRuntimeCandidate != null && concreteDarwinProvider != null) compilerRuntimeGuestProviders++
             if (!direct && compilerRuntimeCandidate == null && replacementTarget == null && semanticTarget != null) semanticCandidates++
 
             val item = JSONObject()
@@ -1385,6 +1390,9 @@ internal object AndroidApiMapper {
                 .put("runtimeProvider", reviewedProvider ?: JSONObject.NULL)
                 .put("runtimeProviderConcrete", concreteProvider)
                 .put("compatibilityProvider", concreteDarwinProvider ?: JSONObject.NULL)
+                .put("guestRuntimeProvider", concreteDarwinProvider ?: JSONObject.NULL)
+                .put("guestRuntimeProviderLibrary", if (concreteProvider) "libcompat_runtime_v1.so" else JSONObject.NULL)
+                .put("guestRuntimeProviderCatalogued", concreteProvider)
             var stubOnlyEvidence = false
             when {
                 // Bionic already ships these symbols with the identical C ABI, so
@@ -1412,7 +1420,19 @@ internal object AndroidApiMapper {
                     .put("targetSymbol", candidate)
                     .put("resolutionEvidence", "REVIEWED_TOOLCHAIN_CANDIDATE_NOT_LINKED")
                     .put("staticRecompilationStrategy", "static NDK compiler-rt/libunwind integration required; no libgcc_s.so alias or link was generated")
-                    .put("reason", "$compilerRuntimeCandidate. Android NDK does not provide a drop-in libgcc_s.so; symbol ABI and exception personality must be validated before a link can be claimed.")
+                    .put("reason", "$compilerRuntimeCandidate. Android NDK does not provide a drop-in libgcc_s.so; symbol ABI and exception personality must be validated before a static link can be claimed.")
+                concreteDarwinProvider != null -> item
+                    .put("classification", "GUEST_RUNTIME_ADAPTER_CATALOGUED")
+                    .put("targetLibrary", "libcompat_runtime_v1.so (ARM32 guest adapter catalog)")
+                    .put("targetSymbol", concreteDarwinProvider)
+                    .put("resolutionEvidence", "GUEST_RUNTIME_PROVIDER_CATALOG")
+                    .put("staticRecompilationStrategy", "Mach-O import-slot fixup to a guest callout/data adapter at game-runtime launch; no static Android code-callsite rewrite")
+                    .put("compilerRuntimeCandidate", compilerRuntimeCandidate ?: JSONObject.NULL)
+                    .put("reason", when (concreteDarwinProvider) {
+                        "sjlj.resume-boundary" -> "The guest loader can bind this import to the explicit SjLj resume boundary, but SjLj phase-2 resume/personality/landing-pad transfer remains fail-closed; this is not a working libunwind implementation."
+                        "cxxabi.gxx-personality-sj0" -> "The guest loader can bind this import to the C++ ABI personality boundary, but SjLj personality dispatch and landing-pad transfer remain unsupported."
+                        else -> "The compat-runtime-v1 catalog registers a guest ABI adapter for this Darwin-only/compiler-runtime symbol. Actual slot binding is confirmed only by the runtimeLinking report when the guest image is loaded; static NDK/libunwind linking and full API semantics are not implied."
+                    })
                 replacementTarget != null -> item
                     .put("classification", "IMPLEMENTED_API_REPLACEMENT_AVAILABLE")
                     .put("targetLibrary", "libioscompat.so")
@@ -1490,6 +1510,7 @@ internal object AndroidApiMapper {
             when (item.optString("classification")) {
                 "BIONIC_SYMBOL_CANDIDATE" -> reviewedMappedSameName++
                 "COMPILER_RUNTIME_CANDIDATE" -> reviewedMappedCompilerRuntime++
+                "GUEST_RUNTIME_ADAPTER_CATALOGUED" -> reviewedMappedGuestRuntimeAdapter++
                 "IMPLEMENTED_API_REPLACEMENT_AVAILABLE",
                 "COMPAT_VERIFIED_HANDLER_RESOLVED" -> reviewedMappedCompatImplementation++
                 "SEMANTIC_REWRITE_CANDIDATE" -> reviewedMappedSemantic++
@@ -1552,6 +1573,7 @@ internal object AndroidApiMapper {
             .put("breakdown", JSONObject()
                 .put("sameNameNdkOrSystemExport", reviewedMappedSameName)
                 .put("compilerRuntimeToolchain", reviewedMappedCompilerRuntime)
+                .put("guestRuntimeAdapterCatalogued", reviewedMappedGuestRuntimeAdapter)
                 .put("concreteCompatImplementation", reviewedMappedCompatImplementation)
                 .put("reviewedSemanticApiTarget", reviewedMappedSemantic)
                 .put("kindCountsSum", reviewedMappedImports)
@@ -1567,16 +1589,16 @@ internal object AndroidApiMapper {
             )
         return JSONObject()
             .put("schemaVersion", 7)
-            .put("measure", "Reviewed Android mapping coverage counts every observed import that the classifier assigned a reviewed Android mapping kind to (same-name public NDK/system or shared C++ runtime export, NDK compiler-rt/libunwind toolchain symbol, concrete libioscompat.so implementation export, or reviewed semantic API target). The strict same-name NDK candidate subset is reported separately with its own percent, so a 100% mapping figure never means 100% same-name matches. Candidate and mapping coverage are divided by all distinct imports; exact runtime export verification is reported both against candidate names and against all imports, with separate denominators. A current-device dlsym hit proves only that the public-library export resolves on this device/API level, not that the iOS caller ABI, relocation, callsite rewrite, or game link is compatible. Compiler-rt/libunwind names are toolchain candidates, not a libgcc_s.so alias or completed link. Runtime compatibility-shim counts identify concrete exports in libioscompat.so, but none proves IPA callsite rewriting or game linking. Classification coverage is triage, not implementation coverage; no count represents playable Android code. Registered compat stub handlers are explicit unimplemented resolution targets; only verified handlers identify tested implementation bodies.")
+            .put("measure", "Reviewed Android mapping coverage counts every observed import assigned one reviewed kind: a same-name public NDK/system candidate, compiler-runtime candidate, compat-runtime-v1 guest adapter catalog entry, compiled libioscompat.so implementation export, or semantic API target. The strict same-name NDK candidate subset is reported separately, so a 100% reviewed mapping figure never means 100% same-name matches or complete API semantics. A guest adapter catalog entry is not a verified runtime slot fixup; actual bind/relocation results appear in the game-runtime report under runtimeLinking. Compiler-rt/libunwind names are not a libgcc_s.so alias or static NDK link. Current-device dlsym hits and compatibility-shim exports do not by themselves establish caller-ABI correctness, IPA callsite rewriting, or gameplay. Classification coverage is triage, not implementation coverage; registered stub/boundary handlers are not full API implementations.")
             .put("reviewedMapping", reviewedMapping)
             .put("reviewedMappingCount", reviewedMappedImports)
             .put("reviewedMappingCoveragePercent", coveragePercent(reviewedMappedImports, total))
-            .put("providerCoverageMeasure", "Concrete import-provider coverage counts exact reviewed Android NDK/system candidates together with the separately catalogued typed Darwin compatibility providers. Darwin-only symbols remain compatibility providers and are never relabelled as same-name NDK exports; the strict same-name subset remains mappedNameCandidates/total.")
+            .put("providerCoverageMeasure", "Reviewed-provider coverage counts exact Android NDK/system name candidates plus separately catalogued compat-runtime-v1 guest adapters. Darwin-only symbols are not same-name NDK exports. Catalog presence does not prove a runtime fixup, full API semantics, or a static callsite rewrite.")
             .put("evidence", evidenceSummary)
-            // This is the honest import-provider axis: exact NDK/system
-            // candidates plus the independently reviewed concrete Darwin
-            // compatibility catalog. It does not alter mappedNameCandidates,
-            // which remains the strict same-name denominator.
+            // This is the reviewed import-provider-catalog axis: exact
+            // NDK/system candidates plus the compat-runtime guest-adapter
+            // catalog. It does not alter mappedNameCandidates, which remains
+            // the strict same-name denominator.
             .put("runtimeProviderCount", reviewedRuntimeProviders)
             .put("runtimeProviderCoveragePercent", reviewedRuntimeProviderCoveragePercent)
             .put("runtimeProviderTotal", total)
@@ -1584,6 +1606,15 @@ internal object AndroidApiMapper {
             .put("concreteDarwinProviderCount", concreteDarwinProviders)
             .put("concreteDarwinProviderCoveragePercent", concreteDarwinProviderCoveragePercent)
             .put("concreteDarwinProviderExpectedCount", CompatImportProviders.EXPECTED_DARWIN_ONLY_IMPORT_COUNT)
+            .put("guestRuntimeProviderCount", concreteDarwinProviders)
+            .put("guestRuntimeProviderCoveragePercent", concreteDarwinProviderCoveragePercent)
+            .put("guestRuntimeProviderInventoryCount", CompatImportProviders.EXPECTED_GUEST_RUNTIME_ADAPTER_COUNT)
+            .put("guestRuntimeAdapterCataloguedCount", concreteDarwinProviders)
+            .put("guestRuntimeAdapterCatalogInventoryCount", CompatImportProviders.EXPECTED_GUEST_RUNTIME_ADAPTER_COUNT)
+            .put("guestRuntimeProviderLibrary", "libcompat_runtime_v1.so")
+            .put("guestRuntimeProviderCatalogStatus", if (concreteDarwinProviders == 0) "NO_MATCHES" else "CATALOG_ONLY_NOT_RUNTIME_LINKED")
+            .put("compilerRuntimeGuestProviderCount", compilerRuntimeGuestProviders)
+            .put("compilerRuntimeUncataloguedCandidateCount", (compilerRuntimeCandidates - compilerRuntimeGuestProviders).coerceAtLeast(0))
             .put("fullNdkCandidateInventoryCount", bionicLibraries.values.sumOf { it.size })
             .put("fullNdkCatalogStatus", "COMPLETE")
             .put("sameNameNdkProviderCount", directCandidates)
