@@ -560,7 +560,7 @@ class AndroidApiMapperTest {
 
     @Test fun compatibilityNeedsListSeparatesNdkCandidatesCatalogEntriesAndUnimplementedStubs() {
         val mapping = JSONObject()
-            .put("distinctImportSymbols", 3)
+            .put("distinctImportSymbols", 4)
             .put("mappedNameCandidates", 1)
             .put("runtimeVerifiedNdkCandidates", 0)
             .put("guestRuntimeProviderCount", 1)
@@ -584,17 +584,28 @@ class AndroidApiMapperTest {
                     .put("classification", "COMPAT_STUB_HANDLER_REGISTERED")
                     .put("targetLibrary", "libioscompat.so")
                     .put("targetSymbol", "radek_compat_stub")
-                    .put("reason", "The stub does not implement the API.")))
+                    .put("reason", "The stub does not implement the API."))
+                .put(JSONObject()
+                    .put("sourceSymbol", "_ResolvedApi")
+                    .put("classification", "IMPLEMENTED_API_REPLACEMENT_AVAILABLE")
+                    .put("targetLibrary", "libioscompat.so")
+                    .put("targetSymbol", "radek_impl_resolved_api")))
 
         val output = ApiNeedReport.format(mapping)
 
+        // The filtered report counts needs against all imports and lists each
+        // unresolved symbol in its own actionable category.
+        assertTrue(output.contains("Unimplemented / unresolved NDK needs: 3 of 4 imports"))
         assertTrue(output.contains("_malloc"))
-        assertTrue(output.contains("device export verification"))
+        assertTrue(output.contains("NDK CANDIDATES"))
         assertTrue(output.contains("_OBJC_CLASS_\$_UIView"))
-        assertTrue(output.contains("not a same-name NDK export"))
+        assertTrue(output.contains("GUEST ADAPTERS"))
         assertTrue(output.contains("_UnknownApi"))
-        assertTrue(output.contains("UNIMPLEMENTED"))
-        assertTrue(output.contains("not a linked-game or complete-API count"))
+        assertTrue(output.contains("STUBS"))
+        // Fully resolved imports are hidden: no entry, no triage prose.
+        assertFalse(output.contains("_ResolvedApi"))
+        assertFalse(output.contains("device export verification"))
+        assertFalse(output.contains("not a linked-game or complete-API count"))
     }
 
     @Test fun compatResolverExceptionsFallBackToUnmapped() {
