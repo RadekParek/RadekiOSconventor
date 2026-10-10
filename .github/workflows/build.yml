@@ -314,6 +314,23 @@ jobs:
               sys.exit(1)
           print("Angry Birds translated runtime input is verified and ready for APK import; no APK or gameplay is claimed")
           PY
+      # The verified Android link exists only on the runner until it is uploaded.
+      # This ZIP is what the phone imports ("Import portable-C handoff ZIP") before
+      # "Build game APK with translated code", which is what moves progress.
+      - name: Collect Angry Birds Android link handoff
+        if: always() && hashFiles('.local/angrybirds-conversion/bytecode-translation/translated-game-runtime-input.zip') != ''
+        run: |
+          mkdir -p artifacts/angrybirds-android-link
+          cp .local/angrybirds-conversion/bytecode-translation/translated-game-runtime-input.zip artifacts/angrybirds-android-link/
+          cp .local/angrybirds-conversion/bytecode-translation/android-link-report.json artifacts/angrybirds-android-link/ || true
+          cp .local/angrybirds-conversion/report.json artifacts/angrybirds-android-link/ || true
+      - name: Upload Angry Birds Android link handoff
+        if: always() && hashFiles('artifacts/angrybirds-android-link/**') != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: angrybirds-android-link-handoff
+          path: artifacts/angrybirds-android-link/
+          if-no-files-found: warn
       - name: Convert committed sample IPA with the host CLI
         run: |
           set -e
