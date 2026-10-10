@@ -35,6 +35,7 @@
 #include <sys/syscall.h>
 #include <sys/time.h>
 #include <time.h>
+#include <type_traits>
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
@@ -7787,9 +7788,8 @@ extern "C" radek_kern_return_t radek_compat_host_statistics(radek_mach_port_t ho
         std::memset(words, 0, hostVmInfoCount * sizeof(uint32_t));
         long long totalKb = 0, freeKb = 0, availableKb = 0;
         if (radekReadMemInfo(totalKb, freeKb, availableKb)) {
-            const long long pageSize = 4096;
-            const auto toPages = [pageSize](long long kb) {
-                return static_cast<uint32_t>((kb * 1024) / pageSize);
+            const auto toPages = [](long long kb) {
+                return static_cast<uint32_t>((kb * 1024) / 4096);
             };
             words[0] = toPages(freeKb);                              // free_count
             words[1] = (availableKb > freeKb) ? toPages(availableKb - freeKb) : 0;  // active_count
@@ -7959,11 +7959,26 @@ extern "C" radek_kern_return_t radek_compat_thread_policy_set(uint32_t thread, i
 }
 #endif
 
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_pthread_mach_thread_np) || \
+    defined(RADEK_API_radek_compat_pthread_threadid_np)
+namespace {
+// pthread_t is an integer on bionic/glibc and a pointer elsewhere; fold both
+// into a uintptr_t without tripping either cast rule.
+static inline uintptr_t radekPthreadHandleBits(pthread_t thread) {
+    if constexpr (std::is_pointer<pthread_t>::value) {
+        return reinterpret_cast<uintptr_t>(thread);
+    } else {
+        return static_cast<uintptr_t>(thread);
+    }
+}
+}  // namespace
+#endif
+
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_pthread_mach_thread_np)
 extern "C" uint64_t radek_compat_pthread_mach_thread_np(pthread_t thread) {
     // A stable, non-zero identifier derived from the thread handle. Mach port
     // names are opaque per-thread handles; callers only compare or log them.
-    const uint64_t value = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(thread));
+    const uint64_t value = static_cast<uint64_t>(radekPthreadHandleBits(thread));
     return (value & 0x7FFFFFFFull) != 0 ? (value & 0x7FFFFFFFull) : 1u;
 }
 #endif
@@ -7975,7 +7990,7 @@ extern "C" int32_t radek_compat_pthread_threadid_np(pthread_t thread, uint64_t *
         const long tid = syscall(SYS_gettid);
         *threadId = (tid > 0) ? static_cast<uint64_t>(tid) : 1u;
     } else {
-        const uint64_t value = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(thread));
+        const uint64_t value = static_cast<uint64_t>(radekPthreadHandleBits(thread));
         *threadId = (value & 0x7FFFFFFFull) != 0 ? (value & 0x7FFFFFFFull) : 1u;
     }
     return 0;

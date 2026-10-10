@@ -267,15 +267,17 @@ class AndroidApiMapperTest {
         assertEquals(5, mapping.getInt("compilerRuntimeCandidateCount"))
         assertEquals(0, mapping.getInt("unmappedSymbolCount"))
         assertEquals(100, mapping.getInt("classificationCoveragePercent"))
-        // ___divdi3 has a separate host-tested compatibility body, but it is
-        // also in the guest-adapter catalog. Keep the per-import classification
-        // on the guest runtime path; neither record is a direct NDK link.
+        // ___divdi3 has a separate host-tested compatibility body and its
+        // compat-runtime-v1 adapter carries verified semantics (exact 64-bit
+        // division covered by the host test suite), so it is promoted to the
+        // verified-handler classification; neither record is a direct NDK link.
         assertEquals(4, decoded.count { it.getString("classification") == "COMPILER_RUNTIME_CANDIDATE" })
         assertEquals(0, decoded.count { it.getString("classification") == "IMPLEMENTED_API_REPLACEMENT_AVAILABLE" })
         assertEquals(1, mapping.getInt("implementedApiReplacementCount"))
         val divdi3 = decoded.single { it.getString("sourceSymbol") == "___divdi3" }
-        assertEquals("GUEST_RUNTIME_ADAPTER_CATALOGUED", divdi3.getString("classification"))
+        assertEquals("COMPAT_VERIFIED_HANDLER_RESOLVED", divdi3.getString("classification"))
         assertEquals("compiler-runtime.divdi3", divdi3.getString("targetSymbol"))
+        assertEquals("GUEST_RUNTIME_PROVIDER_VERIFIED_SEMANTICS", divdi3.getString("resolutionEvidence"))
         assertTrue(divdi3.getJSONObject("evidence").getBoolean("hostTestedImplementation"))
         assertTrue(decoded.all { !it.getBoolean("linkedOrRewritten") && !it.getBoolean("codeGenerated") })
         assertTrue(decoded.any { it.getString("reason").contains("does not provide a drop-in libgcc_s.so") })
@@ -376,14 +378,18 @@ class AndroidApiMapperTest {
         assertEquals(2, mapping.getInt("compilerRuntimeGuestProviderCount"))
         assertEquals(4, mapping.getInt("runtimeProviderCount"))
         assertEquals(3, guestRows.size)
-        assertTrue(guestRows.all { it.getString("classification") == "GUEST_RUNTIME_ADAPTER_CATALOGUED" })
+        // ___divdi3's adapter is verified-semantics and promoted; the NSObject
+        // class and the SjLj register adapter stay outstanding catalog entries.
+        assertEquals(1, guestRows.count { it.getString("classification") == "COMPAT_VERIFIED_HANDLER_RESOLVED" })
+        assertEquals(2, guestRows.count { it.getString("classification") == "GUEST_RUNTIME_ADAPTER_CATALOGUED" })
         assertTrue(guestRows.all { it.getString("targetLibrary").contains("libcompat_runtime_v1.so") })
         assertTrue(guestRows.all { it.getString("staticRecompilationStrategy").contains("no static Android code-callsite rewrite") })
         assertEquals(0, mapping.getInt("runtimeVerifiedNdkCandidates"))
         assertEquals(1, mapping.getInt("runtimeVerifiedCandidateCount"))
         assertEquals(0, mapping.getInt("linkedImplementationCount"))
         val breakdown = mapping.getJSONObject("reviewedMapping").getJSONObject("breakdown")
-        assertEquals(3, breakdown.getInt("guestRuntimeAdapterCatalogued"))
+        assertEquals(2, breakdown.getInt("guestRuntimeAdapterCatalogued"))
+        assertEquals(1, breakdown.getInt("concreteCompatImplementation"))
         assertEquals(1, breakdown.getInt("sameNameNdkOrSystemExport"))
         assertEquals(0, breakdown.getInt("compilerRuntimeToolchain"))
         assertEquals(4, breakdown.getInt("kindCountsSum"))
