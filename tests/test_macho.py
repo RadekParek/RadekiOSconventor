@@ -105,7 +105,9 @@ class MachOTests(unittest.TestCase):
         """A overflowing bind address used to abort the whole import with an
         IOException. The stream is now stopped, the reason recorded, and the rest
         of the slice is still analyzed."""
-        stream = b"\x40_sym\x00\x70\x00\x90\x80" + b"\xff" * 9 + b"\x01"
+        # ULEB 2**63 (nine 0x80 continuation bytes, then 0x01): 8 + 2**63 lies
+        # outside the segment. A wrapped *inside* step is valid, see below.
+        stream = b"\x40_sym\x00\x70\x00\x90\x80" + b"\x80" * 9 + b"\x01"
         s = self._bind(stream)
         self.assertEqual(s["imports"][0]["name"], "_sym")
         self.assertEqual(s["architecture"], "arm64")
@@ -117,6 +119,29 @@ class MachOTests(unittest.TestCase):
         # is reported as partial instead of aborting the analysis.
         self.assertTrue(any("dyld bind" in reason for reason in reasons), reasons)
         self.assertEqual(s["fixupAnomalies"][0]["stream"], "bind")
+
+    def test_wrapped_backward_bind_step_inside_segment_decodes(self):
+        # ld64 and LLD emit weak-bind tables in symbol order, so a later bind can
+        # sit below the previous one. The step is encoded as the wrapped ULEB of
+        # its negative delta; dyld wraps the cursor, so both binds must decode.
+        delta = (0x20 - (0x100 + 8)) % (1 << 64)  # cursor 0x108 -> 0x20
+        stream = (
+            b"\x40_a\x00\x70" + _uleb(0x100) + b"\x90"
+            + b"\x40_b\x00\x80" + _uleb(delta) + b"\x90"
+            + b"\x00"
+        )
+        s = self._bind(stream)
+        self.assertEqual(s["fixupStreams"][0]["status"], "decoded")
+        self.assertEqual([i["name"] for i in s["imports"]], ["_a", "_b"])
+        self.assertEqual([i["offset"] for i in s["imports"]], [0x100, 0x20])
+        self.assertTrue(s["bindDecodingComplete"])
+
+    def test_bind_step_past_segment_end_is_reported_not_fatal(self):
+        # 0x100 + 0x20000 lands past the 0x10000-byte segment: still an error.
+        stream = b"\x40_a\x00\x70" + _uleb(0x100) + b"\x80" + _uleb(0x20000)
+        s = self._bind(stream)
+        self.assertEqual(s["fixupStreams"][0]["status"], "partial")
+        self.assertTrue(any("dyld bind" in a["reason"] for a in s["fixupAnomalies"]))
 
     def test_dyld_bind_outside_segment_is_reported_not_fatal(self):
         stream = b"\x40_sym\x00\x70\xff\xff\x7f\x90"

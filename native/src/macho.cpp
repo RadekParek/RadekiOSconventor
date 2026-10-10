@@ -696,11 +696,15 @@ Json thin(Reader r, bool includeSymbolDetails) {
             };
             auto advance = [&](uint64_t amount) {
                 auto vmSize = segmentSize();
-                // Bind addresses are segment-relative offsets. Check the segment bound
-                // before adding so malformed ULEBs cannot wrap the 64-bit cursor.
-                if (address > vmSize || amount > vmSize - address)
+                // dyld moves this cursor with unsigned 64-bit arithmetic, and ld64 /
+                // LLD encode a backward step as the wrapped ULEB of its negative
+                // delta (weak-bind tables are emitted in symbol order, not address
+                // order). So the step wraps, and the bound is checked on the cursor
+                // that results: it must still lie inside the segment.
+                const uint64_t next = address + amount;
+                if (address > vmSize || next > vmSize)
                     throw std::runtime_error("dyld bind address outside segment");
-                address += amount;
+                address = next;
             };
             auto emit = [&]() {
                 if (symbol.empty())

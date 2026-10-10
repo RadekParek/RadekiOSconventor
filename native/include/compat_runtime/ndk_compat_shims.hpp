@@ -44,12 +44,32 @@ class ShimAdapter {
         GuestAddress callerReturnAddress = 0;
         GuestAddress threadToken = 0;
         GuestAddress threadCell = 0;
+        GuestAddress savedUnwindTop = 0;
+        // The creator's registers at pthread_create. A worker that is ended
+        // early can leave SP and the callee-saved registers pointing into its
+        // own frames, so the continuation restores them from here.
+        CpuRegisterState creatorRegisters{};
     };
+    std::function<GuestAddress(GuestAddressSpace &)> beginWorkerUnwindChain_;
+    std::function<void(GuestAddressSpace &, GuestAddress)> endWorkerUnwindChain_;
     std::map<GuestAddressSpace *, std::vector<PthreadFrame>> pthreadFrames_;
     std::map<GuestAddressSpace *, std::vector<GuestAddress>> completedPthreads_;
     std::uint64_t guestThreadTransfers_ = 0;
     std::uint64_t guestThreadCompletions_ = 0;
     GuestAddress pthreadContinuationAddress_ = 0;
+    // Consecutive EBUSY answers given to a synchronously-run guest worker, and
+    // how many workers were ended because of it (see noteWorkerMutexBusy).
+    std::uint32_t workerMutexBusyStreak_ = 0;
+    std::uint64_t guestThreadBusyCancellations_ = 0;
+
+    /**
+     * Single-CPU pthread scheduling runs a worker to completion inside
+     * pthread_create, so a worker that waits on a mutex its suspended creator
+     * holds can never make progress. After a bounded streak of EBUSY answers
+     * from inside such a worker, end the worker through the normal pthread
+     * continuation so the creator resumes. Returns true when it was ended.
+     */
+    bool noteWorkerMutexBusy(CpuRegisterState &registers, GuestAddressSpace &memory);
 
     void registerFunction(ShimRegistry &registry, const std::string &symbol,
                           const std::string &adapterName, Invoke invoke);
@@ -68,6 +88,16 @@ class ShimAdapter {
     std::uint64_t callCount() const noexcept;
     std::uint64_t guestThreadTransferCount() const noexcept;
     std::uint64_t guestThreadCompletionCount() const noexcept;
+    /** Synchronously-run guest workers ended after a bounded EBUSY streak. */
+    std::uint64_t guestThreadBusyCancellationCount() const noexcept;
+
+    /**
+     * Connects guest workers to the SjLj unwind chain so each worker gets its
+     * own chain and the creator's chain is restored when the worker ends.
+     * Attach the same SjLjUnwindAdapter the shims were registered with.
+     */
+    void attachWorkerUnwindChain(std::function<GuestAddress(GuestAddressSpace &)> begin,
+                                 std::function<void(GuestAddressSpace &, GuestAddress)> end);
     std::uint64_t genericCallCount() const noexcept;
     std::size_t genericProviderCount() const noexcept;
     std::size_t typedProviderCount() const noexcept;

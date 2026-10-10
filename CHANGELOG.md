@@ -4,6 +4,18 @@ All notable changes to RadekiOSConventor. Every entry states what was verified a
 what was **not**: analysis, triage, name mappings and host static-recompilation
 coverage never mean a linked game, a playable conversion or a device-tested APK.
 
+## 2026-10-10 — Incremental Android relink; black-screen drawable re-bind
+
+**Verified (run in this sandbox):**
+- NDK discovery: explicit `ANDROID_NDK_HOME`/`ANDROID_NDK_ROOT`/`NDK_HOME` first, then SDK `ndk/<version>` folders sorted numerically (newest first), `local.properties` (`ndk.dir`, `sdk.dir`), and default SDK install paths. The last two apply only to the real process environment, so `environ=` calls stay hermetic. Tests: `tests/test_android_link_incremental.py`.
+- The "no NDK" reason names the exact settings to add.
+- Incremental relink logic is implemented: each translation unit compiles to its own object, cached by a content hash of source, headers, toolchain and flags; the shared object is relinked from the objects. **Not yet run against a real NDK**; the two relink tests skip without one.
+- Black-screen fix (`native/src/compat_runtime/gles_shims.cpp`): the EGL drawable is re-bound to the Android window surface before presenting when the surface arrives after the guest's drawable was attached to an offscreen pbuffer. The window pointer is now atomic (JNI thread writes, guest thread reads); a failed bind is remembered per window so it is not retried every frame. The repo's `-Werror` build (`tools/build_native.py`) passes and all native test targets pass.
+
+**Not verified:**
+- No Android NDK is available in this sandbox (dl.google.com is unreachable; GitHub's `android/ndk` releases carry no binaries). So no Android ELF has been linked, `portProgress` is unchanged at 0%, and the black-screen fix has not been seen on a device or with a real EGL driver.
+- Kotlin changes (`TranslatedAndroidLink`) are not compiled here (no Android SDK).
+
 ## 2026-10-09 — Android progress gated by verified artifacts; runtime evidence separated
 
 Whole-game Android-linked progress stays at 0 until the emitted Android ELF is present and its

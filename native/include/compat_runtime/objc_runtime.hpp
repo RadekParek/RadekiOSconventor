@@ -23,6 +23,10 @@ struct Object {
     Class *isa = nullptr;
     std::atomic<std::uint32_t> references{1};
     std::vector<Value> ivars;
+    // The ivar values this object last published to its guest memory. Used by
+    // the three-way sync: a slot the guest changed since then is adopted, and a
+    // slot the host changed (for example by a shim) is kept and published.
+    std::vector<Value> guestImage;
     // Host-backed payloads for the bounded Foundation NSString/NSArray subset.
     std::string stringValue;
     std::vector<Object *> arrayItems;

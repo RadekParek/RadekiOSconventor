@@ -429,6 +429,28 @@ void ShimAdapter::registerGenericCandidate(ShimRegistry &registry, const char *s
                      });
 }
 
+bool ShimAdapter::noteWorkerMutexBusy(CpuRegisterState &registers, GuestAddressSpace &memory) {
+    // Long enough that a worker which is only briefly contended keeps running;
+    // short enough that a worker stuck on its creator's mutex is ended in
+    // milliseconds rather than stalling the whole boot.
+    constexpr std::uint32_t kWorkerMutexBusyLimit = 4096;
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = pthreadFrames_.find(&memory);
+    if (found == pthreadFrames_.end() || found->second.empty()) {
+        workerMutexBusyStreak_ = 0;
+        return false;
+    }
+    if (++workerMutexBusyStreak_ < kWorkerMutexBusyLimit)
+        return false;
+    workerMutexBusyStreak_ = 0;
+    ++guestThreadBusyCancellations_;
+    // Same exit path as pthread_exit: the ordinary return jumps to the
+    // continuation, which records the worker as finished and restores the
+    // creator's saved LR, so pthread_create returns to the creator.
+    registers.r[14] = pthreadContinuationAddress_;
+    return true;
+}
+
 void ShimAdapter::registerBindings(ShimRegistry &registry) {
     // ---- process/control boundaries ---------------------------------------
     registerExceptionBoundary(registry, "_abort", "ndk-abort-boundary",
@@ -1188,6 +1210,15 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
                          }
                          const auto frame = found->second.back();
                          found->second.pop_back();
+                         if (endWorkerUnwindChain_)
+                             endWorkerUnwindChain_(memory, frame.savedUnwindTop);
+                         // AAPCS: SP and r4-r11 / d8-d15 belong to the creator.
+                         // A normal return already matches; an ended worker may not.
+                         registers.r[13] = frame.creatorRegisters.r[13];
+                         for (std::size_t index = 4; index <= 11; ++index)
+                             registers.r[index] = frame.creatorRegisters.r[index];
+                         for (std::size_t index = 8; index <= 15; ++index)
+                             registers.d[index] = frame.creatorRegisters.d[index];
                          completedPthreads_[&memory].push_back(frame.threadToken);
                          ++guestThreadCompletions_;
                          if (found->second.empty())
@@ -1245,10 +1276,14 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
                 reason = "pthread_create could not write the guest thread handle";
                 return false;
             }
+            // The worker starts with its own unwind chain; the creator's top is
+            // restored when the worker ends, however it ends.
+            const GuestAddress savedUnwindTop =
+                beginWorkerUnwindChain_ ? beginWorkerUnwindChain_(memory) : 0;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 pthreadFrames_[&memory].push_back(
-                    PthreadFrame{registers.r[14], token, threadCell});
+                    PthreadFrame{registers.r[14], token, threadCell, savedUnwindTop, registers});
                 ++guestThreadTransfers_;
             }
             registers.r[0] = argument;
@@ -1264,9 +1299,9 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
     registerFunction(registry, "_pthread_mutex_destroy", "ndk-pthread-mutex-destroy",
                      [](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { const std::uint32_t zero = 0; r.r[0] = r.r[0] && writeValue(memory, r.r[0], zero) ? 0U : kErrnoInvalidArgument; return true; });
     registerFunction(registry, "_pthread_mutex_lock", "ndk-pthread-mutex-lock",
-                     [](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { std::uint32_t value = 0; if (!r.r[0] || !readValue(memory, r.r[0], value)) { r.r[0] = kErrnoInvalidArgument; return true; } if (value != 0) { r.r[0] = kErrnoBusy; return true; } value = 1; writeValue(memory, r.r[0], value); r.r[0] = 0; return true; });
+                     [this](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { std::uint32_t value = 0; if (!r.r[0] || !readValue(memory, r.r[0], value)) { r.r[0] = kErrnoInvalidArgument; return true; } if (value != 0) { noteWorkerMutexBusy(r, memory); r.r[0] = kErrnoBusy; return true; } workerMutexBusyStreak_ = 0; value = 1; writeValue(memory, r.r[0], value); r.r[0] = 0; return true; });
     registerFunction(registry, "_pthread_mutex_trylock", "ndk-pthread-mutex-trylock",
-                     [](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { std::uint32_t value = 0; if (!r.r[0] || !readValue(memory, r.r[0], value)) { r.r[0] = kErrnoInvalidArgument; return true; } if (value != 0) { r.r[0] = kErrnoBusy; return true; } value = 1; writeValue(memory, r.r[0], value); r.r[0] = 0; return true; });
+                     [this](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { std::uint32_t value = 0; if (!r.r[0] || !readValue(memory, r.r[0], value)) { r.r[0] = kErrnoInvalidArgument; return true; } if (value != 0) { noteWorkerMutexBusy(r, memory); r.r[0] = kErrnoBusy; return true; } workerMutexBusyStreak_ = 0; value = 1; writeValue(memory, r.r[0], value); r.r[0] = 0; return true; });
     registerFunction(registry, "_pthread_mutex_unlock", "ndk-pthread-mutex-unlock",
                      [](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { const std::uint32_t zero = 0; r.r[0] = r.r[0] && writeValue(memory, r.r[0], zero) ? 0U : kErrnoInvalidArgument; return true; });
     registerFunction(registry, "_pthread_mutexattr_init", "ndk-pthread-mutexattr-init",
@@ -1388,6 +1423,19 @@ std::uint64_t ShimAdapter::guestThreadTransferCount() const noexcept {
 std::uint64_t ShimAdapter::guestThreadCompletionCount() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return guestThreadCompletions_;
+}
+
+void ShimAdapter::attachWorkerUnwindChain(
+    std::function<GuestAddress(GuestAddressSpace &)> begin,
+    std::function<void(GuestAddressSpace &, GuestAddress)> end) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    beginWorkerUnwindChain_ = std::move(begin);
+    endWorkerUnwindChain_ = std::move(end);
+}
+
+std::uint64_t ShimAdapter::guestThreadBusyCancellationCount() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return guestThreadBusyCancellations_;
 }
 
 std::uint64_t ShimAdapter::genericCallCount() const noexcept {

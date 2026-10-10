@@ -315,6 +315,15 @@ class ShimAdapter {
     void postTouch(GuestAddressSpace &memory, const std::string &phase, float x, float y);
     /** Cancels every scheduled source aimed at `target` (`-[NSTimer invalidate]`). */
     void cancelRunLoopSourcesFor(GuestAddressSpace &memory, GuestAddress target);
+    /**
+     * UIKit's layout pass for a view and its subviews: queues `layoutSubviews`
+     * for each view that implements it (parents first, each at most once).
+     * The run loop delivers it as an ordinary source, so the guest runs it in
+     * the same place as its other callbacks.
+     */
+    void queueLayoutPass(GuestAddressSpace &memory, GuestAddress view);
+    /** Whether a guest IMP for `selector` is reachable from `receiver`'s class chain. */
+    bool guestImplements(const Object *receiver, Selector selector) const;
 
     /** Deepest subview of the key window covering (x, y); the window on miss. */
     GuestAddress touchTargetFor(GuestAddressSpace &memory, float x, float y);
@@ -406,6 +415,15 @@ class ShimAdapter {
      * (an `NSThread` detach target). Returns false when nothing is queued or the
      * entry cannot be represented in guest memory.
      */
+    /**
+     * When the run loop has nothing left, a background thread the app queued
+     * (`-[NSThread start]`) runs now, on the same CPU, instead of being dropped:
+     * many engines keep their frame loop in that thread. Its return goes to the
+     * caller that is already in `registers.r[14]`. Returns true when a body was
+     * entered (and `guestTarget` is set).
+     */
+    bool enterQueuedThreadAtLoopExit(GuestAddressSpace &memory, CpuRegisterState &registers,
+                                     GuestAddress &guestTarget, std::string &reason);
     bool prepareQueuedMainThreadEntry(GuestAddressSpace &memory, CpuRegisterState &registers,
                                       GuestAddress &entryPoint, std::string &reason);
 

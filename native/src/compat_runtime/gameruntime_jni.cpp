@@ -225,6 +225,14 @@ Java_dev_radek_gameruntime_GameBootActivity_runGameBootAttempt(JNIEnv *env, jobj
         libsystemShims.registerBindings(shims);
         audioShims.registerBindings(shims);
         sjljUnwind.registerBindings(shims);
+        ndkShims.attachWorkerUnwindChain(
+            [&sjljUnwind](radek::compat_runtime::GuestAddressSpace &memory) {
+                return sjljUnwind.beginThreadChain(memory);
+            },
+            [&sjljUnwind](radek::compat_runtime::GuestAddressSpace &memory,
+                               radek::compat_runtime::GuestAddress savedTop) {
+                sjljUnwind.endThreadChain(memory, savedTop);
+            });
         compilerRuntime.registerBindings(shims);
         cxxAbi.registerBindings(shims);
         // Guest OpenGL ES 1.1 calls go to the platform's EGL/GLES driver through
@@ -399,6 +407,7 @@ Java_dev_radek_gameruntime_GameBootActivity_runGameBootAttempt(JNIEnv *env, jobj
             providers["ndkFallbackCallsObserved"] = ndkShims.callCount();
             providers["guestPthreadTransfersObserved"] = ndkShims.guestThreadTransferCount();
             providers["guestPthreadCompletionsObserved"] = ndkShims.guestThreadCompletionCount();
+            providers["guestPthreadBusyCancellations"] = ndkShims.guestThreadBusyCancellationCount();
             providers["genericNdkCallsObserved"] = ndkShims.genericCallCount();
             providers["genericNdkProviderCount"] = static_cast<std::uint64_t>(
                 ndkShims.genericProviderCount());
