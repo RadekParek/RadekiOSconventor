@@ -1155,11 +1155,9 @@ public final class GameBootActivity extends Activity {
                     if (translatedMode) {
                         System.loadLibrary("translated_game");
                     } else {
-                        try {
-                            System.loadLibrary("unicorn");
-                        } catch (Throwable ignored) {
-                            // libcompat_runtime_v1 may be linked directly or carry its own dependency.
-                        }
+                        // libcompat_runtime_v1 statically links the Dynarmic
+                        // ARM32 execution backend; no separate CPU engine
+                        // library needs to be loaded.
                         System.loadLibrary(RUNTIME_LIBRARY);
                         // surfaceCreated/surfaceChanged can both have fired before
                         // the library was loaded. Re-publish before the EGL runtime starts.

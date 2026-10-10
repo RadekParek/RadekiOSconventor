@@ -144,10 +144,11 @@ new package rule. Verified by Python simulation of the exact Kotlin logic
   level; per-symbol `linkedOrRewritten` stays false because no IPA callsite is
   rewritten). The other two `== 0` assertions hold (they pass no replacement
   resolver).
-* Workflow speed: the pinned Unicorn checkout is fetched once into a shared
-  `FETCHCONTENT_BASE_DIR` (`.local/unicorn-fetch`) reused by both the host
-  CMake step and the Gradle NDK build, cached by actions/cache keyed on the
-  pinned git SHA; the host build now runs at full runner parallelism
+* Workflow speed: the pinned Dynarmic checkout is fetched once into a shared
+  directory (`.local/dynarmic-fetch`) reused by both the host CMake step and
+  the Gradle NDK build through `FETCHCONTENT_SOURCE_DIR_DYNARMIC`, cached by
+  actions/cache keyed on the pinned git SHA; the host build now runs at full
+  runner parallelism
   (`--parallel $(nproc)` instead of 2).
 
 ### J. "NEXT BLOCKER" — one red line per import **[R]**
@@ -166,9 +167,9 @@ new package rule. Verified by Python simulation of the exact Kotlin logic
   lifecycle handlers.
 * Bioshock's 180 stub-handler bodies (needs its symbol list / IPA).
 * Compiler-rt/sjlLj bodies beyond the existing adapters.
-* The Unicorn CPU backend does not build in this sandbox (its own CMake fetch
-  fails on a missing `config-target.h`), so host tests ran without it; CI uses
-  the pinned fetch.
+* The Dynarmic CPU backend needs the pinned fetch plus the vendored Boost
+  header subset (`native/third_party/boost-headers`); host smoke tests link it
+  directly and CI uses the pinned checkout.
 * Android/JVM compilation of the `.kt`/`.java` edits (no JVM in sandbox) — they
   are marked **[R]** and were reviewed, not compiled.
 
@@ -491,8 +492,8 @@ pump must be a run loop, not a display link.
 2. Drive it from Android's `Choreographer` on the render thread, calling into
    JNI — `gameruntime_jni.cpp` already has the surface plumbing
    (`ANativeWindow_fromSurface` at line 49).
-3. Keep the Unicorn engine alive between frames (mapped memory, register state,
-   guest heap) instead of tearing down after `Returned`.
+3. Keep the Dynarmic JIT alive between frames (guest mapped memory, register
+   state, guest heap) instead of tearing down after `Returned`.
 4. Add `CFRunLoopRun`/`CFRunLoopRunInMode`/`NSTimer` scheduling so a guest that
    blocks in its own run loop keeps being serviced.
 

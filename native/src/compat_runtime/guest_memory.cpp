@@ -86,11 +86,12 @@ GuestAddress GuestAddressSpace::mapAny(std::size_t size, MemoryPermission permis
                                        std::string name, std::size_t alignment) {
     if (size == 0)
         throw std::invalid_argument("guest mapping size must be non-zero");
-    // Unicorn maps the guest address space a page at a time. Keep every
-    // dynamically allocated region page-shaped even when a shim requested a
-    // four-byte cell or a short C string; the extra zeroed tail is still inside
-    // the same bounded mapping and prevents a later engine synchronization from
-    // turning an otherwise valid guest allocation into a backend fault.
+    // The Dynarmic backend services guest accesses live through these
+    // callbacks. Keep every dynamically allocated region page-shaped even when
+    // a shim requested a four-byte cell or a short C string; the extra zeroed
+    // tail is still inside the same bounded mapping and prevents an
+    // engine-level permission or rounding check from turning an otherwise
+    // valid guest allocation into a backend fault.
     const auto mappedSize = static_cast<std::size_t>(alignUp(size, kGuestPageBytes));
     std::uint64_t candidate = alignUp(nextDynamicAddress_, alignment);
     while (candidate + mappedSize <= 0xF0000000ULL) {

@@ -206,7 +206,7 @@ static void reset_memory(uint32_t seed) {
     unsigned i;
     uint64_t off = 0;
     /* Zero all mapped pages first: page slack outside the manifest regions
-     * is readable by both sides, and unicorn's restore zeroes it. Without
+     * is readable by both sides, and the engine restore zeroes it. Without
      * this, C reads stale slack from previous cases. */
     for (i = 0; i < NREGS; i++) {
         uint32_t a = REGS[i].addr & ~0xFFFu;

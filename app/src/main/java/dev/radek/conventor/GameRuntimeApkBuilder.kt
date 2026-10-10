@@ -19,7 +19,7 @@ import java.util.zip.ZipOutputStream
  * (contract "game-runtime-v1").
  *
  * The APK embeds one authorized 32-bit ARM Mach-O main executable plus the
- * bundle resources, the tested guest-CPU runtime, and its shared Unicorn
+ * bundle resources, the tested guest-CPU runtime, and its statically linked
  * dependency. Its launcher runs the real guest boot and stops at the first
  * actually-used unimplemented import while leaving a diagnostic screen open;
  * it never shows a preview, menu, or gameplay UI, and this builder never

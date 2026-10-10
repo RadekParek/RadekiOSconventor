@@ -60,7 +60,7 @@ ARM build with zig for the APK):
 Verification (no device in sandbox; Dynarmic 2.1.4 ARM+VFP harness is a
 **dev-test tool only**, never shipped in the APK — same precedent as the
 repo's existing pinned-Dynarmic host tests). The pinned Dynarmic 2.1.4 ARM32
-backend in `native/src/compat_runtime/unicorn_backend.cpp` executes the image's
+backend in `native/src/compat_runtime/dynarmic_backend.cpp` executes the image's
 scalar VFP only after the runtime grants CP10/CP11 access (`CPACR`) and sets
 `FPEXC.EN`; without that setup the guest stops on a decode fault at its first
 `vpush`. That is guest CPU-configuration state, not a Dynarmic decoder

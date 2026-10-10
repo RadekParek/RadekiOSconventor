@@ -92,12 +92,6 @@ def find_gameboot_binary() -> Path | None:
     return Path(found) if found else None
 
 
-def unicorn_library_dir(gameboot_binary: Path) -> Path | None:
-    """Directory holding the Unicorn shared library next to a CMake host build."""
-    directory = gameboot_binary.parent / "_deps" / "unicorn-build"
-    return directory if directory.is_dir() else None
-
-
 def describe_macho(path: Path) -> dict:
     """Classify a thin or FAT Mach-O file without loading it whole."""
     with path.open("rb") as handle:
@@ -189,10 +183,6 @@ def probe_boot(
     if binary is None or not binary.is_file():
         return {"status": "NOT_PROBED", "reason": "radek-gameboot host binary is not built"}
     env = dict(os.environ)
-    library_dir = unicorn_library_dir(binary)
-    if library_dir is not None:
-        separator = os.pathsep
-        env["LD_LIBRARY_PATH"] = str(library_dir) + separator + env.get("LD_LIBRARY_PATH", "")
     try:
         completed = subprocess.run(
             # The host probe is intentionally a finite diagnostic run. The
