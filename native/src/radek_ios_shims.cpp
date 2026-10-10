@@ -7963,13 +7963,19 @@ extern "C" radek_kern_return_t radek_compat_thread_policy_set(uint32_t thread, i
     defined(RADEK_API_radek_compat_pthread_threadid_np)
 namespace {
 // pthread_t is an integer on bionic/glibc and a pointer elsewhere; fold both
-// into a uintptr_t without tripping either cast rule.
-static inline uintptr_t radekPthreadHandleBits(pthread_t thread) {
-    if constexpr (std::is_pointer<pthread_t>::value) {
+// into a uintptr_t without tripping either cast rule. The template form makes
+// the untaken branch a discarded statement, so the reinterpret_cast is never
+// instantiated for integer pthread_t targets.
+template <typename PthreadHandle>
+static inline uintptr_t radekPthreadHandleBitsImpl(PthreadHandle thread) {
+    if constexpr (std::is_pointer<PthreadHandle>::value) {
         return reinterpret_cast<uintptr_t>(thread);
     } else {
         return static_cast<uintptr_t>(thread);
     }
+}
+static inline uintptr_t radekPthreadHandleBits(pthread_t thread) {
+    return radekPthreadHandleBitsImpl(thread);
 }
 }  // namespace
 #endif
