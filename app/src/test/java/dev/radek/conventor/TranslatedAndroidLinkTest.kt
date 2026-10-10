@@ -5,8 +5,13 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 import java.io.File
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [28], manifest = Config.NONE)
 class TranslatedAndroidLinkTest {
     private fun staged(linked: Long, executable: Long, functions: Int) = TranslatedGameRuntimeInput.Staged(
         library = File("libtranslated_game.so"),
