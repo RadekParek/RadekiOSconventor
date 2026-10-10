@@ -1840,18 +1840,22 @@ bool ShimAdapter::lifecycleSelector(CpuRegisterState &registers, GuestAddressSpa
                     }
                 }
                 if (width == 0 || height == 0) {
-                    recordLifecycleEvent(lifecycle,
-                                         "-[EAGLContext renderbufferStorage:fromDrawable:] -> "
-                                         "drawable size unavailable; no EGL surface was created");
+                    const std::string note =
+                        "-[EAGLContext renderbufferStorage:fromDrawable:] -> "
+                        "drawable size unavailable; no EGL surface was created";
+                    recordLifecycleEvent(lifecycle, note);
+                    gles::publishNote(note);
                     return finish(0);
                 }
                 const bool attached = gles::forwarderFor(memory).attachDrawable(memory, width, height);
                 if (!attached) {
-                    recordLifecycleEvent(lifecycle,
-                                         "-[EAGLContext renderbufferStorage:fromDrawable:] -> "
-                                         "EGL surface creation failed for " +
-                                             std::to_string(width) + "x" +
-                                             std::to_string(height));
+                    const std::string note =
+                        "-[EAGLContext renderbufferStorage:fromDrawable:] -> "
+                        "EGL surface creation failed for " +
+                        std::to_string(width) + "x" + std::to_string(height) +
+                        "; see the EGL note above";
+                    recordLifecycleEvent(lifecycle, note);
+                    gles::publishNote(note);
                     return finish(0);
                 }
                 recordLifecycleEvent(lifecycle,

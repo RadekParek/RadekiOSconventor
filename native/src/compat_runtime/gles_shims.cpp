@@ -23,8 +23,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -104,6 +106,14 @@ struct AtomicProgress {
 };
 
 AtomicProgress gProgress;
+
+std::mutex gNoteMutex;
+std::string gLastNote;
+
+void publishNoteLocked(const std::string &note) {
+    std::lock_guard<std::mutex> lock(gNoteMutex);
+    gLastNote = note;
+}
 
 void recordDriver(const DriverReport &report) {
     gProgress.driverGlesLoaded.store(report.glesLoaded, std::memory_order_relaxed);
@@ -263,8 +273,14 @@ ProgressSnapshot progressSnapshot() {
     snapshot.forwardedCalls = gProgress.forwardedCalls.load(std::memory_order_relaxed);
     snapshot.refusedCalls = gProgress.refusedCalls.load(std::memory_order_relaxed);
     snapshot.framesPresented = gProgress.framesPresented.load(std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(gNoteMutex);
+        snapshot.lastNote = gLastNote;
+    }
     return snapshot;
 }
+
+void publishNote(const std::string &note) { publishNoteLocked(note); }
 
 // ---------------------------------------------------------------------------
 struct Forwarder::Impl {
@@ -314,6 +330,7 @@ struct Forwarder::Impl {
     }
 
     void note(const std::string &message) {
+        publishNoteLocked(message);
         if (diagnostics.size() >= kMaxDiagnostics)
             return;
         if (std::find(diagnostics.begin(), diagnostics.end(), message) != diagnostics.end())
@@ -444,6 +461,19 @@ struct Forwarder::Impl {
     // ------------------------------------------------------------------
     // EGL drawable
     // ------------------------------------------------------------------
+    /** " (EGL error 0x...)" for the last EGL call on this thread, or empty if none. */
+    std::string eglErrorSuffix() {
+        auto eglGetError = symbol<EGLint (*)()>("eglGetError");
+        if (!eglGetError)
+            return {};
+        const EGLint code = eglGetError();
+        if (code == 0x3000) // EGL_SUCCESS
+            return {};
+        char text[32];
+        std::snprintf(text, sizeof(text), " (EGL error 0x%04x)", static_cast<unsigned>(code));
+        return text;
+    }
+
     bool createEglSurface(int width, int height, std::string &why) {
         auto eglGetDisplay = symbol<EGLDisplay (*)(EGLNativeDisplayType)>("eglGetDisplay");
         auto eglInitialize = symbol<EGLBoolean (*)(EGLDisplay, EGLint *, EGLint *)>("eglInitialize");
@@ -457,19 +487,19 @@ struct Forwarder::Impl {
             symbol<EGLBoolean (*)(EGLDisplay, EGLSurface, EGLSurface, EGLContext)>("eglMakeCurrent");
         if (!eglGetDisplay || !eglInitialize || !eglChooseConfig || !eglCreateContext ||
             !eglMakeCurrent) {
-            why = "the EGL entry points are missing from the loaded libraries";
+            why = "the EGL entry points are missing from the loaded libraries" + eglErrorSuffix();
             return false;
         }
         egl.display = eglGetDisplay(reinterpret_cast<EGLNativeDisplayType>(
             static_cast<std::uintptr_t>(EGL_DEFAULT_DISPLAY_VALUE)));
         if (!egl.display) {
-            why = "eglGetDisplay returned no display";
+            why = "eglGetDisplay returned no display" + eglErrorSuffix();
             return false;
         }
         EGLint major = 0;
         EGLint minor = 0;
         if (eglInitialize(egl.display, &major, &minor) != EGL_TRUE_VALUE) {
-            why = "eglInitialize failed";
+            why = "eglInitialize failed" + eglErrorSuffix();
             return false;
         }
         const bool wantWindow = nativeWindow.load() != nullptr;
@@ -487,7 +517,7 @@ struct Forwarder::Impl {
         EGLint contextAttributeValue = 1;
         if (!choose(EGL_OPENGL_ES_BIT)) {
             if (!choose(EGL_OPENGL_ES2_BIT)) {
-                why = "no EGL config supports an OpenGL ES surface on this device";
+                why = "no EGL config supports an OpenGL ES surface on this device" + eglErrorSuffix();
                 return false;
             }
             contextAttributeValue = 2;
@@ -497,7 +527,7 @@ struct Forwarder::Impl {
         egl.context = eglCreateContext(egl.display, egl.config, nullptr,
                                        contextAttributeValue == 1 ? nullptr : contextAttributes);
         if (!egl.context) {
-            why = "eglCreateContext failed for an OpenGL ES context";
+            why = "eglCreateContext failed for an OpenGL ES context" + eglErrorSuffix();
             return false;
         }
         if (wantWindow) {
@@ -505,7 +535,7 @@ struct Forwarder::Impl {
                 symbol<EGLSurface (*)(EGLDisplay, EGLConfig, EGLNativeWindowType, const EGLint *)>(
                     "eglCreateWindowSurface");
             if (!eglCreateWindowSurface) {
-                why = "eglCreateWindowSurface is missing from the loaded libraries";
+                why = "eglCreateWindowSurface is missing from the loaded libraries" + eglErrorSuffix();
                 return false;
             }
             egl.surface = eglCreateWindowSurface(
@@ -515,7 +545,7 @@ struct Forwarder::Impl {
             egl.windowSurface = egl.surface != nullptr;
             egl.boundWindow = egl.windowSurface ? nativeWindow.load() : nullptr;
             if (!egl.surface) {
-                why = "eglCreateWindowSurface failed for the Android surface";
+                why = "eglCreateWindowSurface failed for the Android surface" + eglErrorSuffix();
                 return false;
             }
         } else {
@@ -523,7 +553,7 @@ struct Forwarder::Impl {
                 symbol<EGLSurface (*)(EGLDisplay, EGLConfig, const EGLint *)>(
                     "eglCreatePbufferSurface");
             if (!eglCreatePbufferSurface) {
-                why = "eglCreatePbufferSurface is missing from the loaded libraries";
+                why = "eglCreatePbufferSurface is missing from the loaded libraries" + eglErrorSuffix();
                 return false;
             }
             const EGLint attributes[] = {EGL_WIDTH, std::max(width, 1), EGL_HEIGHT,
@@ -533,13 +563,13 @@ struct Forwarder::Impl {
             egl.windowSurface = false;
             egl.boundWindow = nullptr;
             if (!egl.surface) {
-                why = "eglCreatePbufferSurface failed";
+                why = "eglCreatePbufferSurface failed" + eglErrorSuffix();
                 return false;
             }
         }
         if (eglMakeCurrent(egl.display, egl.surface, egl.surface, egl.context) !=
             EGL_TRUE_VALUE) {
-            why = "eglMakeCurrent failed";
+            why = "eglMakeCurrent failed" + eglErrorSuffix();
             return false;
         }
         egl.current = true;
