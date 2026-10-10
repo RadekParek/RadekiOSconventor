@@ -10,15 +10,23 @@
 namespace radek {
 namespace {
 constexpr size_t kBaseAnalysisBudget = 40000000;
-constexpr size_t kMaximumAnalysisBudget = 800000000;
+constexpr size_t kMaximumAnalysisBudget = 2000000000;
 constexpr size_t kMaximumCompactImports = 100000;
+constexpr size_t kMaximumDetailedImports = 500000;
 
 size_t analysisBudgetFor(size_t inputBytes) {
     // Large symbol/fixup tables naturally need more work than a tiny fixture.
     // Scale the guard with the actual input size, while retaining a hard ceiling
     // so a malformed image cannot force unbounded CPU or JSON allocation.
+    //
+    // Budget units are charged in proportion to real work: one unit per byte
+    // actually read or emitted field (see Reader::u / Reader::consume), not a
+    // flat per-call surcharge. Big games routinely carry several megabytes of
+    // bind/weak/lazy-bind opcodes across the three dyld streams; a 16x
+    // multiplier leaves headroom for those legitimate tables while the absolute
+    // ceiling keeps every malformed input finite.
     const size_t maximumExtra = kMaximumAnalysisBudget - kBaseAnalysisBudget;
-    const size_t extra = inputBytes > maximumExtra / 4 ? maximumExtra : inputBytes * 4;
+    const size_t extra = inputBytes > maximumExtra / 16 ? maximumExtra : inputBytes * 16;
     return kBaseAnalysisBudget + extra;
 }
 
@@ -37,7 +45,11 @@ struct Reader {
             throw std::runtime_error("Mach-O range outside slice");
     }
     uint64_t u(size_t p, size_t n) const {
-        consume(8);
+        // Charge the bytes actually copied. The old flat 8-unit surcharge per
+        // read inflated fixup-stream work ~8x and made the complexity guard
+        // fire in the middle of perfectly valid multi-megabyte bind tables,
+        // marking honest analysis as incomplete.
+        consume(n);
         check(p, n);
         uint64_t v = 0;
         for (size_t i = 0; i < n; i++)
@@ -222,6 +234,13 @@ Json thin(Reader r, bool includeSymbolDetails) {
     std::unordered_set<std::string> compactImportKeys;
     auto appendImport = [&](Json import) {
         if (includeSymbolDetails) {
+            // Mirror the compact-mode honesty guard for full-detail analysis:
+            // a gigantic import table is reported with a truncation flag
+            // instead of growing the JSON without bound.
+            if (j["imports"].items.size() >= kMaximumDetailedImports) {
+                j["importsTruncated"] = true;
+                return;
+            }
             j["imports"].push(std::move(import));
             return;
         }

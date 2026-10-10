@@ -442,7 +442,20 @@ class Library(private val context: Context) {
                     val chainedBlocked = chained != null && !chained.optBoolean("decodable", false)
                     if (chainedBlocked || !slice.optBoolean("bindDecodingComplete", true)) {
                         if (chainedBlocked) blockIncompatible("chained fixups use a pointer format the loader does not relink")
-                        if (!slice.optBoolean("bindDecodingComplete", true)) blockIncompatible("dyld binding information could not be fully decoded")
+                        if (!slice.optBoolean("bindDecodingComplete", true)) {
+                            // Surface the analyzer's own verdict (stream + reason)
+                            // so the blocker line names the exact decoding failure
+                            // instead of a generic message.
+                            val diagnostic = slice.optJSONArray("bindDiagnostics")?.optJSONObject(0)
+                            val reason = diagnostic?.optString("message")?.takeIf { it.isNotBlank() }
+                            val stream = diagnostic?.optString("stream")?.takeIf { it.isNotBlank() }
+                            val detail = when {
+                                reason != null && stream != null -> " ($stream: $reason)"
+                                reason != null -> " ($reason)"
+                                else -> ""
+                            }
+                            blockIncompatible("dyld binding information could not be fully decoded$detail")
+                        }
                     }
                 }
             }

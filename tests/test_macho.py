@@ -11,6 +11,18 @@ from radek.archive import InputError
 from .fixtures import macho, fat
 
 
+def _uleb(value):
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)
+
+
 class MachOTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -200,6 +212,44 @@ class MachOTests(unittest.TestCase):
         self.assertFalse(slice_data["bindDecodingComplete"])
         self.assertIn("outside segment", slice_data["bindDiagnostics"][0]["message"])
         self.assertEqual(slice_data["imports"], [])
+
+    def test_large_valid_bind_table_decodes_completely(self):
+        # Real games routinely carry hundreds of thousands of bind opcodes across
+        # the bind/weak/lazy streams. The complexity guard must scale with the
+        # actual input instead of aborting a perfectly valid table mid-stream
+        # (which used to report "Mach-O analysis complexity limit" and flip
+        # bindDecodingComplete=false).
+        bind = bytearray()
+        for i in range(600000):
+            sym = ("_s%05d" % i).encode() + b"\x00"
+            bind += b"\x40" + sym + b"\x11\x70" + _uleb(0x100 + i * 4) + b"\x90"
+        bind += b"\x00"
+        cmd = struct.pack("<12I", 0x80000022, 48, 0, 0, 0x2000, len(bind), 0, 0, 0, 0, 0, 0)
+        slice_data = self.parse(macho(cpu=12, subtype=9, vmsize=0x400000, extras=[cmd], blobs={0x2000: bytes(bind)}))["slices"][0]
+        self.assertTrue(slice_data["bindDecodingComplete"])
+        self.assertEqual(slice_data["bindDiagnostics"], [])
+        stream = [s for s in slice_data["fixupStreams"] if s["kind"] == "bind"][0]
+        self.assertEqual(stream["status"], "decoded")
+        self.assertEqual(stream["decodedBinds"], 600000)
+
+    def test_weak_lazy_and_threaded_streams_decode(self):
+        weak = b"\x40_w1\x00\x11\x70\x40\x90\x00"
+        lazy = b"\x40_l1\x00\x11\x70\x48\x90\x00\x40_l2\x00\x11\x70\x50\x90\x00"
+        # Threaded records: SET_SYMBOL, SET_TYPE, THREADED|SET_ORDINAL(0) + ULEB,
+        # THREADED|APPLY(1) = 0xd1.
+        threaded = b"\x40_t1\x00\x51\xd0\x05\xd1" + b"\x40_t2\x00\x51\xd0\x09\xd1" + b"\x00"
+        cmd = struct.pack(
+            "<12I", 0x80000022, 48, 0, 0, 0x2000, len(threaded), 0x8000, len(weak), 0x9000, len(lazy), 0, 0
+        )
+        slice_data = self.parse(
+            macho(cpu=12, subtype=9, extras=[cmd], blobs={0x2000: threaded, 0x8000: weak, 0x9000: lazy})
+        )["slices"][0]
+        self.assertTrue(slice_data["bindDecodingComplete"])
+        streams = {s["kind"]: s for s in slice_data["fixupStreams"]}
+        self.assertEqual(streams["bind"]["status"], "decoded")
+        self.assertEqual(streams["bind"]["threadedOrdinals"], 2)
+        self.assertEqual(streams["weakBind"]["decodedBinds"], 1)
+        self.assertEqual(streams["lazyBind"]["decodedBinds"], 2)
 
     def test_section_outside_segment_rejected(self):
         data = bytearray(macho())
