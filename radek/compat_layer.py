@@ -29,7 +29,10 @@ from pathlib import Path
 from .api_implementations import _FAMILY as _SHIM_FAMILY
 from .api_implementations import _SUPPORTED as _VERIFIED_SHIMS
 from .api_implementations import selection_defines
-from .compat_import_catalog import CONCRETE_DARWIN_COMPAT_PROVIDERS
+from .compat_import_catalog import (
+    CONCRETE_DARWIN_COMPAT_PROVIDERS,
+    VERIFIED_SEMANTICS_SYMBOLS,
+)
 from .providers import BIONIC_SYMBOL_CANDIDATES
 
 CONTRACT = "ioscompat-registry-v1"
@@ -240,6 +243,7 @@ def generate(reconstruction: dict, output: Path) -> dict:
             "totalObservedImports": 0,
             "unresolvedImports": 0,
             "concreteDarwinProviderCount": 0,
+            "verifiedGuestAdapterCount": 0,
             "guestRuntimeAdapterCatalogCount": 0,
             "guestRuntimeAdapterCatalogInventoryCount": len(CONCRETE_DARWIN_COMPAT_PROVIDERS),
             "guestRuntimeAdapterCatalogCoveragePercent": 0,
@@ -265,11 +269,18 @@ def generate(reconstruction: dict, output: Path) -> dict:
     selected = embeddable[:MAX_GENERATED_ENTRIES]
     verified = [name for name in selected if classify(name) == "verified"]
     stubbed = [name for name in selected if classify(name) == "stubbed"]
-    guest_adapter_names = [name for name in selected if name in CONCRETE_DARWIN_COMPAT_PROVIDERS]
+    matched_adapter_names = [name for name in selected if name in CONCRETE_DARWIN_COMPAT_PROVIDERS]
+    # Adapters whose compat-runtime implementation carries complete, unit-tested
+    # semantics count as implemented; only bounded-approximation adapters remain
+    # outstanding "adapter only" needs in reports.
+    verified_adapter_names = [name for name in matched_adapter_names if name in VERIFIED_SEMANTICS_SYMBOLS]
+    guest_adapter_names = [name for name in matched_adapter_names if name not in VERIFIED_SEMANTICS_SYMBOLS]
     ndk_candidates = [
         name for name in selected if name.removeprefix("_") in BIONIC_SYMBOL_CANDIDATES
     ]
-    reviewed_provider_names = set(guest_adapter_names) | set(ndk_candidates)
+    reviewed_provider_names = (
+        set(guest_adapter_names) | set(verified_adapter_names) | set(ndk_candidates)
+    )
     reviewed_provider_count = len(reviewed_provider_names)
 
     source_root = Path(__file__).resolve().parent.parent / "native"
@@ -342,9 +353,9 @@ def generate(reconstruction: dict, output: Path) -> dict:
     source_path.write_text("\n".join(sections), encoding="utf-8")
     source_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
     coverage = round(100.0 * len(selected) / len(imports), 4) if imports else 0
-    guest_adapter_coverage = round(100.0 * len(guest_adapter_names) / len(imports), 4) if imports else 0
+    guest_adapter_coverage = round(100.0 * len(matched_adapter_names) / len(imports), 4) if imports else 0
     guest_adapter_catalog_status = (
-        "CATALOG_ONLY_NOT_RUNTIME_LINKED" if guest_adapter_names else "NO_MATCHES"
+        "CATALOG_ONLY_NOT_RUNTIME_LINKED" if matched_adapter_names else "NO_MATCHES"
     )
     provider_catalog_measure = (
         "reviewed name-catalog coverage: exact Android NDK/system candidates plus "
@@ -358,7 +369,8 @@ def generate(reconstruction: dict, output: Path) -> dict:
         "stubbedHandlers": len(stubbed),
         "totalObservedImports": len(imports),
         "unresolvedImports": len(imports) - len(selected),
-        "concreteDarwinProviderCount": len(guest_adapter_names),
+        "concreteDarwinProviderCount": len(matched_adapter_names),
+        "verifiedGuestAdapterCount": len(verified_adapter_names),
         "guestRuntimeAdapterCatalogCount": len(guest_adapter_names),
         "guestRuntimeAdapterCatalogInventoryCount": len(CONCRETE_DARWIN_COMPAT_PROVIDERS),
         "guestRuntimeAdapterCatalogCoveragePercent": guest_adapter_coverage,
@@ -390,7 +402,8 @@ def generate(reconstruction: dict, output: Path) -> dict:
         "stubbedHandlers": len(stubbed),
         "totalObservedImports": len(imports),
         "unresolvedImports": len(imports) - len(selected),
-        "concreteDarwinProviderCount": len(guest_adapter_names),
+        "concreteDarwinProviderCount": len(matched_adapter_names),
+        "verifiedGuestAdapterCount": len(verified_adapter_names),
         "guestRuntimeAdapterCatalogCount": len(guest_adapter_names),
         "guestRuntimeAdapterCatalogInventoryCount": len(CONCRETE_DARWIN_COMPAT_PROVIDERS),
         "guestRuntimeAdapterCatalogCoveragePercent": guest_adapter_coverage,

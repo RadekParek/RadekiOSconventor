@@ -120,8 +120,42 @@ def provider_for_symbol(symbol: str) -> str | None:
     return CONCRETE_DARWIN_COMPAT_PROVIDERS.get(symbol)
 
 
+# Provider ids whose compat-runtime-v1 adapter carries complete, unit-tested
+# API semantics (exact arithmetic bodies, real errno/stdio cells, the OpenAL
+# engine, sandbox path providers, ...). Reports surface these as implemented
+# rather than as outstanding "adapter only" needs; the guest loader still
+# binds them from the same catalog entries. Keep parity with
+# native/include/compat_runtime/compat_import_catalog.hpp and
+# app/src/main/java/dev/radek/conventor/CompatImportProviders.kt.
+VERIFIED_SEMANTICS_PROVIDERS: frozenset[str] = frozenset({
+    "compiler-runtime.divdi3", "compiler-runtime.divsi3", "compiler-runtime.moddi3",
+    "compiler-runtime.modsi3", "compiler-runtime.udivsi3", "compiler-runtime.umodsi3",
+    "compiler-runtime.fixdfdi", "compiler-runtime.floatdidf", "compiler-runtime.floatdisf",
+    "darwin.errno-cell", "darwin.stream.stderr", "darwin.stream.stdin", "darwin.stream.stdout",
+    "darwin.ctype.tolower", "darwin.ctype.toupper", "darwin.ctype.maskrune",
+    "openal.buffer-data", "openal.delete-buffers", "openal.delete-sources",
+    "openal.gen-buffers", "openal.gen-sources", "openal.get-source-float",
+    "openal.get-source-int", "openal.source-3-float", "openal.source-play",
+    "openal.source-queue", "openal.source-stop", "openal.source-unqueue",
+    "openal.source-float", "openal.source-int", "openal.close-device",
+    "openal.create-context", "openal.destroy-context", "openal.make-context-current",
+    "openal.open-device",
+    "audio-session.initialize", "audio-session.set-active",
+    "foundation.home-directory", "foundation.search-paths", "foundation.temporary-directory",
+    "objc.data.empty-cache", "objc.data.empty-vtable",
+})
+
+VERIFIED_SEMANTICS_SYMBOLS: frozenset[str] = frozenset(
+    symbol
+    for symbol, provider in CONCRETE_DARWIN_COMPAT_PROVIDERS.items()
+    if provider in VERIFIED_SEMANTICS_PROVIDERS
+)
+
+
 __all__ = [
     "CONCRETE_DARWIN_COMPAT_IMPORT_COUNT",
     "CONCRETE_DARWIN_COMPAT_PROVIDERS",
+    "VERIFIED_SEMANTICS_PROVIDERS",
+    "VERIFIED_SEMANTICS_SYMBOLS",
     "provider_for_symbol",
 ]

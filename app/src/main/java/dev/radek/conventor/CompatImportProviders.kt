@@ -89,11 +89,41 @@ internal object CompatImportProviders {
         "_objc_setProperty" to "objc.setProperty",
     )
 
+    // Provider ids whose compat-runtime-v1 adapter carries complete,
+    // unit-tested API semantics (exact arithmetic bodies, real errno/stdio
+    // cells, the OpenAL engine, sandbox path providers, ...). The mapper
+    // reports these as implemented; unverified entries remain outstanding
+    // "adapter only" needs. Keep parity with
+    // native/include/compat_runtime/compat_import_catalog.hpp and
+    // radek/compat_import_catalog.py.
+    val verifiedSemanticsProviders: Set<String> = setOf(
+        "compiler-runtime.divdi3", "compiler-runtime.divsi3", "compiler-runtime.moddi3",
+        "compiler-runtime.modsi3", "compiler-runtime.udivsi3", "compiler-runtime.umodsi3",
+        "compiler-runtime.fixdfdi", "compiler-runtime.floatdidf", "compiler-runtime.floatdisf",
+        "darwin.errno-cell", "darwin.stream.stderr", "darwin.stream.stdin", "darwin.stream.stdout",
+        "darwin.ctype.tolower", "darwin.ctype.toupper", "darwin.ctype.maskrune",
+        "openal.buffer-data", "openal.delete-buffers", "openal.delete-sources",
+        "openal.gen-buffers", "openal.gen-sources", "openal.get-source-float",
+        "openal.get-source-int", "openal.source-3-float", "openal.source-play",
+        "openal.source-queue", "openal.source-stop", "openal.source-unqueue",
+        "openal.source-float", "openal.source-int", "openal.close-device",
+        "openal.create-context", "openal.destroy-context", "openal.make-context-current",
+        "openal.open-device",
+        "audio-session.initialize", "audio-session.set-active",
+        "foundation.home-directory", "foundation.search-paths", "foundation.temporary-directory",
+        "objc.data.empty-cache", "objc.data.empty-vtable",
+    )
+
     init {
         check(bySymbol.size == EXPECTED_DARWIN_ONLY_IMPORT_COUNT) {
             "Darwin compatibility provider catalog drifted: ${bySymbol.size}"
         }
+        check(verifiedSemanticsProviders.all { p -> bySymbol.values.contains(p) }) {
+            "verified-semantics set must reference catalogued providers"
+        }
     }
 
     fun providerFor(symbol: String): String? = bySymbol[symbol]
+
+    fun isVerified(provider: String): Boolean = provider in verifiedSemanticsProviders
 }
