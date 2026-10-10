@@ -334,24 +334,35 @@ class DynarmicArm32Backend final : public CpuBackend {
 
         bool returned = false;
         for (;;) {
-            const auto halt = jit->Run();
-            if (state.memoryFault)
-                break;
-            if (state.instructionLimitHit || state.timeLimitHit)
-                break;
-            const auto pc = jit->Regs()[15];
-            if (pc == kReturnSentinel) {
-                returned = true;
-                break;
-            }
-            if ((halt & Dynarmic::HaltReason::UserDefined1) != Dynarmic::HaltReason::Step &&
-                pc >= kCalloutRegionBase) {
+            // A shim callout can resume straight back into the intercepted
+            // region (nested shim chains, or an LR that itself points at a
+            // callout). Cached intercept blocks are terminal-only, so the JIT
+            // must never be re-entered at such an address: dispatch callouts
+            // and the return sentinel here on the host side until control
+            // lands back in ordinary guest code.
+            for (;;) {
+                if (state.memoryFault || state.guestExceptionRaised ||
+                    state.instructionLimitHit || state.timeLimitHit)
+                    break;
+                const auto pendingPc = jit->Regs()[15];
+                if (pendingPc == kReturnSentinel) {
+                    returned = true;
+                    break;
+                }
+                if (pendingPc < kCalloutRegionBase || state.bypassCalloutHookOnce)
+                    break;
+                if (state.timeLimitMicros != 0 &&
+                    std::chrono::steady_clock::now() >= state.deadline) {
+                    state.timeLimitHit = true;
+                    state.message = "guest function reached its time limit.";
+                    break;
+                }
                 CpuRegisterState calloutRegisters;
                 loadRegisters(*jit, calloutRegisters);
-                calloutRegisters.r[15] = pc;
+                calloutRegisters.r[15] = pendingPc;
                 std::string reason;
                 const auto callout = memory.invokeGuestCallout
-                                         ? memory.invokeGuestCallout(static_cast<GuestAddress>(pc),
+                                         ? memory.invokeGuestCallout(static_cast<GuestAddress>(pendingPc),
                                                                      calloutRegisters, reason)
                                          : GuestCalloutResult::NotRegistered;
                 if (callout == GuestCalloutResult::NotRegistered) {
@@ -360,7 +371,7 @@ class DynarmicArm32Backend final : public CpuBackend {
                     // the block once without the intercept terminal.
                     state.bypassCalloutHookOnce = true;
                     jit->ClearCache();
-                    continue;
+                    break;
                 }
                 if (callout == GuestCalloutResult::Failed) {
                     state.memoryFault = true;
@@ -390,10 +401,39 @@ class DynarmicArm32Backend final : public CpuBackend {
                     after.r[15] = returnAddress & ~GuestAddress{1};
                 }
                 storeRegisters(*jit, after);
+            }
+            if (returned || state.memoryFault || state.guestExceptionRaised ||
+                state.timeLimitHit || state.instructionLimitHit)
+                break;
+
+            const auto halt = jit->Run();
+            if (state.memoryFault)
+                break;
+            if (state.instructionLimitHit || state.timeLimitHit)
+                break;
+            const auto pc = jit->Regs()[15];
+            if (pc == kReturnSentinel) {
+                returned = true;
+                break;
+            }
+            if ((halt & Dynarmic::HaltReason::UserDefined1) != Dynarmic::HaltReason::Step &&
+                pc >= kCalloutRegionBase) {
+                // The PreCodeReadHook intercepted this address at translation
+                // time; the inner loop above dispatches it on the next
+                // iteration. The cached intercept block is terminal-only and
+                // zero-length (its halt was armed during translation), so it
+                // is invisible to range invalidation and would spin the
+                // dispatcher forever on any later guest branch to the same
+                // address. Flush the cache so re-entries translate afresh and
+                // the hook fires again.
+                jit->ClearCache();
                 continue;
             }
             if ((halt & Dynarmic::HaltReason::UserDefined3) != Dynarmic::HaltReason::Step)
                 break;
+            if ((static_cast<unsigned>(halt) &
+                 static_cast<unsigned>(Dynarmic::HaltReason::CacheInvalidation)) != 0)
+                continue; // a cache flush was requested; re-dispatch with fresh blocks
             state.message = state.message.empty() ? "Dynarmic stopped before the guest function returned."
                                                   : state.message;
             break;
