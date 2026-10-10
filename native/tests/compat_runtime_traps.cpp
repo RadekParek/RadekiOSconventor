@@ -241,8 +241,10 @@ void checkBootAttemptRunner(const std::vector<std::uint8_t> &bytes) {
         const auto &execution = report.fields.at("execution").fields;
         CHECK(execution.at("entryPointReached").value == "true");
         CHECK(execution.at("status").value == "GUEST_EXCEPTION_RAISED");
-        // mov, add, ldr, ldr, trap fetch.
-        CHECK(execution.at("instructions").value == "5");
+        // mov, add, ldr, ldr. The trap-sentinel fetch that follows is
+        // intercepted by the backend's pre-code-read hook before it is
+        // translated, so Dynarmic counts four executed guest instructions.
+        CHECK(execution.at("instructions").value == "4");
         CHECK(execution.at("registers").fields.at("r0").value == "3");
         CHECK(report.fields.at("reason").value.find("_trapped_call") != std::string::npos);
         CHECK(traps.trapCalls() == 1);

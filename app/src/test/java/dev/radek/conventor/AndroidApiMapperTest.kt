@@ -385,7 +385,9 @@ class AndroidApiMapperTest {
         assertTrue(guestRows.all { it.getString("targetLibrary").contains("libcompat_runtime_v1.so") })
         assertTrue(guestRows.all { it.getString("staticRecompilationStrategy").contains("no static Android code-callsite rewrite") })
         assertEquals(0, mapping.getInt("runtimeVerifiedNdkCandidates"))
-        assertEquals(3, mapping.getInt("runtimeVerifiedCandidateCount"))
+        // runtimeVerifiedCandidateCount counts direct same-name candidates
+        // (here only _malloc); the guest-provider promotions do not change it.
+        assertEquals(1, mapping.getInt("runtimeVerifiedCandidateCount"))
         assertEquals(0, mapping.getInt("linkedImplementationCount"))
         val breakdown = mapping.getJSONObject("reviewedMapping").getJSONObject("breakdown")
         assertEquals(0, breakdown.getInt("guestRuntimeAdapterCatalogued"))
