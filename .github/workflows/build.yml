@@ -331,6 +331,21 @@ jobs:
           name: angrybirds-android-link-handoff
           path: artifacts/angrybirds-android-link/
           if-no-files-found: warn
+      # Prints the verified Android link numbers as a check annotation, so the
+      # real progress is readable from the GitHub API without the job log.
+      - name: Report Angry Birds Android link progress
+        if: always() && hashFiles('.local/angrybirds-conversion/bytecode-translation/android-link-report.json') != ''
+        run: |
+          python3 - <<'EOF'
+          import json
+          link = json.load(open(".local/angrybirds-conversion/bytecode-translation/android-link-report.json"))
+          print("::notice title=Angry Birds Android link::"
+                f"status={link.get('status')} ndkLinkVerified={link.get('ndkLinkVerified')} "
+                f"percent={link.get('androidLinkedTextPercent')} "
+                f"linkedBytes={link.get('androidLinkedTextBytes')} executableBytes={link.get('executableTextBytes')} "
+                f"functions={link.get('linkedTranslatedFunctionCount')}/{link.get('translatedFunctionCount')} "
+                f"reason={link.get('reason')}")
+          EOF
       - name: Convert committed sample IPA with the host CLI
         run: |
           set -e
