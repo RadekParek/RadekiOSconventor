@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.22)
 project(radek LANGUAGES CXX)
-set(CMAKE_CXX_STANDARD 17)
+# Dynarmic's A32 headers require C++20; the rest of the native tree is
+# forward-compatible with it (and the Gradle NDK build already passes -std=c++20).
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_library(radek_analysis STATIC src/macho.cpp src/trivial.cpp)
 set_target_properties(radek_analysis PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -121,6 +123,22 @@ if(RADEK_BUILD_COMPAT_RUNTIME)
     if(RADEK_FETCH_DYNARMIC)
         target_compile_definitions(compat_runtime_core PRIVATE RADEK_HAVE_DYNARMIC=1)
         target_link_libraries(compat_runtime_core PRIVATE dynarmic)
+        # The dynarmic target links its externals PRIVATE, so their header
+        # roots do not propagate to us even though our backend includes
+        # dynarmic public headers (frontend/A32/a32_ir_emitter.h pulls
+        # mcl/stdint.hpp). Feed the externals include roots directly.
+        target_include_directories(compat_runtime_core PRIVATE
+            ${dynarmic_SOURCE_DIR}/externals/mcl/include
+            ${dynarmic_SOURCE_DIR}/externals/fmt/include
+            ${dynarmic_SOURCE_DIR}/externals/robin-map/include
+            ${dynarmic_SOURCE_DIR}/externals/xbyak
+            ${dynarmic_SOURCE_DIR}/externals/oaknut/include
+        )
+        if(Boost_INCLUDE_DIRS)
+            target_include_directories(compat_runtime_core PRIVATE ${Boost_INCLUDE_DIRS})
+        endif()
+        target_include_directories(compat_runtime_core PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/boost-headers)
     endif()
 
     if(ANDROID)
