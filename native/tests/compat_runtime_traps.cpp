@@ -1,7 +1,7 @@
 // Boot-attempt trap coverage: unimplemented imports bind to abort-on-call
 // traps, real guest instructions run, and the first used missing import stops
 // execution with its name in the report. Loader assertions run everywhere;
-// execution assertions run only when the Unicorn ARM32 backend is linked.
+// execution assertions run only when the Dynarmic ARM32 backend is linked.
 #include "compat_runtime/runner.hpp"
 #include "compat_runtime/cpu.hpp"
 #include "compat_runtime/guest_memory.hpp"
@@ -227,7 +227,7 @@ void checkBootAttemptRunner(const std::vector<std::uint8_t> &bytes) {
         const auto empty = runner.run({}, true);
         CHECK(empty.fields.at("reason").value == "IPA main executable is empty.");
     }
-#ifdef RADEK_TEST_REQUIRE_UNICORN
+#ifdef RADEK_TEST_REQUIRE_DYNARMIC
     {
         ShimRegistry registry;
         TrapShimAdapter traps;

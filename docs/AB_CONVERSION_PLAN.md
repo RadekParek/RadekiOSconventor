@@ -57,17 +57,17 @@ ARM build with zig for the APK):
 - [ ] `platform_android.c` + `main.c` + `rt_min.c`
 - [ ] `platform_host.c` (test doubles)
 
-Verification (no device in sandbox; Unicorn 2.1.4 ARM+VFP harness is a
+Verification (no device in sandbox; Dynarmic 2.1.4 ARM+VFP harness is a
 **dev-test tool only**, never shipped in the APK — same precedent as the
-repo's existing pinned-Unicorn host tests). The pinned Unicorn 2.1.4 ARM32
+repo's existing pinned-Dynarmic host tests). The pinned Dynarmic 2.1.4 ARM32
 backend in `native/src/compat_runtime/unicorn_backend.cpp` executes the image's
 scalar VFP only after the runtime grants CP10/CP11 access (`CPACR`) and sets
 `FPEXC.EN`; without that setup the guest stops on a decode fault at its first
-`vpush`. That is guest CPU-configuration state, not a Unicorn decoder
+`vpush`. That is guest CPU-configuration state, not a Dynarmic decoder
 limitation:
 
 - [ ] Host unit tests for every runtime module (ctest + pytest).
-- [~] Unicorn guest harness: slid image + bound imports → `_main` →
+- [~] Dynarmic guest harness: slid image + bound imports → `_main` →
       `UIApplicationMain` → delegate launch → scripted touches/accelerometer →
       N stable frames with sane GL/AL call streams, save-file writes.
       Observed today: the real image boots through `_main` →

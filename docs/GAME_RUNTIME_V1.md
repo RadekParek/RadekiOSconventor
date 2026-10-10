@@ -168,7 +168,7 @@ python3 -m radek gameboot input.ipa --authorized --output job-dir
 
 - Extracts the IPA with the standard archive bounds, selects the boot slice
   (thin ARM file, or the first 32-bit ARM slice of a FAT image), and probes it
-  with the `radek-gameboot` host binary (built by CMake with pinned Unicorn).
+  with the `radek-gameboot` host binary (built by CMake with pinned Dynarmic).
 - Writes `game-runtime-manifest.json` (contract inputs + `hostProbe` summary),
   `gameboot-report.json` (full native report), and `main-executable.bin` (the
   exact staged slice the device builder packs).
@@ -186,11 +186,11 @@ signature/package/label/install audits) with game-runtime inputs:
 - Executable gate: thin ARM Mach-O, or FAT with a 32-bit ARM slice; anything
   else throws and nothing is built.
 - Runtime gate: `libcompat_runtime_v1.so` and its required shared backend
-  `libunicorn.so` are copied from the installed converter APK (including ABI
+  `statically linked dynarmic` are copied from the installed converter APK (including ABI
   splits) by `CompatibilityRuntime.extractGameRuntimeInstalled`. The converter
   build explicitly packages both CMake targets into its APK. The game APK
   includes both aligned libraries beside one another, so Android's linker can
-  resolve the runtime's `DT_NEEDED` Unicorn dependency. Packaging fails closed
+  resolve the runtime's `DT_NEEDED` Dynarmic dependency. Packaging fails closed
   if either required library is absent; `libc++_shared.so` is also copied when
   the installed build includes it.
 - The report records `contract: "game-runtime-v1"`,

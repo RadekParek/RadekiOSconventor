@@ -15,7 +15,7 @@
 //     the optional `sleepForTimeInterval:` diagnostic limit cancels the thread
 //     only when the test explicitly configures one.
 //
-// No Unicorn: every assertion is about adapter state and callout results, which
+// No Dynarmic: every assertion is about adapter state and callout results, which
 // is exactly what the boot runner consumes.
 #include "compat_runtime/objc_shims.hpp"
 #include "compat_runtime/shim_registry.hpp"

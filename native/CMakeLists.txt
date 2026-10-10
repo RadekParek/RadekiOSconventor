@@ -61,7 +61,7 @@ else()
 endif()
 
 option(RADEK_BUILD_COMPAT_RUNTIME "Build and test compat-runtime-v1" OFF)
-option(RADEK_FETCH_UNICORN "Fetch the pinned Unicorn ARM32 backend" OFF)
+option(RADEK_FETCH_DYNARMIC "Fetch the pinned Dynarmic ARM32 backend" OFF)
 if(RADEK_BUILD_COMPAT_RUNTIME)
     find_package(Threads REQUIRED)
 
@@ -86,35 +86,31 @@ if(RADEK_BUILD_COMPAT_RUNTIME)
         src/compat_runtime/app_lifecycle.cpp
         src/compat_runtime/openal_backend.cpp
     )
-    if(RADEK_FETCH_UNICORN)
+    if(RADEK_FETCH_DYNARMIC)
         include(FetchContent)
-        set(BUILD_SHARED_LIBS ON CACHE BOOL "Build Unicorn as a shared library" FORCE)
-        set(UNICORN_BUILD_TESTS OFF CACHE BOOL "Do not build upstream Unicorn tests" FORCE)
-        set(UNICORN_INSTALL OFF CACHE BOOL "Do not install the fetched Unicorn dependency" FORCE)
-        set(UNICORN_LEGACY_STATIC_ARCHIVE OFF CACHE BOOL "Do not build the legacy static archive" FORCE)
-        set(UNICORN_LOGGING OFF CACHE BOOL "Disable Unicorn internal logging" FORCE)
-        set(UNICORN_ARCH "arm" CACHE STRING "Build the ARM32 execution backend only" FORCE)
+        # Dynarmic (suyu-emu fork of MerryMage's dynarmic, the actively
+        # maintained ARM JIT) as the sole ARM32 execution backend. Only the A32
+        # frontend and the externals its emitter needs are materialized.
+        set(DYNARMIC_TESTS OFF CACHE BOOL "Do not build upstream dynarmic tests" FORCE)
+        set(DYNARMIC_USE_PRECOMPILED_HEADERS OFF CACHE BOOL "No PCH in the compat-runtime build" FORCE)
+        set(DYNARMIC_WARNINGS_AS_ERRORS OFF CACHE BOOL "Upstream warnings are not errors here" FORCE)
+        set(DYNARMIC_FRONTENDS "A32" CACHE STRING "ARM32 guest frontend only" FORCE)
+        set(DYNARMIC_ENABLE_CPU_FEATURE_DETECTION OFF CACHE BOOL "Baseline host CPU features" FORCE)
+        set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+        # Dynarmic needs Boost headers (boost::variant / boost::icl). Point
+        # find_package(Boost) at the pruned vendored header set so host and NDK
+        # builds are deterministic and need no system Boost installation.
+        set(Boost_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/boost-headers"
+            CACHE PATH "Vendored Boost headers for the Dynarmic backend" FORCE)
         FetchContent_Declare(
-            unicorn
-            GIT_REPOSITORY https://github.com/unicorn-engine/unicorn.git
-            GIT_TAG 8028ec436f2d9376525352dd38ed9ed6b9f6be10
+            dynarmic
+            GIT_REPOSITORY https://github.com/suyu-emu/dynarmic.git
+            GIT_TAG a2ef15df6d833ab7bc66131a90350637f26dd2d4
             GIT_SHALLOW FALSE
+            GIT_SUBMODULES "externals/mcl" "externals/fmt" "externals/xbyak" "externals/oaknut" "externals/robin-map" "externals/zydis" "externals/zycore"
         )
-        FetchContent_MakeAvailable(unicorn)
-        set_target_properties(unicorn unicorn-common PROPERTIES POSITION_INDEPENDENT_CODE ON)
-        if(UNIX OR ANDROID)
-            # Keep QEMU's guest-memory protection code on its POSIX path without
-            # requiring callers to inject a global CMAKE_C_FLAGS workaround.
-            foreach(unicorn_target IN ITEMS unicorn unicorn-common arm-softmmu)
-                if(TARGET ${unicorn_target})
-                    target_compile_definitions(${unicorn_target} PRIVATE CONFIG_POSIX)
-                endif()
-            endforeach()
-        endif()
-        if(ANDROID)
-            target_link_options(unicorn PRIVATE "-Wl,-z,max-page-size=16384")
-        endif()
-        list(APPEND COMPAT_RUNTIME_SOURCES src/compat_runtime/unicorn_backend.cpp)
+        FetchContent_MakeAvailable(dynarmic)
+        list(APPEND COMPAT_RUNTIME_SOURCES src/compat_runtime/dynarmic_backend.cpp)
     endif()
 
     add_library(compat_runtime_core STATIC ${COMPAT_RUNTIME_SOURCES})
@@ -122,9 +118,9 @@ if(RADEK_BUILD_COMPAT_RUNTIME)
     target_include_directories(compat_runtime_core PUBLIC include)
     target_compile_options(compat_runtime_core PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(compat_runtime_core PUBLIC Threads::Threads)
-    if(RADEK_FETCH_UNICORN)
-        target_compile_definitions(compat_runtime_core PRIVATE RADEK_HAVE_UNICORN=1)
-        target_link_libraries(compat_runtime_core PRIVATE unicorn)
+    if(RADEK_FETCH_DYNARMIC)
+        target_compile_definitions(compat_runtime_core PRIVATE RADEK_HAVE_DYNARMIC=1)
+        target_link_libraries(compat_runtime_core PRIVATE dynarmic)
     endif()
 
     if(ANDROID)
@@ -147,8 +143,8 @@ if(RADEK_BUILD_COMPAT_RUNTIME)
         add_executable(compat-runtime-tests tests/compat_runtime.cpp)
         target_include_directories(compat-runtime-tests PRIVATE include)
         target_compile_options(compat-runtime-tests PRIVATE -Wall -Wextra -Werror)
-        if(RADEK_FETCH_UNICORN)
-            target_compile_definitions(compat-runtime-tests PRIVATE RADEK_TEST_REQUIRE_UNICORN=1)
+        if(RADEK_FETCH_DYNARMIC)
+            target_compile_definitions(compat-runtime-tests PRIVATE RADEK_TEST_REQUIRE_DYNARMIC=1)
         endif()
         target_link_libraries(compat-runtime-tests PRIVATE compat_runtime_core)
         add_test(NAME compat-runtime COMMAND compat-runtime-tests)
@@ -162,8 +158,8 @@ if(RADEK_BUILD_COMPAT_RUNTIME)
         add_executable(compat-runtime-lifecycle-tests tests/compat_runtime_lifecycle.cpp)
         target_include_directories(compat-runtime-lifecycle-tests PRIVATE include)
         target_compile_options(compat-runtime-lifecycle-tests PRIVATE -Wall -Wextra -Werror)
-        if(RADEK_FETCH_UNICORN)
-            target_compile_definitions(compat-runtime-lifecycle-tests PRIVATE RADEK_TEST_REQUIRE_UNICORN=1)
+        if(RADEK_FETCH_DYNARMIC)
+            target_compile_definitions(compat-runtime-lifecycle-tests PRIVATE RADEK_TEST_REQUIRE_DYNARMIC=1)
         endif()
         target_link_libraries(compat-runtime-lifecycle-tests PRIVATE compat_runtime_core)
         add_test(NAME compat-runtime-lifecycle COMMAND compat-runtime-lifecycle-tests)
@@ -199,12 +195,12 @@ if(RADEK_BUILD_COMPAT_RUNTIME)
         add_test(NAME compat-runtime-objc COMMAND compat-runtime-objc-tests)
 
         # Trap binding/loader coverage needs no CPU backend; execution
-        # assertions run when the pinned Unicorn backend is linked.
+        # assertions run when the pinned Dynarmic backend is linked.
         add_executable(compat-runtime-traps-tests tests/compat_runtime_traps.cpp)
         target_include_directories(compat-runtime-traps-tests PRIVATE include)
         target_compile_options(compat-runtime-traps-tests PRIVATE -Wall -Wextra -Werror)
-        if(RADEK_FETCH_UNICORN)
-            target_compile_definitions(compat-runtime-traps-tests PRIVATE RADEK_TEST_REQUIRE_UNICORN=1)
+        if(RADEK_FETCH_DYNARMIC)
+            target_compile_definitions(compat-runtime-traps-tests PRIVATE RADEK_TEST_REQUIRE_DYNARMIC=1)
         endif()
         target_link_libraries(compat-runtime-traps-tests PRIVATE compat_runtime_core)
         add_test(NAME compat-runtime-traps COMMAND compat-runtime-traps-tests)
