@@ -67,8 +67,12 @@ struct BackendState {
     GuestAddress faultAddress = 0;
     bool guestExceptionRaised = false;
     bool bypassCalloutHookOnce = false;
+    std::uint64_t hintSpin = 0;
     std::string message;
 };
+
+void loadRegisters(Dynarmic::A32::Jit &jit, CpuRegisterState &state);
+void storeRegisters(Dynarmic::A32::Jit &jit, const CpuRegisterState &state);
 
 struct Callbacks final : Dynarmic::A32::UserCallbacks {
     BackendState *state = nullptr;
@@ -118,21 +122,23 @@ struct Callbacks final : Dynarmic::A32::UserCallbacks {
                std::uint32_t(bytes[2]) << 16 | std::uint32_t(bytes[3]) << 24;
     }
 
-    // Intercepts the return sentinel and the native-shim callout region with a
-    // halt terminal; the host loop performs dispatch and resumes. Returning
-    // false precludes translation of exactly that instruction, so normal guest
-    // code translates and links at full JIT speed.
+    // Intercepts the return sentinel and the native-shim callout region by
+    // emitting a runtime exception sequence instead of halting at translation
+    // time: the cached block raises UndefinedInstruction on every execution,
+    // ExceptionRaised dispatches the callout on the host side, and control
+    // resumes through CheckHalt. Because the trap is re-raised at runtime the
+    // block stays cached and re-entry-safe - no cache flushes on the callout
+    // fast path. Returning false precludes translating the intercepted word
+    // itself, so normal guest code translates and links at full JIT speed.
     bool PreCodeReadHook(bool, Dynarmic::A32::VAddr pc, Dynarmic::A32::IREmitter &ir) override {
         if (state->bypassCalloutHookOnce) {
             state->bypassCalloutHookOnce = false;
             return true;
         }
         if (pc == kReturnSentinel || pc >= kCalloutRegionBase) {
-            // Arm the halt and give the block a terminal: execution returns to
-            // the dispatcher, which observes the halt reason, and the host loop
-            // performs the callout dispatch (or return detection) and resumes.
-            state->jit->HaltExecution(Dynarmic::HaltReason::UserDefined1);
-            ir.SetTerm(Dynarmic::IR::Term::ReturnToDispatch{});
+            ir.UpdateUpperLocationDescriptor();
+            ir.ExceptionRaised(Dynarmic::A32::Exception::UndefinedInstruction);
+            ir.SetTerm(Dynarmic::IR::Term::CheckHalt{Dynarmic::IR::Term::ReturnToDispatch{}});
             return false;
         }
         return true;
@@ -193,16 +199,27 @@ struct Callbacks final : Dynarmic::A32::UserCallbacks {
 
     void ExceptionRaised(Dynarmic::A32::VAddr pc, Dynarmic::A32::Exception exception) override {
         using Dynarmic::A32::Exception;
+        if (dispatchNativeTrap(pc))
+            return;
         switch (exception) {
         case Exception::Yield:
-        case Exception::WaitForInterrupt:
-        case Exception::WaitForEvent:
         case Exception::SendEvent:
         case Exception::SendEventLocal:
         case Exception::PreloadData:
         case Exception::PreloadDataWithIntentToWrite:
         case Exception::PreloadInstruction:
             return; // hints: keep executing
+        case Exception::WaitForInterrupt:
+        case Exception::WaitForEvent:
+            // The host cannot deliver interrupts; a guest blocked in a wait
+            // state would otherwise re-raise this exception forever without
+            // retiring instructions. Fail closed after enough consecutive
+            // wait exceptions for AddTicks to have observed no progress.
+            if (++state->hintSpin < 4096)
+                return;
+            state->message = "guest blocked in a wait state (WFI/WFE); the host cannot deliver interrupts.";
+            state->jit->HaltExecution(Dynarmic::HaltReason::UserDefined3);
+            return;
         case Exception::NoExecuteFault:
             state->memoryFault = true;
             state->hasFaultAddress = true;
@@ -220,7 +237,20 @@ struct Callbacks final : Dynarmic::A32::UserCallbacks {
         state->jit->HaltExecution(Dynarmic::HaltReason::UserDefined3);
     }
 
+    // Marks traps raised by the runtime exception blocks emitted in
+    // PreCodeReadHook. The actual dispatch happens on the host after Run()
+    // returns: jit_state is only coherent at block boundaries, so registers
+    // must not be read or rewritten from inside the host-call itself.
+    bool dispatchNativeTrap(Dynarmic::A32::VAddr pc) {
+        if (pc != kReturnSentinel && pc < kCalloutRegionBase)
+            return false;
+        state->jit->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+        return true;
+    }
+
     void AddTicks(std::uint64_t ticks) override {
+        if (ticks > 0)
+            state->hintSpin = 0; // only real instruction progress clears a wait-state spin
         state->instructions += ticks;
         if (state->instructionLimit != 0 && state->instructions >= state->instructionLimit) {
             state->instructionLimitHit = true;
@@ -334,23 +364,31 @@ class DynarmicArm32Backend final : public CpuBackend {
 
         bool returned = false;
         for (;;) {
-            // A shim callout can resume straight back into the intercepted
-            // region (nested shim chains, or an LR that itself points at a
-            // callout). Cached intercept blocks are terminal-only, so the JIT
-            // must never be re-entered at such an address: dispatch callouts
-            // and the return sentinel here on the host side until control
-            // lands back in ordinary guest code.
-            for (;;) {
-                if (state.memoryFault || state.guestExceptionRaised ||
-                    state.instructionLimitHit || state.timeLimitHit)
-                    break;
+            const auto halt = jit->Run();
+            const auto halted = [&halt](Dynarmic::HaltReason bit) {
+                return (static_cast<unsigned>(halt) & static_cast<unsigned>(bit)) != 0;
+            };
+            if (state.memoryFault)
+                break;
+            if (state.instructionLimitHit || state.timeLimitHit)
+                break;
+            if (halted(Dynarmic::HaltReason::UserDefined3))
+                break;
+            if (halted(Dynarmic::HaltReason::CacheInvalidation))
+                continue; // a cache flush was requested; re-dispatch with fresh blocks
+            if (halted(Dynarmic::HaltReason::UserDefined1)) {
+                // A runtime exception block fired for the return sentinel or a
+                // native-shim callout. jit_state is coherent here (block
+                // boundary), so dispatch on the host and resume.
                 const auto pendingPc = jit->Regs()[15];
                 if (pendingPc == kReturnSentinel) {
                     returned = true;
                     break;
                 }
-                if (pendingPc < kCalloutRegionBase || state.bypassCalloutHookOnce)
+                if (pendingPc < kCalloutRegionBase) {
+                    state.message = "Dynarmic halted for an unrecognized reason.";
                     break;
+                }
                 if (state.timeLimitMicros != 0 &&
                     std::chrono::steady_clock::now() >= state.deadline) {
                     state.timeLimitHit = true;
@@ -371,7 +409,7 @@ class DynarmicArm32Backend final : public CpuBackend {
                     // the block once without the intercept terminal.
                     state.bypassCalloutHookOnce = true;
                     jit->ClearCache();
-                    break;
+                    continue;
                 }
                 if (callout == GuestCalloutResult::Failed) {
                     state.memoryFault = true;
@@ -389,10 +427,7 @@ class DynarmicArm32Backend final : public CpuBackend {
                 // validated transfer to a guest IMP. Preserve ARM/Thumb
                 // interworking in both cases.
                 CpuRegisterState after = calloutRegisters;
-                if (callout == GuestCalloutResult::Transferred) {
-                    // The callout adapter wrote the transfer target into the
-                    // register state it received.
-                } else {
+                if (callout == GuestCalloutResult::Returned) {
                     const auto returnAddress = after.r[14];
                     if ((returnAddress & 1U) != 0)
                         after.cpsr |= kCpsrThumbBit;
@@ -401,39 +436,15 @@ class DynarmicArm32Backend final : public CpuBackend {
                     after.r[15] = returnAddress & ~GuestAddress{1};
                 }
                 storeRegisters(*jit, after);
-            }
-            if (returned || state.memoryFault || state.guestExceptionRaised ||
-                state.timeLimitHit || state.instructionLimitHit)
-                break;
-
-            const auto halt = jit->Run();
-            if (state.memoryFault)
-                break;
-            if (state.instructionLimitHit || state.timeLimitHit)
-                break;
-            const auto pc = jit->Regs()[15];
-            if (pc == kReturnSentinel) {
-                returned = true;
-                break;
-            }
-            if ((halt & Dynarmic::HaltReason::UserDefined1) != Dynarmic::HaltReason::Step &&
-                pc >= kCalloutRegionBase) {
-                // The PreCodeReadHook intercepted this address at translation
-                // time; the inner loop above dispatches it on the next
-                // iteration. The cached intercept block is terminal-only and
-                // zero-length (its halt was armed during translation), so it
-                // is invisible to range invalidation and would spin the
-                // dispatcher forever on any later guest branch to the same
-                // address. Flush the cache so re-entries translate afresh and
-                // the hook fires again.
-                jit->ClearCache();
                 continue;
             }
-            if ((halt & Dynarmic::HaltReason::UserDefined3) != Dynarmic::HaltReason::Step)
+            if (static_cast<unsigned>(halt) == 0u || halt == Dynarmic::HaltReason::Step) {
+                // The cycle budget ran out without any explicit halt; treat it
+                // as the instruction-limit boundary.
+                state.instructionLimitHit = true;
+                state.message = "guest function reached its instruction limit.";
                 break;
-            if ((static_cast<unsigned>(halt) &
-                 static_cast<unsigned>(Dynarmic::HaltReason::CacheInvalidation)) != 0)
-                continue; // a cache flush was requested; re-dispatch with fresh blocks
+            }
             state.message = state.message.empty() ? "Dynarmic stopped before the guest function returned."
                                                   : state.message;
             break;
