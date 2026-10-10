@@ -33,7 +33,7 @@ internal class GameRuntimeApkBuilder(private val context: Context) {
         /** Report-size guard only: every payload is packaged, this caps the JSON inventory. */
         private const val MAX_REPORTED_RESOURCES = 20_000
         internal const val MAX_RESOURCE_FILES = 200_000
-        private const val MAX_EXECUTABLE_BYTES = 256L * 1024 * 1024
+        private const val MAX_EXECUTABLE_BYTES = 1024L * 1024 * 1024
         private const val TRANSLATED_RUNTIME_INPUT_NAME = "translated-game-runtime-input.zip"
         private const val TRANSLATED_PAYLOAD_NAME = "translated-game-payload.zip"
         private const val TRANSLATED_LIBRARY_NAME = "libtranslated_game.so"

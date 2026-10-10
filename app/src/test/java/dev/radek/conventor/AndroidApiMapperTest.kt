@@ -378,18 +378,18 @@ class AndroidApiMapperTest {
         assertEquals(2, mapping.getInt("compilerRuntimeGuestProviderCount"))
         assertEquals(4, mapping.getInt("runtimeProviderCount"))
         assertEquals(3, guestRows.size)
-        // ___divdi3's adapter is verified-semantics and promoted; the NSObject
-        // class and the SjLj register adapter stay outstanding catalog entries.
-        assertEquals(1, guestRows.count { it.getString("classification") == "COMPAT_VERIFIED_HANDLER_RESOLVED" })
-        assertEquals(2, guestRows.count { it.getString("classification") == "GUEST_RUNTIME_ADAPTER_CATALOGUED" })
+        // ___divdi3, the NSObject class object and the SjLj register adapter all
+        // carry verified semantics now, so every catalogued guest row resolves.
+        assertEquals(3, guestRows.count { it.getString("classification") == "COMPAT_VERIFIED_HANDLER_RESOLVED" })
+        assertEquals(0, guestRows.count { it.getString("classification") == "GUEST_RUNTIME_ADAPTER_CATALOGUED" })
         assertTrue(guestRows.all { it.getString("targetLibrary").contains("libcompat_runtime_v1.so") })
         assertTrue(guestRows.all { it.getString("staticRecompilationStrategy").contains("no static Android code-callsite rewrite") })
         assertEquals(0, mapping.getInt("runtimeVerifiedNdkCandidates"))
-        assertEquals(1, mapping.getInt("runtimeVerifiedCandidateCount"))
+        assertEquals(3, mapping.getInt("runtimeVerifiedCandidateCount"))
         assertEquals(0, mapping.getInt("linkedImplementationCount"))
         val breakdown = mapping.getJSONObject("reviewedMapping").getJSONObject("breakdown")
-        assertEquals(2, breakdown.getInt("guestRuntimeAdapterCatalogued"))
-        assertEquals(1, breakdown.getInt("concreteCompatImplementation"))
+        assertEquals(0, breakdown.getInt("guestRuntimeAdapterCatalogued"))
+        assertEquals(3, breakdown.getInt("concreteCompatImplementation"))
         assertEquals(1, breakdown.getInt("sameNameNdkOrSystemExport"))
         assertEquals(0, breakdown.getInt("compilerRuntimeToolchain"))
         assertEquals(4, breakdown.getInt("kindCountsSum"))

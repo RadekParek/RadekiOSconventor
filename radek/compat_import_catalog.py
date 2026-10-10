@@ -143,6 +143,28 @@ VERIFIED_SEMANTICS_PROVIDERS: frozenset[str] = frozenset({
     "audio-session.initialize", "audio-session.set-active",
     "foundation.home-directory", "foundation.search-paths", "foundation.temporary-directory",
     "objc.data.empty-cache", "objc.data.empty-vtable",
+    # Batch-3 promotion: every provider below now has its semantics implemented
+    # in the compat runtime (portable Objective-C object model with class and
+    # metaclass objects, real _objc_msgSend/_objc_msgSendSuper2/_objc_msgSend_stret
+    # dispatch, _objc_setProperty ivar stores, fast-enervation mutation traps,
+    # UIApplicationMain startup forwarding, the __DefaultRuneLocale guest page,
+    # CoreFoundation constant-string class data, C++ SjLj personality plus
+    # _Unwind_SjLj register/resume/unregister contexts, and EAGL constants as
+    # real NSString objects backed by the EGL window-surface render path) and
+    # each behavior is pinned by the native compat-runtime test suite.
+    "objc.class.CAEAGLLayer", "objc.class.EAGLContext", "objc.class.NSAutoreleasePool",
+    "objc.class.NSBundle", "objc.class.NSDictionary", "objc.class.NSNumber",
+    "objc.class.NSObject", "objc.class.NSString", "objc.class.NSThread", "objc.class.NSURL",
+    "objc.class.UIAccelerometer", "objc.class.UIApplication", "objc.class.UIScreen",
+    "objc.class.UIView", "objc.class.UIWindow",
+    "objc.metaclass.NSObject", "objc.metaclass.UIView",
+    "uikit.application-main", "darwin.rune-locale",
+    "sjlj.register-context", "sjlj.resume-boundary", "sjlj.unregister-context",
+    "corefoundation.constant-string-class", "cxxabi.gxx-personality-sj0",
+    "eagl.constant.RGB565", "eagl.constant.RGBA8", "eagl.constant.color-format",
+    "eagl.constant.retained-backing",
+    "objc.enumeration-mutation", "objc.msgSend", "objc.msgSendSuper2",
+    "objc.msgSend.stret", "objc.setProperty",
 })
 
 VERIFIED_SEMANTICS_SYMBOLS: frozenset[str] = frozenset(

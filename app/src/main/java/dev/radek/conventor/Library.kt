@@ -739,7 +739,7 @@ private val ICON_SUFFIXES = listOf(
 private const val ICON_MAX_BYTES = 16L * 1024 * 1024
 private const val ICON_TARGET = 512
 /** Device-memory guard for one Mach-O executable; not an archive policy limit. */
-private const val MAX_EXECUTABLE_BYTES = 256L * 1024 * 1024
+private const val MAX_EXECUTABLE_BYTES = 1024L * 1024 * 1024
 
 /**
  * Resolve the best icon in a bundle and record every attempt.

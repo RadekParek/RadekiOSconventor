@@ -53,9 +53,9 @@ class CompatLayerTests(unittest.TestCase):
     def test_angry_birds_provider_ledger_is_181_ndk_plus_73_catalog_matches(self):
         """The exact catalogs partition the fixture without implying runtime links.
 
-        Of the 73 catalog-matched imports, 40 resolve to adapters whose
-        semantics are verified (promoted out of the outstanding-adapter count),
-        leaving 33 outstanding guest adapters.
+        All 73 catalog-matched imports resolve to adapters whose semantics are
+        implemented and pinned by the native compat-runtime test suite, so the
+        outstanding-adapter count is zero.
         """
         native_catalog = (
             Path(__file__).resolve().parent.parent
@@ -81,8 +81,8 @@ class CompatLayerTests(unittest.TestCase):
         self.assertEqual(report["sameNameNdkCandidateCount"], 181)
         self.assertEqual(report["sameNameNdkProviderCount"], 181)
         self.assertEqual(report["concreteDarwinProviderCount"], 73)  # legacy alias: all catalog matches
-        self.assertEqual(report["guestRuntimeAdapterCatalogCount"], 33)  # outstanding adapters only
-        self.assertEqual(report["verifiedGuestAdapterCount"], 40)  # verified-semantics promotion
+        self.assertEqual(report["guestRuntimeAdapterCatalogCount"], 0)  # all catalog matches now verified
+        self.assertEqual(report["verifiedGuestAdapterCount"], 73)  # verified-semantics promotion
         self.assertEqual(report["guestRuntimeAdapterCatalogInventoryCount"], 75)
         self.assertAlmostEqual(report["guestRuntimeAdapterCatalogCoveragePercent"], 28.7402)
         self.assertEqual(report["guestRuntimeAdapterCatalogStatus"], "CATALOG_ONLY_NOT_RUNTIME_LINKED")

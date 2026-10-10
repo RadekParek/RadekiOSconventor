@@ -310,14 +310,17 @@ void testTextRelocationsRejectConversion() {
     assert(relocated.fields.at("reason").value.find("relocations in the proven __text section") != std::string::npos);
 }
 
-void testCompactImportInventoryIsBoundedAndMarkedTruncated() {
+void testCompactImportInventoryHasNoCountCap() {
+    // Import inventories are no longer capped: every unique observed import is
+    // retained so downstream association sees the complete table, and the
+    // truncation flag honestly stays false.
     constexpr uint32_t kImports = 100001;
     const auto compact = radek::analyze(imageWithImportCount(kImports), false);
     const auto &slice = compact.fields.at("slices").items.front();
     assert(slice.fields.at("symbolCount").value == std::to_string(kImports));
-    assert(slice.fields.at("imports").items.size() == 100000);
+    assert(slice.fields.at("imports").items.size() == kImports);
     assert(slice.fields.at("importsTruncated").kind == radek::Json::Bool);
-    assert(slice.fields.at("importsTruncated").value == "true");
+    assert(slice.fields.at("importsTruncated").value == "false");
 }
 
 void testSymbolTablesAboveFormerLimitAreParsed() {
@@ -358,7 +361,7 @@ int main() {
     testEmptyInputRejected();
     testRecompileTrivialRejectsGarbage();
     testTextRelocationsRejectConversion();
-    testCompactImportInventoryIsBoundedAndMarkedTruncated();
+    testCompactImportInventoryHasNoCountCap();
     testCompactImportInventoryRetainsDylibOrdinal();
     testSymbolTablesAboveFormerLimitAreParsed();
     std::printf("bounded conversion prover tests passed\n");

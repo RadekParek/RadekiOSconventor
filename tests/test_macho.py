@@ -257,9 +257,18 @@ class MachOTests(unittest.TestCase):
         with self.assertRaises(InputError):
             self.parse(data)
 
-    def test_excessively_long_symbol_rejected(self):
+    def test_long_terminated_symbol_decodes_unterminated_rejected(self):
+        # No artificial length caps: a terminated import name of any length is
+        # reported verbatim; only a string with no NUL inside the slice range
+        # (a genuine malformed-image condition) fails closed.
+        s = self.parse(macho(imports=["_long" + "x" * 8000]))["slices"][0]
+        self.assertIn("_long" + "x" * 8000, [i["name"] for i in s["imports"]])
         with self.assertRaises(InputError):
-            self.parse(macho(imports=["x" * 4097]))
+            corrupted = bytearray(macho(imports=["x" * 64]))
+            # remove the terminating NUL of the import string in the strtab
+            idx = corrupted.find(b"x" * 64)
+            corrupted[idx + 64] = ord("y")
+            self.parse(bytes(corrupted))
 
     def test_unixthread_pc_sp(self):
         state = bytearray(272)
