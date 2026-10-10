@@ -57,6 +57,10 @@ jobs:
           git -C "$src" submodule update --init --depth 1 \
             externals/mcl externals/fmt externals/xbyak externals/oaknut externals/robin-map \
             externals/zydis externals/zycore
+          # The suyu-emu mcl external ships a placeholder boost/variant.hpp that
+          # includes an absolute CPM cache path from the packager's machine; drop
+          # it so <boost/variant.hpp> resolves from the vendored Boost headers.
+          rm -f "$src/externals/mcl/include/boost/variant.hpp"
       # Reuse the pinned SDK components between runs. On a hit nothing is
       # downloaded; sdkmanager below then finds every package already installed
       # and returns immediately. Keyed by the exact pinned versions, so a version
@@ -519,6 +523,10 @@ jobs:
           git -C "$src" submodule update --init --depth 1 \
             externals/mcl externals/fmt externals/xbyak externals/oaknut externals/robin-map \
             externals/zydis externals/zycore
+          # The suyu-emu mcl external ships a placeholder boost/variant.hpp that
+          # includes an absolute CPM cache path from the packager's machine; drop
+          # it so <boost/variant.hpp> resolves from the vendored Boost headers.
+          rm -f "$src/externals/mcl/include/boost/variant.hpp"
           # Point the Gradle NDK build at this checkout (consumed by
           # compat-runtime-v1/build.gradle.kts as FETCHCONTENT_SOURCE_DIR_DYNARMIC).
           echo "RADEK_DYNARMIC_SOURCE_DIR=$PWD/.local/dynarmic-fetch/dynarmic-src" >> "$GITHUB_ENV"

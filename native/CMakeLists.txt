@@ -104,6 +104,8 @@ if(RADEK_BUILD_COMPAT_RUNTIME)
         # builds are deterministic and need no system Boost installation.
         set(Boost_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/boost-headers"
             CACHE PATH "Vendored Boost headers for the Dynarmic backend" FORCE)
+        set(BOOST_INCLUDEDIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/boost-headers"
+            CACHE PATH "Vendored Boost headers for the Dynarmic backend" FORCE)
         FetchContent_Declare(
             dynarmic
             GIT_REPOSITORY https://github.com/suyu-emu/dynarmic.git
@@ -112,6 +114,16 @@ if(RADEK_BUILD_COMPAT_RUNTIME)
             GIT_SUBMODULES "externals/mcl" "externals/fmt" "externals/xbyak" "externals/oaknut" "externals/robin-map" "externals/zydis" "externals/zycore"
         )
         FetchContent_MakeAvailable(dynarmic)
+        # The suyu-emu mcl external ships a placeholder boost/variant.hpp whose
+        # include points at an absolute CPM cache path from the packager's
+        # machine. Remove it so <boost/variant.hpp> resolves from the vendored
+        # Boost headers instead of faulting on that path.
+        if(EXISTS "${dynarmic_SOURCE_DIR}/externals/mcl/include/boost/variant.hpp")
+            file(READ "${dynarmic_SOURCE_DIR}/externals/mcl/include/boost/variant.hpp" _mcl_stub)
+            if(_mcl_stub MATCHES "cpm|C:/Users|CPM")
+                file(REMOVE "${dynarmic_SOURCE_DIR}/externals/mcl/include/boost/variant.hpp")
+            endif()
+        endif()
         list(APPEND COMPAT_RUNTIME_SOURCES src/compat_runtime/dynarmic_backend.cpp)
     endif()
 
@@ -127,7 +139,10 @@ if(RADEK_BUILD_COMPAT_RUNTIME)
         # roots do not propagate to us even though our backend includes
         # dynarmic public headers (frontend/A32/a32_ir_emitter.h pulls
         # mcl/stdint.hpp). Feed the externals include roots directly.
+        # The vendored Boost headers must precede the Dynarmic externals on the
+        # include path so no stray forwarding header can shadow them.
         target_include_directories(compat_runtime_core PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/boost-headers
             ${dynarmic_SOURCE_DIR}/externals/mcl/include
             ${dynarmic_SOURCE_DIR}/externals/fmt/include
             ${dynarmic_SOURCE_DIR}/externals/robin-map/include
@@ -137,8 +152,6 @@ if(RADEK_BUILD_COMPAT_RUNTIME)
         if(Boost_INCLUDE_DIRS)
             target_include_directories(compat_runtime_core PRIVATE ${Boost_INCLUDE_DIRS})
         endif()
-        target_include_directories(compat_runtime_core PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/boost-headers)
     endif()
 
     if(ANDROID)
