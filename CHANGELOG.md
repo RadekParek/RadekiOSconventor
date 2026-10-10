@@ -9,7 +9,7 @@ coverage never mean a linked game, a playable conversion or a device-tested APK.
 **Verified (run in this sandbox):**
 - NDK discovery: explicit `ANDROID_NDK_HOME`/`ANDROID_NDK_ROOT`/`NDK_HOME` first, then SDK `ndk/<version>` folders sorted numerically (newest first), `local.properties` (`ndk.dir`, `sdk.dir`), and default SDK install paths. The last two apply only to the real process environment, so `environ=` calls stay hermetic. Tests: `tests/test_android_link_incremental.py`.
 - The "no NDK" reason names the exact settings to add.
-- Incremental relink logic is implemented: each translation unit compiles to its own object, cached by a content hash of source, headers, toolchain and flags; the shared object is relinked from the objects. **Not yet run against a real NDK**; the two relink tests skip without one.
+- Incremental relink logic is implemented: each translation unit compiles to its own object, cached by a content hash of source, headers, toolchain and flags; the shared object is relinked from the objects. Run against the real NDK 27.2.12479018 in CI (GitHub-hosted runner): the Angry Birds translate-and-validate step passed, which requires `VERIFIED_ANDROID_SHARED_LIBRARY`, `ndkLinkVerified`, and matching function and byte counts. The two local relink tests still skip without an NDK on this machine.
 - Black-screen fix (`native/src/compat_runtime/gles_shims.cpp`): the EGL drawable is re-bound to the Android window surface before presenting when the surface arrives after the guest's drawable was attached to an offscreen pbuffer. The window pointer is now atomic (JNI thread writes, guest thread reads); a failed bind is remembered per window so it is not retried every frame. The repo's `-Werror` build (`tools/build_native.py`) passes and all native test targets pass.
 
 - CI gate change (`.github/workflows/build.yml`, Angry Birds gameboot probe): the probe now reaches the
@@ -20,7 +20,7 @@ coverage never mean a linked game, a playable conversion or a device-tested APK.
   first CI run failed because `org.json` is stubbed in plain JVM unit tests).
 
 **Not verified:**
-- No Android NDK is available in this sandbox (dl.google.com is unreachable; GitHub's `android/ndk` releases carry no binaries). So no Android ELF has been linked, `portProgress` is unchanged at 0%, and the black-screen fix has not been seen on a device or with a real EGL driver.
+- The sandbox cannot download the NDK (dl.google.com and GitHub release-asset hosts are blocked), so the real link ran only in CI. CI's link report could not be downloaded here, so the exact link percentage is not quoted in this entry. The black-screen fix has not been seen on a phone or with a real EGL/GLES driver.
 - Kotlin changes (`TranslatedAndroidLink`) are not compiled here (no Android SDK).
 
 ## 2026-10-09 — Android progress gated by verified artifacts; runtime evidence separated
