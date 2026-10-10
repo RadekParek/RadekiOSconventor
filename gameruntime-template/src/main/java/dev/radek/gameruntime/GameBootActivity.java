@@ -430,6 +430,38 @@ public final class GameBootActivity extends Activity {
         }
     }
 
+    private void copyDiagnosticsToClipboard() {
+        StringBuilder text = new StringBuilder();
+        if (rendererStatusView != null) text.append(rendererStatusView.getText()).append('\n');
+        try {
+            text.append(getRendererProgress()).append('\n');
+        } catch (Throwable error) {
+            text.append("renderer progress unavailable: ").append(error).append('\n');
+        }
+        if (appDataRoot != null) {
+            File report = new File(new File(appDataRoot, "diagnostics"), "runtime-report.json");
+            if (report.isFile()) {
+                try (FileInputStream input = new FileInputStream(report)) {
+                    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+                    byte[] buffer = new byte[8192];
+                    int read;
+                    while ((read = input.read(buffer)) != -1) bytes.write(buffer, 0, read);
+                    text.append(bytes.toString("UTF-8"));
+                } catch (IOException error) {
+                    text.append("runtime-report.json unreadable: ").append(error);
+                }
+            } else {
+                text.append("runtime-report.json is written only when the run ends");
+            }
+        }
+        android.content.ClipboardManager clipboard =
+                (android.content.ClipboardManager) getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+        if (clipboard != null) {
+            clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Angry Birds runtime diagnostics", text.toString()));
+            android.widget.Toast.makeText(this, "Diagnostics copied to clipboard", android.widget.Toast.LENGTH_SHORT).show();
+        }
+    }
+
     private void persistRuntimeReport(String reportText) {
         if (reportText == null || reportText.length() > MAX_RUNTIME_REPORT_BYTES) {
             appendLine("Runtime report was not saved because it exceeded the report-size limit.");
@@ -1025,6 +1057,15 @@ public final class GameBootActivity extends Activity {
         rendererStatusView.setPadding(dp(10), dp(7), dp(10), dp(7));
         rendererStatusView.setText("Renderer status pending · gameplay not verified");
         rendererStatusView.setVisibility(View.GONE);
+        // Long-press copies the live renderer state and any saved runtime report,
+        // so the diagnostics can be pasted out of the app without a computer.
+        rendererStatusView.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View view) {
+                copyDiagnosticsToClipboard();
+                return true;
+            }
+        });
         FrameLayout.LayoutParams rendererStatusParams = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
         rendererStatusParams.setMargins(dp(8), 0, dp(8), dp(8));
