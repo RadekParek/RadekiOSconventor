@@ -34,7 +34,10 @@ internal object GameRuntimeArtifactContract {
         val signing = conversion.optJSONObject("signing") ?: error("game-runtime signing identity metadata is missing")
         val certificateHash = signing.optString("certificateSha256")
         require(certificateHash.matches(Regex("[0-9a-f]{64}"))) { "game-runtime signer fingerprint is invalid" }
-        val expectedPackage = "$PACKAGE_PREFIX${sourceHash.take(20)}${certificateHash.take(8)}"
+        val expectedPackage = ArtifactNames.androidPackageName(
+            report.optJSONObject("application")?.optString("bundleId").orEmpty(),
+            sourceHash,
+            certificateHash)
         require(conversion.optString("package") == expectedPackage) { "game-runtime package id does not match its IPA and signer" }
         val expectedDigest = conversion.optString("sha256")
         require(expectedDigest.matches(Regex("[0-9a-f]{64}"))) { "game-runtime APK digest is missing" }

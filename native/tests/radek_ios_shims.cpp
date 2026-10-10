@@ -14,9 +14,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <netinet/in.h>
 #include <stdexcept>
 #include <string>
+#include <sys/socket.h>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #define CHECK(expression)                                                              \
@@ -1292,6 +1296,451 @@ void testExpandedGameAndFrameworkShims() {
     }
 }
 
+/* --- Batch 2 (Bioshock / Angry Birds device inventory) coverage ----------- */
+
+void testBatch2CoreFoundation() {
+    // CFArrayContainsValue / CFArrayGetFirstIndexOfValue use CF content equality.
+    radek_CFMutableArrayRef array = radek_compat_CFArrayCreateMutable(nullptr, 0, nullptr);
+    radek_CFStringRef first = radek_compat_CFStringCreateWithCString(nullptr, "alpha", 0x08000100u);
+    radek_CFStringRef second = radek_compat_CFStringCreateWithCString(nullptr, "beta", 0x08000100u);
+    CHECK(first != nullptr && second != nullptr);
+    radek_compat_CFArrayAppendValue(array, first);
+    radek_compat_CFArrayAppendValue(array, second);
+    radek_CFStringRef twin = radek_compat_CFStringCreateWithCString(nullptr, "beta", 0x08000100u);
+    const radek_CFRange all{0, 2};
+    CHECK(radek_compat_CFArrayContainsValue(array, all, second) == 1);
+    CHECK(radek_compat_CFArrayContainsValue(array, all, twin) == 1);   // content equality
+    const radek_CFRange headOnly{0, 1};
+    CHECK(radek_compat_CFArrayContainsValue(array, headOnly, twin) == 0);  // bounded range
+    CHECK(radek_compat_CFArrayGetFirstIndexOfValue(array, all, twin) == 1);
+    CHECK(radek_compat_CFArrayGetFirstIndexOfValue(array, headOnly, twin) == -1);
+    CHECK(radek_compat_CFMakeCollectable(first) == first);
+
+    // CFDictionaryAddValue inserts new keys but never replaces existing ones.
+    radek_CFMutableDictionaryRef dictionary =
+        radek_compat_CFDictionaryCreateMutable(nullptr, 0, nullptr, nullptr);
+    CHECK(radek_compat_CFDictionaryAddValue(dictionary, first, second) == 1);   // "alpha"
+    CHECK(radek_compat_CFDictionaryAddValue(dictionary, twin, first) == 1);     // "beta": new key
+    CHECK(radek_compat_CFDictionaryAddValue(dictionary, second, twin) == 0);    // "beta" exists
+    CHECK(radek_compat_CFDictionaryGetCount(dictionary) == 2);
+
+    // CFStringCreateWithCharacters / GetCharactersPtr / AppendCharacters.
+    const radek_UniChar word[] = {'h', 'e', 'l', 'l', 'o'};
+    radek_CFMutableStringRef chars = const_cast<radek_CFRuntime *>(
+        radek_compat_CFStringCreateWithCharacters(nullptr, word, 5));
+    CHECK(chars != nullptr);
+    const radek_UniChar *view = radek_compat_CFStringGetCharactersPtr(chars);
+    CHECK(view != nullptr && std::memcmp(view, word, sizeof(word)) == 0);
+    const radek_UniChar more[] = {'!'};
+    radek_compat_CFStringAppendCharacters(chars, more, 1);
+    view = radek_compat_CFStringGetCharactersPtr(chars);
+    CHECK(view != nullptr);
+    const radek_UniChar joined[] = {'h', 'e', 'l', 'l', 'o', '!'};
+    CHECK(std::memcmp(view, joined, sizeof(joined)) == 0);
+
+    // Percent escaping honours the forced-escape list.
+    radek_CFStringRef plain = radek_compat_CFStringCreateWithCString(nullptr, "a b/c", 0x08000100u);
+    radek_CFStringRef escaped = radek_compat_CFURLCreateStringByAddingPercentEscapes(
+        nullptr, plain, nullptr, nullptr, 0x08000100u);
+    CHECK(escaped != nullptr);
+    char buffer[32] = {};
+    CHECK(radek_compat_CFStringGetCString(escaped, buffer, sizeof(buffer), 0x08000100u) == 1);
+    CHECK(std::string(buffer) == "a%20b/c");
+    radek_CFStringRef forceSlash = radek_compat_CFStringCreateWithCString(nullptr, "/", 0x08000100u);
+    radek_CFStringRef escapedForced = radek_compat_CFURLCreateStringByAddingPercentEscapes(
+        nullptr, plain, nullptr, forceSlash, 0x08000100u);
+    CHECK(radek_compat_CFStringGetCString(escapedForced, buffer, sizeof(buffer), 0x08000100u) == 1);
+    CHECK(std::string(buffer) == "a%20b%2Fc");
+
+    // CFHost: resolve localhost and hand back sockaddr-bearing CFData values.
+    radek_CFStringRef name = radek_compat_CFStringCreateWithCString(nullptr, "localhost", 0x08000100u);
+    radek_CFTypeRef host = radek_compat_CFHostCreateWithName(nullptr, name);
+    CHECK(host != nullptr);
+    radek_Boolean resolved = 1;
+    CHECK(radek_compat_CFHostGetAddressing(host, &resolved) == nullptr && resolved == 0);
+    int32_t streamError[2] = {-1, -1};
+    CHECK(radek_compat_CFHostStartInfoResolution(host, 0, streamError) == 1);
+    CHECK(streamError[0] == 0 && streamError[1] == 0);
+    radek_CFArrayRef addresses = radek_compat_CFHostGetAddressing(host, &resolved);
+    CHECK(addresses != nullptr && resolved == 1);
+    CHECK(radek_compat_CFArrayGetCount(addresses) >= 1);
+    const void *firstAddress = radek_compat_CFArrayGetValueAtIndex(addresses, 0);
+    CHECK(radek_compat_CFDataGetLength(static_cast<radek_CFDataRef>(firstAddress)) >=
+          static_cast<radek_CFIndex>(sizeof(sockaddr_in)));
+    const uint8_t *addressBytes =
+        radek_compat_CFDataGetBytePtr(static_cast<radek_CFDataRef>(firstAddress));
+    CHECK(addressBytes != nullptr);
+    const uint16_t family = *reinterpret_cast<const uint16_t *>(addressBytes);
+    CHECK(family == AF_INET || family == AF_INET6);
+    radek_compat_CFRelease(addresses);
+    radek_compat_CFRelease(host);
+    radek_compat_CFRelease(escapedForced);
+    radek_compat_CFRelease(forceSlash);
+    radek_compat_CFRelease(escaped);
+    radek_compat_CFRelease(plain);
+    radek_compat_CFRelease(chars);
+    radek_compat_CFRelease(twin);
+    radek_compat_CFRelease(dictionary);
+    radek_compat_CFRelease(second);
+    radek_compat_CFRelease(first);
+    radek_compat_CFRelease(array);
+    radek_compat_CFRelease(name);
+}
+
+void testBatch2CGRect() {
+    const radek_CGRect rect{{1.25f, 2.5f}, {10.0f, 20.0f}};
+    CHECK(radek_compat_CGRectGetWidth(rect) == 10.0f);
+    CHECK(radek_compat_CGRectGetHeight(rect) == 20.0f);
+    CHECK(radek_compat_CGRectGetMinY(rect) == 2.5f);
+    CHECK(radek_compat_CGRectGetMaxX(rect) == 11.25f);
+    CHECK(radek_compat_CGRectGetMidX(rect) == 6.25f);
+    CHECK(radek_compat_CGRectGetMidY(rect) == 12.5f);
+
+    const radek_CGRect integral = radek_compat_CGRectIntegral(rect);
+    CHECK(integral.origin.x == 1.0f && integral.origin.y == 2.0f);
+    CHECK(integral.size.width == 11.0f && integral.size.height == 21.0f);
+
+    const radek_CGRect offset = radek_compat_CGRectOffset(rect, 1.0f, -1.0f);
+    CHECK(offset.origin.x == 2.25f && offset.origin.y == 1.5f);
+    CHECK(offset.size.width == 10.0f && offset.size.height == 20.0f);
+
+    const radek_CGRect overlapping{{5.0f, 5.0f}, {10.0f, 10.0f}};
+    const radek_CGRect disjoint{{100.0f, 100.0f}, {5.0f, 5.0f}};
+    CHECK(radek_compat_CGRectIntersectsRect(rect, overlapping) == 1);
+    CHECK(radek_compat_CGRectIntersectsRect(rect, disjoint) == 0);
+
+    CHECK(radek_compat_CGRectIsEmpty(rect) == 0);
+    const radek_CGRect thin{{0.0f, 0.0f}, {0.0f, 10.0f}};
+    CHECK(radek_compat_CGRectIsEmpty(thin) == 1);
+    const radek_CGRect nullRect{{INFINITY, INFINITY}, {0.0f, 0.0f}};
+    CHECK(radek_compat_CGRectIsNull(nullRect) == 1);
+    CHECK(radek_compat_CGRectIsEmpty(nullRect) == 1);
+    CHECK(radek_compat_CGRectIsNull(rect) == 0);
+    CHECK(radek_compat_CGRectIntersectsRect(nullRect, overlapping) == 0);
+    const radek_CGRect integralNull = radek_compat_CGRectIntegral(nullRect);
+    CHECK(radek_compat_CGRectIsNull(integralNull) == 1);
+}
+
+void testBatch2CCHmac() {
+    // RFC 2202 test case 2, HMAC-SHA1.
+    {
+        const char key[] = "Jefe";
+        const char data[] = "what do ya want for nothing?";
+        uint8_t mac[20];
+        radek_compat_CCHmac(RADEK_kCCHmacAlgSHA1, key, 4, data, 28, mac);
+        const uint8_t expected[20] = {0xef, 0xfc, 0xdf, 0x6a, 0xe5, 0xeb, 0x2f, 0xa2, 0xd2, 0x74,
+                                      0x16, 0xd5, 0xf1, 0x84, 0xdf, 0x9c, 0x25, 0x9a, 0x7c, 0x79};
+        CHECK(std::memcmp(mac, expected, sizeof(expected)) == 0);
+    }
+    // RFC 4231 test case 2, HMAC-SHA256.
+    {
+        const char key[] = "Jefe";
+        const char data[] = "what do ya want for nothing?";
+        uint8_t mac[32];
+        radek_compat_CCHmac(RADEK_kCCHmacAlgSHA256, key, 4, data, 28, mac);
+        const uint8_t expected[32] = {0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e, 0x6a, 0x04, 0x24,
+                                      0x26, 0x08, 0x95, 0x75, 0xc7, 0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27,
+                                      0x39, 0x83, 0x9d, 0xec, 0x58, 0xb9, 0x64, 0xec, 0x38, 0x43};
+        CHECK(std::memcmp(mac, expected, sizeof(expected)) == 0);
+    }
+    // RFC 2104 / classic MD5 vector: key "Jefe", same data.
+    {
+        const char key[] = "Jefe";
+        const char data[] = "what do ya want for nothing?";
+        uint8_t mac[16];
+        radek_compat_CCHmac(RADEK_kCCHmacAlgMD5, key, 4, data, 28, mac);
+        const uint8_t expected[16] = {0x75, 0x0c, 0x78, 0x3e, 0x6a, 0xb0, 0xb5, 0x03,
+                                      0xea, 0xa8, 0x6e, 0x31, 0x0a, 0x5d, 0xb7, 0x38};
+        CHECK(std::memcmp(mac, expected, sizeof(expected)) == 0);
+    }
+    // Incremental Init/Update/Final equals the one-shot call, and long keys
+    // (> 64 bytes, forcing the key-hash path) agree between both forms.
+    {
+        uint8_t key[100];
+        for (size_t i = 0; i < sizeof(key); ++i) key[i] = static_cast<uint8_t>(i * 7 + 1);
+        const char *data = "the quick brown fox jumps over the lazy dog";
+        uint8_t oneShot[20];
+        radek_compat_CCHmac(RADEK_kCCHmacAlgSHA1, key, sizeof(key), data, std::strlen(data), oneShot);
+        radek_CCHmacContext context;
+        radek_compat_CCHmacInit(&context, RADEK_kCCHmacAlgSHA1, key, sizeof(key));
+        radek_compat_CCHmacUpdate(&context, data, 10);
+        radek_compat_CCHmacUpdate(&context, data + 10, std::strlen(data) - 10);
+        uint8_t streamed[20];
+        radek_compat_CCHmacFinal(&context, streamed);
+        CHECK(std::memcmp(oneShot, streamed, sizeof(oneShot)) == 0);
+    }
+}
+
+void testBatch2AtomicsAndThreads() {
+    volatile int32_t value = 10;
+    CHECK(radek_compat_OSAtomicAdd32Barrier(5, &value) == 15);
+    CHECK(value == 15);
+    CHECK(radek_compat_OSAtomicCompareAndSwap32Barrier(15, 20, &value) == 1);
+    CHECK(value == 20);
+    CHECK(radek_compat_OSAtomicCompareAndSwap32Barrier(15, 25, &value) == 0);  // stale expected
+    CHECK(value == 20);
+    int token = 0;
+    int other = 0;
+    void *volatile pointerSlot = &token;
+    CHECK(radek_compat_OSAtomicCompareAndSwapPtrBarrier(&token, &other, &pointerSlot) == 1);
+    CHECK(pointerSlot == &other);
+    CHECK(radek_compat_OSAtomicCompareAndSwapPtrBarrier(&token, nullptr, &pointerSlot) == 0);  // stale
+    CHECK(pointerSlot == &other);
+
+    CHECK(radek_compat_pthread_mach_thread_np(pthread_self()) != 0);
+    uint64_t threadId = 0;
+    CHECK(radek_compat_pthread_threadid_np(pthread_self(), &threadId) == 0);
+    CHECK(threadId != 0);
+    CHECK(radek_compat_dispatch_get_current_queue() != 0);
+    CHECK(radek_compat_dispatch_get_current_queue() == radek_compat_dispatch_get_current_queue());
+    CHECK(radek_compat_thread_policy_set(0x103, 1, nullptr, 0) == 0);
+}
+
+void testBatch2MachSurface() {
+    CHECK(radek_compat_mach_host_self() == 0x103u);
+    CHECK(radek_compat_mach_task_self_() == 0x103u);
+
+    uintptr_t pageSize = 0;
+    CHECK(radek_compat_host_page_size(radek_compat_mach_host_self(), &pageSize) == 0);
+    CHECK(pageSize >= 4096u);
+    CHECK(radek_compat_host_page_size(0x103u, nullptr) == 4);
+
+    // HOST_VM_INFO: real memory numbers parsed from /proc/meminfo.
+    uint32_t vmInfo[23] = {};
+    uint32_t vmCount = 23;
+    CHECK(radek_compat_host_statistics(0x103u, 2, vmInfo, &vmCount) == 0);
+    CHECK(vmCount == 23);
+    const uint32_t freePages = vmInfo[0];
+    const uint32_t activePages = vmInfo[1];
+    CHECK(freePages > 0 || activePages > 0);
+    uint32_t tooSmall = 2;
+    CHECK(radek_compat_host_statistics(0x103u, 2, vmInfo, &tooSmall) == 4);
+    uint32_t cpuLoad[4] = {1, 1, 1, 1};
+    uint32_t cpuCount = 4;
+    CHECK(radek_compat_host_statistics(0x103u, 3, cpuLoad, &cpuCount) == 0);
+
+    // task_info fills the real process sizes for the basic-info flavours.
+    uint32_t taskInfo[16] = {};
+    uint32_t taskCount = 16;
+    CHECK(radek_compat_task_info(0x103u, 20, taskInfo, &taskCount) == 0);
+    CHECK(taskInfo[6] > 0);  // virtual_size from VmSize
+
+    // mach_wait_until with a past deadline returns immediately.
+    const auto before = std::chrono::steady_clock::now();
+    CHECK(radek_compat_mach_wait_until(1) == 0);
+    CHECK(std::chrono::steady_clock::now() - before < std::chrono::milliseconds(50));
+
+    // Semaphore round trip across threads, then a timed-out wait.
+    radek_mach_port_t semaphore = 0;
+    CHECK(radek_compat_semaphore_create(0x103u, &semaphore, 0, 0) == 0);
+    CHECK(semaphore != 0);
+    std::thread signaller([semaphore] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CHECK(radek_compat_semaphore_signal(semaphore) == 0);
+    });
+    CHECK(radek_compat_semaphore_wait(semaphore, 0xFFFFFFFFu) == 0);
+    signaller.join();
+    CHECK(radek_compat_semaphore_wait(semaphore, 20) == 49);  // KERN_OPERATION_TIMED_OUT
+    CHECK(radek_compat_semaphore_signal(semaphore) == 0);
+    CHECK(radek_compat_semaphore_wait(semaphore, 20) == 0);   // buffered signal
+    CHECK(radek_compat_semaphore_destroy(0x103u, semaphore) == 0);
+    CHECK(radek_compat_semaphore_destroy(0x103u, semaphore) == 4);  // already gone
+}
+
+void testBatch2CompilerAndCxx() {
+    // __divmodsi4: {quotient, remainder} in r0:r1 semantics.
+    const radek_divmodsi4_result split = radek_compat___divmodsi4(-7, 2);
+    CHECK(split.quotient == -3 && split.remainder == -1);
+    const radek_divmodsi4_result exact = radek_compat___divmodsi4(100, 10);
+    CHECK(exact.quotient == 10 && exact.remainder == 0);
+    const radek_divmodsi4_result saturated = radek_compat___divmodsi4(INT32_MIN, -1);
+    CHECK(saturated.quotient == INT32_MIN && saturated.remainder == 0);
+    const radek_divmodsi4_result guarded = radek_compat___divmodsi4(5, 0);
+    CHECK(guarded.quotient == 0 && guarded.remainder == 0);
+
+    // sincos pairs match sin/cos, including the float entry point.
+    const radek_sincos_result pair = radek_compat___sincos_stret(M_PI / 4.0);
+    CHECK(std::fabs(pair.sin - std::sin(M_PI / 4.0)) < 1e-12);
+    CHECK(std::fabs(pair.cos - std::cos(M_PI / 4.0)) < 1e-12);
+    const radek_sincosf_result floatPair = radek_compat___sincosf_stret(1.0f);
+    CHECK(std::fabs(floatPair.sin - std::sin(1.0f)) < 1e-6f);
+    CHECK(std::fabs(floatPair.cos - std::cos(1.0f)) < 1e-6f);
+
+    // memset_pattern16 tiles the 16-byte pattern, including the ragged tail.
+    const uint8_t pattern[16] = {0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+                                 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F};
+    uint8_t destination[40];
+    std::memset(destination, 0, sizeof(destination));
+    radek_compat_memset_pattern16(destination, pattern, sizeof(destination));
+    for (size_t i = 0; i < sizeof(destination); ++i) {
+        CHECK(destination[i] == pattern[i % 16]);
+    }
+
+    // STL throw helpers raise catchable libc++ exceptions.
+    bool caughtLength = false;
+    try {
+        radek_compat_stl_throw_length_error("vector too long");
+    } catch (const std::length_error &error) {
+        caughtLength = std::string(error.what()) == "vector too long";
+    }
+    CHECK(caughtLength);
+    bool caughtRange = false;
+    try {
+        radek_compat_stl_throw_out_of_range("index 5");
+    } catch (const std::out_of_range &error) {
+        caughtRange = std::string(error.what()) == "index 5";
+    }
+    CHECK(caughtRange);
+
+    // std::random_shuffle support: xorshift draw changes, dtor is safe.
+    const uint32_t firstDraw = radek_compat_rs_default_call(nullptr);
+    const uint32_t secondDraw = radek_compat_rs_default_call(nullptr);
+    CHECK(firstDraw != secondDraw);
+    radek_compat_rs_default_dtor(nullptr);
+    CHECK(radek_compat_rs_get() == 0u);
+
+    // The Objective-C personality forwards to the C++ personality: an invalid
+    // unwind version is rejected with _URC_FATAL_PHASE1_ERROR before any
+    // context is touched, exactly like __gxx_personality_v0 does.
+    CHECK(radek_compat___objc_personality_v0(99, 1, 0, 0, 0) == 3);
+}
+
+void testBatch2BlocksRuntime() {
+    static bool copyRan = false;
+    static bool disposeRan = false;
+
+    // Stack block -> heap copy via _Block_object_assign (flags 7).
+    struct RadekTestBlock {
+        void *isa;
+        int32_t flags;
+        int32_t reserved;
+        void *invoke;
+        void *descriptor;
+    };
+    struct RadekTestDescriptor {
+        uintptr_t reserved;
+        uintptr_t size;
+        void (*copyHelper)(void *, const void *);
+        void (*disposeHelper)(const void *);
+    };
+    copyRan = disposeRan = false;
+    RadekTestDescriptor descriptor;
+    descriptor.reserved = 0;
+    descriptor.size = sizeof(RadekTestBlock);
+    descriptor.copyHelper = [](void *, const void *) { copyRan = true; };
+    descriptor.disposeHelper = [](const void *) { disposeRan = true; };
+    alignas(16) char stackBlockStorage[sizeof(RadekTestBlock)];
+    auto *stackBlock = reinterpret_cast<RadekTestBlock *>(stackBlockStorage);
+    stackBlock->isa = nullptr;
+    stackBlock->flags = (1 << 25);  // BLOCK_HAS_COPY_DISPOSE
+    stackBlock->reserved = 0;
+    stackBlock->invoke = reinterpret_cast<void *>(0x1234);
+    stackBlock->descriptor = &descriptor;
+
+    void *copiedSlot = nullptr;
+    radek_compat_Block_object_assign(&copiedSlot, stackBlock, 7);
+    CHECK(copiedSlot != nullptr && copiedSlot != stackBlock);
+    CHECK(copyRan);
+    auto *heapBlock = static_cast<RadekTestBlock *>(copiedSlot);
+    CHECK(heapBlock->invoke == reinterpret_cast<void *>(0x1234));
+    CHECK((heapBlock->flags & (1 << 24)) != 0);  // BLOCK_NEEDS_FREE
+
+    void *secondSlot = nullptr;
+    radek_compat_Block_object_assign(&secondSlot, heapBlock, 7);  // heap block: share + refcount
+    CHECK(secondSlot == heapBlock);
+    radek_compat_Block_object_dispose(heapBlock, 7);  // refcount down, still alive
+    CHECK(!disposeRan);
+    radek_compat_Block_object_dispose(heapBlock, 7);  // final release
+    CHECK(disposeRan);
+
+    // __block byref: assign copies to the heap and repoints forwarding.
+    struct RadekTestByref {
+        void *isa;
+        void *forwarding;
+        int32_t flags;
+        int32_t size;
+        int64_t payload;
+    };
+    alignas(16) char byrefStorage[sizeof(RadekTestByref)];
+    auto *stackByref = reinterpret_cast<RadekTestByref *>(byrefStorage);
+    stackByref->isa = nullptr;
+    stackByref->forwarding = stackByref;
+    stackByref->flags = 0;
+    stackByref->size = static_cast<int32_t>(sizeof(RadekTestByref));
+    stackByref->payload = 0x55AA;
+
+    void *byrefSlot = nullptr;
+    radek_compat_Block_object_assign(&byrefSlot, stackByref, 8);
+    CHECK(byrefSlot != nullptr && byrefSlot != stackByref);
+    auto *heapByref = static_cast<RadekTestByref *>(byrefSlot);
+    CHECK(heapByref->payload == 0x55AA);
+    CHECK(heapByref->forwarding == heapByref);
+    CHECK(stackByref->forwarding == heapByref);
+    radek_compat_Block_object_dispose(heapByref, 8);  // NEEDS_FREE: frees the copy
+    radek_compat_Block_object_dispose(stackByref, 8);  // stack byref: safe no-op
+
+    // Plain object slot store (flags 3) without an Objective-C runtime.
+    int objectToken = 0;
+    void *objectSlot = nullptr;
+    radek_compat_Block_object_assign(&objectSlot, &objectToken, 3);
+    CHECK(objectSlot == &objectToken);
+    radek_compat_Block_object_dispose(&objectToken, 3);
+}
+
+void testBatch2ObjectiveCHelpers() {
+    // Property setters write the ivar slot at (self + offset).
+    char self[64] = {};
+    radek_compat_objc_setProperty_nonatomic(self, 16, &self[0]);
+    CHECK(*reinterpret_cast<void **>(self + 16) == &self[0]);
+    radek_compat_objc_setProperty_atomic(self, 24, &self[8]);
+    CHECK(*reinterpret_cast<void **>(self + 24) == &self[8]);
+    radek_compat_objc_setProperty_atomic_copy(self, 24, nullptr);
+    CHECK(*reinterpret_cast<void **>(self + 24) == nullptr);
+    radek_compat_objc_setProperty_nonatomic_copy(self, 16, nullptr);
+    CHECK(*reinterpret_cast<void **>(self + 16) == nullptr);
+
+    // Associated-object storage accepts set, overwrite, and nil-removal.
+    int owner = 0;
+    int valueOne = 1;
+    int valueTwo = 2;
+    radek_compat_objc_setAssociatedObject(&owner, &valueOne, &valueOne, 0x301);
+    radek_compat_objc_setAssociatedObject(&owner, &valueOne, &valueTwo, 0x301);
+    radek_compat_objc_setAssociatedObject(&owner, &valueOne, nullptr, 0x301);
+
+    // Uncaught exception handler storage round-trips through the getter.
+    auto handler = [](void *) {};
+    CHECK(radek_compat_NSGetUncaughtExceptionHandler(nullptr) == nullptr);
+    radek_compat_NSSetUncaughtExceptionHandler(handler);
+    CHECK(radek_compat_NSGetUncaughtExceptionHandler(nullptr) == handler);
+    radek_compat_NSSetUncaughtExceptionHandler(nullptr);
+    CHECK(radek_compat_NSGetUncaughtExceptionHandler(nullptr) == handler);  // nil keeps the old one
+}
+
+bool childDiesWithSignal(void (*body)(), int expectedSignal) {
+    const pid_t child = fork();
+    if (child == 0) {
+        body();
+        _exit(0);  // Reached only if the body failed to die.
+    }
+    CHECK(child > 0);
+    int status = 0;
+    CHECK(waitpid(child, &status, 0) == child);
+    return WIFSIGNALED(status) && WTERMSIG(status) == expectedSignal;
+}
+
+void assertRtnBody() {
+    radek_compat___assert_rtn("fn", "file.c", 42, "1 == 2");
+}
+
+void callUnexpectedBody() {
+    radek_compat___cxa_call_unexpected(nullptr);
+}
+
+void testBatch2TerminalHelpers() {
+    CHECK(childDiesWithSignal(&assertRtnBody, SIGABRT));
+    CHECK(childDiesWithSignal(&callUnexpectedBody, SIGABRT));
+}
+
 }  // namespace
 
 int main() {
@@ -1302,6 +1751,15 @@ int main() {
     testPthread();
     testCoreFoundationObjects();
     testCoreFoundationRunLoop();
+    testBatch2CoreFoundation();
+    testBatch2CGRect();
+    testBatch2CCHmac();
+    testBatch2AtomicsAndThreads();
+    testBatch2MachSurface();
+    testBatch2CompilerAndCxx();
+    testBatch2BlocksRuntime();
+    testBatch2ObjectiveCHelpers();
+    testBatch2TerminalHelpers();
     std::cout << "Bounded C/POSIX/CoreFoundation compatibility shims passed\n";
     return 0;
 }

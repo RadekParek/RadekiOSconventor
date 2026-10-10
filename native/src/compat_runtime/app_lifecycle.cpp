@@ -43,6 +43,18 @@ namespace {
 
 constexpr std::uint32_t kFrameDidFinishLaunching = 1;
 constexpr std::uint32_t kFramePerformSelector = 2;
+// A source serviced by CFRunLoop (timer, delayed selector, touch). The frame
+// keeps the run loop's own return address, because the run loop - not the
+// interrupting shim - decides what runs next.
+constexpr std::uint32_t kFrameRunLoopSource = 3;
+
+// The guest that is currently running, so the host (Android input, surface
+// changes) can reach it. The boot runs on a single thread and re-enters the
+// guest through its own run loop, so input must be posted into that loop
+// rather than called in directly.
+std::mutex gActiveGuestMutex;
+ShimAdapter *gActiveAdapter = nullptr;
+GuestAddressSpace *gActiveMemory = nullptr;
 
 // Name of the framework classes the startup chain can serve. Anything else must
 // come from the image's own Objective-C metadata.
@@ -184,6 +196,10 @@ LifecycleOutcome ShimAdapter::lifecycleOutcome(GuestAddressSpace &memory) const 
     outcome.mainThreadFramesServiced = lifecycle.mainThreadFramesServiced;
     outcome.mainThreadFramesLimit = lifecycle.mainThreadFramesLimit;
     outcome.mainThreadQueueExhausted = lifecycle.mainThreadCancelled;
+    outcome.runLoopIterations = lifecycle.runLoopIterations;
+    outcome.runLoopPendingSources = static_cast<std::uint32_t>(lifecycle.runLoopSources.size());
+    outcome.runLoopRunning = lifecycle.runLoopRunning;
+    outcome.runLoopExited = lifecycle.runLoopEntered && !lifecycle.runLoopRunning;
     outcome.events = lifecycle.events;
     return outcome;
 }
@@ -248,7 +264,9 @@ bool ShimAdapter::beginNestedGuestCall(CpuRegisterState &registers, GuestAddress
 }
 
 bool ShimAdapter::lifecycleContinuation(CpuRegisterState &registers, GuestAddressSpace &memory,
-                                        std::string &reason) {
+                                        std::string &reason, GuestAddress *guestTarget) {
+    if (guestTarget)
+        *guestTarget = 0;
     try {
         auto &state = guestState(memory);
         auto &lifecycle = state.lifecycle;
@@ -267,6 +285,24 @@ bool ShimAdapter::lifecycleContinuation(CpuRegisterState &registers, GuestAddres
             ++lifecycle.mainThreadFramesServiced;
             registers.r[0] = 0;
             break;
+        case kFrameRunLoopSource: {
+            // Stay inside the run loop: service the next ready source, and only
+            // return to CFRunLoopRun's caller once the queue is empty. This is
+            // what keeps a game drawing frames past its startup callback.
+            registers.r[0] = 0;
+            GuestAddress next = 0;
+            if (!serviceRunLoop(registers, memory, next, reason))
+                return false;
+            if (next != 0) {
+                if (guestTarget)
+                    *guestTarget = next;
+                return true;
+            }
+            lifecycle.runLoopRunning = false;
+            registers.r[14] = frame.callerReturnAddress;
+            recordLifecycleEvent(lifecycle, "CFRunLoop exited: no sources remain");
+            break;
+        }
         default:
             throw std::runtime_error("lifecycle continuation received an unknown frame kind");
         }
@@ -282,6 +318,11 @@ bool ShimAdapter::applicationMain(CpuRegisterState &registers, GuestAddressSpace
     try {
         auto &state = guestState(memory);
         auto &lifecycle = state.lifecycle;
+        {
+            std::lock_guard<std::mutex> lock(gActiveGuestMutex);
+            gActiveAdapter = this;
+            gActiveMemory = &memory;
+        }
         lifecycle.applicationMainEntered = true;
         recordLifecycleEvent(lifecycle, "UIApplicationMain entered");
         const auto delegateName = readConstantString(memory, registers.r[3]);
@@ -341,6 +382,319 @@ bool ShimAdapter::applicationMain(CpuRegisterState &registers, GuestAddressSpace
         reason = error.what();
         return false;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Run loop - the frame pump
+// ---------------------------------------------------------------------------
+// `UIApplicationMain` does not return on a real device. After the delegate's
+// startup callback it enters CFRunLoop and keeps servicing the app's timers,
+// delayed selectors and input sources; that continuous servicing is what draws
+// the second, third and ten-thousandth frame. Returning to `main()` instead
+// stops the guest right after startup, which presents as a black screen: the
+// guest set its GL state up during `applicationDidFinishLaunching:` and then
+// nothing ever drew again.
+//
+// The bounded adapter reproduces that with the nested-callout machinery it
+// already uses for `UIApplicationMain`: `CFRunLoopRun` records the loop's
+// return address and hands the CPU one ready source at a time. When the guest
+// returns from a source, the continuation services the next one and re-enters.
+// Only `CFRunLoopStop`, an empty queue, or an explicit diagnostic limit ends it.
+
+void ShimAdapter::configureViewport(GuestAddressSpace &memory, std::uint32_t width,
+                                    std::uint32_t height) {
+    if (width == 0 || height == 0)
+        return;
+    // Remember the running guest so host input and surface changes can reach
+    // it: the boot runs on one thread and re-enters the guest through its run
+    // loop, so there is no re-entrant entry point into guest code.
+    {
+        std::lock_guard<std::mutex> lock(gActiveGuestMutex);
+        gActiveAdapter = this;
+        gActiveMemory = &memory;
+    }
+    auto &lifecycle = guestState(memory).lifecycle;
+    lifecycle.viewportWidth = width;
+    lifecycle.viewportHeight = height;
+    lifecycle.viewportConfigured = true;
+    recordLifecycleEvent(lifecycle, "host viewport configured: " + std::to_string(width) + "x" +
+                                        std::to_string(height));
+}
+
+void ShimAdapter::effectiveViewport(const GuestAddressSpace &memory, std::uint32_t &width,
+                                    std::uint32_t &height) const {
+    const auto found = guestStates_.find(&memory);
+    if (found == guestStates_.end() || !found->second)
+        return;
+    const auto &lifecycle = found->second->lifecycle;
+    if (!lifecycle.viewportConfigured)
+        return;
+    width = lifecycle.viewportWidth;
+    height = lifecycle.viewportHeight;
+}
+
+bool ShimAdapter::statusBarHidden(const GuestAddressSpace &memory) const {
+    const auto found = guestStates_.find(&memory);
+    if (found == guestStates_.end() || !found->second)
+        return false;
+    return found->second->lifecycle.statusBarHidden;
+}
+
+void ShimAdapter::runLoopStop(GuestAddressSpace &memory) {
+    auto &lifecycle = guestState(memory).lifecycle;
+    lifecycle.runLoopStopped = true;
+    recordLifecycleEvent(lifecycle, "CFRunLoopStop requested");
+}
+
+GuestAddress ShimAdapter::scheduleTimer(GuestAddressSpace &memory, double intervalSeconds,
+                                        GuestAddress target, Selector selector,
+                                        GuestAddress argument, bool repeats) {
+    auto &lifecycle = guestState(memory).lifecycle;
+    auto *timerClass = classes_.find("NSTimer") != classes_.end() ? classes_.at("NSTimer")
+                                                                  : rootClass_;
+    auto *timer = runtime_.allocate(timerClass);
+    if (timer->ivars.size() < 2)
+        timer->ivars.resize(2, 0);
+    timer->ivars[0] = static_cast<Value>(lifecycle.nextTimerToken);
+    timer->ivars[1] = target;
+    const auto address = ensureObjectAddress(memory, timer);
+
+    LifecycleState::RunLoopSource source;
+    source.kind = LifecycleState::RunLoopSource::Kind::Timer;
+    source.target = target;
+    source.selector = selector;
+    // A scheduled timer normally receives itself as the callback argument.
+    source.argument = address;
+    source.timerObject = address;
+    source.intervalSeconds = intervalSeconds > 0.0 ? intervalSeconds : 1.0 / 60.0;
+    source.nextFireSeconds = lifecycle.runLoopClockSeconds + source.intervalSeconds;
+    source.repeats = repeats;
+    lifecycle.runLoopSources.push_back(source);
+    ++lifecycle.nextTimerToken;
+    recordLifecycleEvent(lifecycle, "NSTimer scheduled (interval " +
+                                        std::to_string(source.intervalSeconds) + "s" +
+                                        (repeats ? ", repeats" : "") + ")");
+    (void)argument;
+    return address;
+}
+
+void ShimAdapter::scheduleDelayedSelector(GuestAddressSpace &memory, GuestAddress target,
+                                          Selector selector, GuestAddress argument,
+                                          double delaySeconds) {
+    auto &lifecycle = guestState(memory).lifecycle;
+    LifecycleState::RunLoopSource source;
+    source.kind = LifecycleState::RunLoopSource::Kind::DelayedSelector;
+    source.target = target;
+    source.selector = selector;
+    source.argument = argument;
+    source.intervalSeconds = delaySeconds;
+    source.nextFireSeconds = lifecycle.runLoopClockSeconds + std::max(delaySeconds, 0.0);
+    source.repeats = false;
+    lifecycle.runLoopSources.push_back(source);
+}
+
+void ShimAdapter::postTouch(GuestAddressSpace &memory, const std::string &phase, float x,
+                            float y) {
+    auto &lifecycle = guestState(memory).lifecycle;
+    LifecycleState::RunLoopSource source;
+    source.kind = LifecycleState::RunLoopSource::Kind::Touch;
+    source.touchPhase = phase;
+    source.touchX = x;
+    source.touchY = y;
+    source.nextFireSeconds = lifecycle.runLoopClockSeconds;
+    lifecycle.runLoopSources.push_back(source);
+}
+
+void ShimAdapter::cancelRunLoopSourcesFor(GuestAddressSpace &memory, GuestAddress target) {
+    auto &lifecycle = guestState(memory).lifecycle;
+    auto &sources = lifecycle.runLoopSources;
+    const auto before = sources.size();
+    // Cancels either by owning timer object (`-[NSTimer invalidate]`) or by
+    // scheduled target (`cancelPreviousPerformRequestsWithTarget:`).
+    sources.erase(std::remove_if(sources.begin(), sources.end(),
+                                 [target](const LifecycleState::RunLoopSource &source) {
+                                     return source.target == target ||
+                                            source.timerObject == target;
+                                 }),
+                  sources.end());
+    if (sources.size() != before)
+        recordLifecycleEvent(lifecycle, "run-loop sources invalidated for a target");
+}
+
+bool ShimAdapter::serviceRunLoop(CpuRegisterState &registers, GuestAddressSpace &memory,
+                                 GuestAddress &guestTarget, std::string &reason) {
+    guestTarget = 0;
+    auto &lifecycle = guestState(memory).lifecycle;
+    if (!lifecycle.runLoopRunning || lifecycle.runLoopStopped)
+        return true;
+    if (lifecycle.runLoopIterationLimit != 0 &&
+        lifecycle.runLoopIterations >= lifecycle.runLoopIterationLimit) {
+        lifecycle.runLoopRunning = false;
+        recordLifecycleEvent(lifecycle, "CFRunLoop exited: iteration limit reached");
+        return true;
+    }
+
+    // Pick the next source: queued input first so a game stays responsive,
+    // otherwise whichever timer/selector fires soonest.
+    std::size_t chosen = lifecycle.runLoopSources.size();
+    for (std::size_t index = 0; index < lifecycle.runLoopSources.size(); ++index) {
+        if (lifecycle.runLoopSources[index].kind ==
+            LifecycleState::RunLoopSource::Kind::Touch) {
+            chosen = index;
+            break;
+        }
+    }
+    if (chosen == lifecycle.runLoopSources.size()) {
+        bool have = false;
+        double earliest = 0.0;
+        for (std::size_t index = 0; index < lifecycle.runLoopSources.size(); ++index) {
+            const auto &source = lifecycle.runLoopSources[index];
+            if (!have || source.nextFireSeconds < earliest) {
+                earliest = source.nextFireSeconds;
+                chosen = index;
+                have = true;
+            }
+        }
+        if (!have)
+            return true;
+    }
+
+    const auto source = lifecycle.runLoopSources[chosen];
+    if (source.kind == LifecycleState::RunLoopSource::Kind::Touch) {
+        lifecycle.runLoopSources.erase(lifecycle.runLoopSources.begin() +
+                                       static_cast<std::ptrdiff_t>(chosen));
+    } else if (source.repeats) {
+        // Advance the virtual clock to the fire time and re-arm, so a repeating
+        // 1/60 s timer advances time the way a display link would instead of
+        // firing instantly forever.
+        lifecycle.runLoopClockSeconds =
+            std::max(lifecycle.runLoopClockSeconds, source.nextFireSeconds);
+        lifecycle.runLoopSources[chosen].nextFireSeconds =
+            lifecycle.runLoopClockSeconds + source.intervalSeconds;
+    } else {
+        lifecycle.runLoopSources.erase(lifecycle.runLoopSources.begin() +
+                                       static_cast<std::ptrdiff_t>(chosen));
+    }
+    ++lifecycle.runLoopIterations;
+
+    if (source.kind == LifecycleState::RunLoopSource::Kind::Touch) {
+        const auto phaseSelector = runtime_.selector(source.touchPhase + ":withEvent:");
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            selectorNames_[phaseSelector] = source.touchPhase + ":withEvent:";
+            selectorIds_[source.touchPhase + ":withEvent:"] = phaseSelector;
+        }
+        const auto receiver = touchTargetFor(memory, source.touchX, source.touchY);
+        if (receiver == 0)
+            return true;
+        // Materialize a UITouch carrying the host coordinates so the guest can
+        // read them back through `locationInView:`.
+        auto *touch = runtime_.allocate(classes_.at("UITouch"));
+        if (touch->ivars.size() < 2)
+            touch->ivars.resize(2, 0);
+        touch->ivars[0] = floatBitsOf(source.touchX);
+        touch->ivars[1] = floatBitsOf(source.touchY);
+        const auto touchAddress = ensureObjectAddress(memory, touch);
+        recordLifecycleEvent(lifecycle, source.touchPhase + " delivered at " +
+                                            std::to_string(source.touchX) + "," +
+                                            std::to_string(source.touchY));
+        GuestAddress target = 0;
+        if (!beginNestedGuestCall(registers, memory, receiver, phaseSelector,
+                                  kFrameRunLoopSource, touchAddress, target, reason))
+            return false;
+        guestTarget = target;
+        return true;
+    }
+
+    // Keep the run loop's own caller as the frame's return address. On a
+    // continuation `r14` holds the continuation callout itself, so using it
+    // would nest every source one level deeper instead of staying in the loop.
+    registers.r[14] = lifecycle.runLoopCallerReturn;
+    GuestAddress target = 0;
+    if (!beginNestedGuestCall(registers, memory, source.target, source.selector,
+                              kFrameRunLoopSource, source.argument, target, reason))
+        return false;
+    guestTarget = target;
+    return true;
+}
+
+bool ShimAdapter::runLoopRun(CpuRegisterState &registers, GuestAddressSpace &memory,
+                             GuestAddress &guestTarget, std::string &reason) {
+    guestTarget = 0;
+    auto &lifecycle = guestState(memory).lifecycle;
+    lifecycle.runLoopRunning = true;
+    lifecycle.runLoopEntered = true;
+    lifecycle.runLoopStopped = false;
+    lifecycle.runLoopCallerReturn = registers.r[14];
+    recordLifecycleEvent(lifecycle, "CFRunLoop entered");
+    GuestAddress target = 0;
+    if (!serviceRunLoop(registers, memory, target, reason))
+        return false;
+    if (target != 0) {
+        guestTarget = target;
+        return true;
+    }
+    // Nothing was scheduled, so the loop has no work. Exit rather than spin,
+    // which is also what an app with no sources does.
+    lifecycle.runLoopRunning = false;
+    registers.r[14] = lifecycle.runLoopCallerReturn;
+    registers.r[0] = 0;
+    recordLifecycleEvent(lifecycle, "CFRunLoop exited: no scheduled sources");
+    return true;
+}
+
+void configureActiveGuestViewport(std::uint32_t width, std::uint32_t height) {
+    // Snapshot the active guest under the lock, then call without holding it:
+    // configureViewport takes the same (non-recursive) mutex internally.
+    ShimAdapter *adapter = nullptr;
+    GuestAddressSpace *memory = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(gActiveGuestMutex);
+        adapter = gActiveAdapter;
+        memory = gActiveMemory;
+    }
+    if (adapter == nullptr || memory == nullptr || width == 0 || height == 0)
+        return;
+    adapter->configureViewport(*memory, width, height);
+}
+
+bool postTouchToActiveGuest(float x, float y, const char *phase) {
+    ShimAdapter *adapter = nullptr;
+    GuestAddressSpace *memory = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(gActiveGuestMutex);
+        adapter = gActiveAdapter;
+        memory = gActiveMemory;
+    }
+    if (adapter == nullptr || memory == nullptr || phase == nullptr)
+        return false;
+    adapter->postTouch(*memory, phase, x, y);
+    return true;
+}
+
+GuestAddress ShimAdapter::touchTargetFor(GuestAddressSpace &memory, float x, float y) {
+    auto &lifecycle = guestState(memory).lifecycle;
+    if (lifecycle.keyWindow == 0)
+        return 0;
+    // Prefer the deepest subview whose frame contains the point; fall back to
+    // the window so a touch is never silently dropped.
+    const auto children = lifecycle.subviews.find(lifecycle.keyWindow);
+    if (children != lifecycle.subviews.end()) {
+        for (auto it = children->second.rbegin(); it != children->second.rend(); ++it) {
+            auto *view = objectForGuest(memory, *it);
+            if (view == nullptr || view->ivars.size() < 4)
+                continue;
+            const float originX = floatFromBits(view->ivars[0]);
+            const float originY = floatFromBits(view->ivars[1]);
+            const float width = floatFromBits(view->ivars[2]);
+            const float height = floatFromBits(view->ivars[3]);
+            if (width <= 0.0f || height <= 0.0f)
+                continue;
+            if (x >= originX && x <= originX + width && y >= originY && y <= originY + height)
+                return *it;
+        }
+    }
+    return lifecycle.keyWindow;
 }
 
 bool ShimAdapter::performSelectorNested(CpuRegisterState &registers, GuestAddressSpace &memory,
@@ -525,6 +879,30 @@ bool ShimAdapter::lifecycleViewMessage(CpuRegisterState &registers, GuestAddress
             synchronizeObject(memory, receiverObject, receiverAddress);
             return finish(0);
         }
+        if (selectorName == "addSubview:") {
+            // Remember the child so a touch can be delivered to the view that
+            // covers it instead of to the window.
+            const auto child = registers.r[2];
+            if (child != 0) {
+                auto &children = lifecycle.subviews[receiverAddress];
+                if (std::find(children.begin(), children.end(), child) == children.end())
+                    children.push_back(child);
+                // A child added before its own frame is set inherits the
+                // parent's rectangle, which is what UIKit's layout would give
+                // it for a full-screen game view.
+                auto *childObject = objectForGuest(memory, child);
+                if (childObject != nullptr && childObject->ivars.size() >= 4 &&
+                    floatFromBits(childObject->ivars[2]) < 1.0f &&
+                    receiverObject->ivars.size() >= 4) {
+                    childObject->ivars[0] = 0;
+                    childObject->ivars[1] = 0;
+                    childObject->ivars[2] = receiverObject->ivars[2];
+                    childObject->ivars[3] = receiverObject->ivars[3];
+                    synchronizeObject(memory, childObject, child);
+                }
+            }
+            return finish(0);
+        }
         if (selectorName == "layer")
             return finish(lifecycleLayerForView(memory, receiverAddress, receiverObject));
         if (selectorName == "makeKeyAndVisible") {
@@ -547,7 +925,7 @@ bool ShimAdapter::lifecycleViewMessage(CpuRegisterState &registers, GuestAddress
         if (selectorName == "drawableProperties" || selectorName == "backgroundColor" ||
             selectorName == "delegate" || selectorName == "transform")
             return finish(0);
-        if (selectorName == "addSubview:" || selectorName == "removeFromSuperview" ||
+        if (selectorName == "removeFromSuperview" ||
             selectorName == "setNeedsDisplay" || selectorName == "setNeedsDisplayInRect:" ||
             selectorName == "setNeedsLayout" || selectorName == "layoutIfNeeded" ||
             selectorName == "layoutSubviews" || selectorName == "setOpaque:" ||
@@ -901,6 +1279,27 @@ bool ShimAdapter::lifecycleFoundationClassMessage(CpuRegisterState &registers,
             }
             return false;
         }
+        if (className == "NSTimer") {
+            if (selectorName == "scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:" ||
+                selectorName == "timerWithTimeInterval:target:selector:userInfo:repeats:") {
+                // AAPCS: the double interval takes the even-aligned pair r2/r3,
+                // so the remaining arguments spill onto the stack.
+                std::array<std::uint32_t, 4> stackArguments{};
+                if (registers.r[13] == 0 ||
+                    !memory.read(registers.r[13], stackArguments.data(), sizeof(stackArguments)))
+                    throw std::runtime_error("NSTimer stack arguments are unreadable");
+                const auto interval = doubleFromBits(
+                    (static_cast<std::uint64_t>(registers.r[3]) << 32) |
+                    static_cast<std::uint32_t>(registers.r[2]));
+                const auto target = stackArguments[0];
+                const auto selector = selectorForGuest(memory, stackArguments[1]);
+                const auto userInfo = stackArguments[2];
+                const bool repeats = stackArguments[3] != 0;
+                return finish(
+                    scheduleTimer(memory, interval, target, selector, userInfo, repeats));
+            }
+            return false;
+        }
         if (className == "NSDictionary") {
             if (selectorName == "dictionary")
                 return finish(ensureObjectAddress(memory, allocate("NSDictionary")));
@@ -1079,6 +1478,43 @@ bool ShimAdapter::lifecycleSelector(CpuRegisterState &registers, GuestAddressSpa
         if (!reason.empty())
             return false;
 
+        // ---- NSTimer / deferred selectors (run-loop sources) ---------------
+        if (receiverIsKindOf(receiverObject, "NSTimer")) {
+            if (selectorName == "invalidate") {
+                cancelRunLoopSourcesFor(memory, receiverAddress);
+                return finish(0);
+            }
+            if (selectorName == "isValid")
+                return finish(1);
+            if (selectorName == "userInfo" || selectorName == "fireDate")
+                return finish(0);
+            if (selectorName == "timeInterval")
+                return finish(floatBitsOf(1.0f / 60.0f));
+            if (selectorName == "fire")
+                return finish(0);
+            return false;
+        }
+        if (selectorName == "performSelector:withObject:afterDelay:" ||
+            selectorName == "performSelector:withObject:afterDelay:inModes:") {
+            // AAPCS: r2 = selector, r3 = object, and the double delay is passed
+            // on the stack because no even-aligned register pair is left.
+            std::array<std::uint32_t, 2> stackArguments{};
+            if (registers.r[13] == 0 ||
+                !memory.read(registers.r[13], stackArguments.data(), sizeof(stackArguments)))
+                throw std::runtime_error("afterDelay: argument is unreadable");
+            const auto delay =
+                doubleFromBits((static_cast<std::uint64_t>(stackArguments[1]) << 32) |
+                               static_cast<std::uint32_t>(stackArguments[0]));
+            const auto selector = selectorForGuest(memory, registers.r[2]);
+            scheduleDelayedSelector(memory, receiverAddress, selector, registers.r[3], delay);
+            return finish(0);
+        }
+        if (selectorName == "cancelPreviousPerformRequestsWithTarget:" ||
+            selectorName == "cancelPreviousPerformRequestsWithTarget:selector:object:") {
+            cancelRunLoopSourcesFor(memory, registers.r[2]);
+            return finish(0);
+        }
+
         // ---- NSThread ------------------------------------------------------
         if (lifecycleThreadMessage(registers, memory, selectorName, receiverAddress, receiverObject,
                                    rawReturn))
@@ -1186,31 +1622,63 @@ bool ShimAdapter::lifecycleSelector(CpuRegisterState &registers, GuestAddressSpa
                                      presented
                                          ? "-[EAGLContext presentRenderbuffer:] -> frame presented"
                                          : "-[EAGLContext presentRenderbuffer:] -> no drawable storage");
-                return finish(1);
+                // Report the truth: a guest that checks this return value must not
+                // believe a frame reached the screen when no EGL surface exists.
+                return finish(presented ? 1 : 0);
             }
             if (selectorName == "renderbufferStorage:fromDrawable:") {
-                // The drawable's rectangle lives in the layer's materialized instance
-                // slots (0..3 = frame); a size the runtime cannot read stays
-                // unattached instead of being guessed.
+                // ARM AAPCS argument slots for `objc_msgSend(self, _cmd, ...)`:
+                //   r0 = self, r1 = _cmd, r2 = arg0, r3 = arg1.
+                // `renderbufferStorage:fromDrawable:` has two arguments, so
+                //   r2 = `target`  (GL_RENDERBUFFER_OES = 0x8D41)
+                //   r3 = `drawable` (the CAEAGLLayer instance)
+                // Reading the drawable from r2 looks up the renderbuffer enum as
+                // though it were an object address, finds nothing, and leaves the
+                // EAGL drawable unattached - which is exactly a black screen with
+                // every GL call still "forwarded" into a context-less driver.
                 std::uint32_t width = 0;
                 std::uint32_t height = 0;
-                if (auto *drawable = objectForGuest(memory, registers.r[2]);
-                    drawable != nullptr && drawable->ivars.size() >= 4) {
+                for (const auto candidate : {registers.r[3], registers.r[2]}) {
+                    auto *drawable = objectForGuest(memory, candidate);
+                    if (drawable == nullptr || drawable->ivars.size() < 4)
+                        continue;
                     const float rawWidth = floatFromBits(drawable->ivars[2]);
                     const float rawHeight = floatFromBits(drawable->ivars[3]);
                     if (rawWidth >= 1.0f && rawHeight >= 1.0f && rawWidth <= 4096.0f &&
                         rawHeight <= 4096.0f) {
                         width = static_cast<std::uint32_t>(rawWidth);
                         height = static_cast<std::uint32_t>(rawHeight);
+                        break;
+                    }
+                }
+                if (width == 0 || height == 0) {
+                    // No materialized layer frame. Fall back to the host viewport
+                    // (the real Android surface) and say so, rather than silently
+                    // returning success with no drawable attached.
+                    effectiveViewport(memory, width, height);
+                    if (width != 0 && height != 0) {
+                        recordLifecycleEvent(
+                            lifecycle,
+                            "-[EAGLContext renderbufferStorage:fromDrawable:] -> drawable frame "
+                            "unavailable; using host viewport " +
+                                std::to_string(width) + "x" + std::to_string(height));
                     }
                 }
                 if (width == 0 || height == 0) {
                     recordLifecycleEvent(lifecycle,
                                          "-[EAGLContext renderbufferStorage:fromDrawable:] -> "
-                                         "drawable size unavailable");
-                    return finish(1);
+                                         "drawable size unavailable; no EGL surface was created");
+                    return finish(0);
                 }
-                gles::forwarderFor(memory).attachDrawable(memory, width, height);
+                const bool attached = gles::forwarderFor(memory).attachDrawable(memory, width, height);
+                if (!attached) {
+                    recordLifecycleEvent(lifecycle,
+                                         "-[EAGLContext renderbufferStorage:fromDrawable:] -> "
+                                         "EGL surface creation failed for " +
+                                             std::to_string(width) + "x" +
+                                             std::to_string(height));
+                    return finish(0);
+                }
                 recordLifecycleEvent(lifecycle,
                                      "-[EAGLContext renderbufferStorage:fromDrawable:] -> " +
                                          std::to_string(width) + "x" +

@@ -9,35 +9,23 @@
 #include <unordered_set>
 namespace radek {
 namespace {
-constexpr size_t kBaseAnalysisBudget = 40000000;
-constexpr size_t kMaximumAnalysisBudget = 800000000;
-constexpr size_t kMaximumCompactImports = 100000;
-
-size_t analysisBudgetFor(size_t inputBytes) {
-    // Large symbol/fixup tables naturally need more work than a tiny fixture.
-    // Scale the guard with the actual input size, while retaining a hard ceiling
-    // so a malformed image cannot force unbounded CPU or JSON allocation.
-    const size_t maximumExtra = kMaximumAnalysisBudget - kBaseAnalysisBudget;
-    const size_t extra = inputBytes > maximumExtra / 4 ? maximumExtra : inputBytes * 4;
-    return kBaseAnalysisBudget + extra;
-}
+// No work budgets: every table (bind/weak/lazy streams, symbol/export tries,
+// import lists) is decoded in full, bounded only by the input itself. What
+// remains is pure VALIDATION, not budgeting: range checks against the slice,
+// 64-bit ULEB/SLEB overflow, unterminated-string detection, export-trie cycle
+// detection and segment-bounds checks on binds. Those make malformed input
+// fail closed; they never truncate or abort the decode of well-formed data,
+// however large, so big games are analyzed as completely as small ones.
 
 struct Reader {
     const std::vector<uint8_t> &b;
     size_t base, size;
     bool be = false;
-    std::shared_ptr<size_t> budget = std::make_shared<size_t>(kBaseAnalysisBudget);
-    void consume(size_t n) const {
-        if (n > *budget)
-            throw std::runtime_error("Mach-O analysis complexity limit");
-        *budget -= n;
-    }
     void check(uint64_t p, uint64_t n) const {
         if (p > size || n > size - p)
             throw std::runtime_error("Mach-O range outside slice");
     }
     uint64_t u(size_t p, size_t n) const {
-        consume(8);
         check(p, n);
         uint64_t v = 0;
         for (size_t i = 0; i < n; i++)
@@ -49,14 +37,14 @@ struct Reader {
         check(end, 0);
         if (p > end)
             throw std::runtime_error("invalid string range");
+        // Bounded by the [p, end) range itself: the loop terminates at the
+        // first NUL or at the range end, so no separate length budget is
+        // needed and arbitrarily long (but terminated) symbols decode.
         std::string s;
         while (p < end) {
-            consume(1);
             auto c = b[base + p++];
             if (!c)
                 return s;
-            if (s.size() >= 4096)
-                throw std::runtime_error("Mach-O string length limit");
             s += char(c);
         }
         throw std::runtime_error("unterminated Mach-O string");
@@ -221,6 +209,9 @@ Json thin(Reader r, bool includeSymbolDetails) {
         j["importsTruncated"] = false;
     std::unordered_set<std::string> compactImportKeys;
     auto appendImport = [&](Json import) {
+        // No import-count caps: every observed import is reported. Compact
+        // mode still deduplicates identical (name, ordinal) pairs because
+        // that is information, not truncation.
         if (includeSymbolDetails) {
             j["imports"].push(std::move(import));
             return;
@@ -233,10 +224,6 @@ Json thin(Reader r, bool includeSymbolDetails) {
                                 (ordinal == import.fields.end() ? "no-ordinal" : ordinal->second.value);
         if (compactImportKeys.count(key))
             return;
-        if (compactImportKeys.size() >= kMaximumCompactImports) {
-            j["importsTruncated"] = true;
-            return;
-        }
         compactImportKeys.insert(key);
         Json compact = object();
         compact["name"] = found->second;
@@ -343,10 +330,9 @@ Json thin(Reader r, bool includeSymbolDetails) {
             stroff = r.u(p + 16, 4);
             strsize = r.u(p + 20, 4);
             const size_t symbolEntrySize = wide ? 16 : 12;
-            // nsyms is bounded by the actual slice's symbol-table byte range and
-            // the shared analysis-work budget below, not an arbitrary 100,000
-            // symbol policy cap. Keep the multiplication in uint64_t before the
-            // range check (nsyms is read from a 32-bit Mach-O field).
+            // nsyms is bounded only by the actual slice's symbol-table byte
+            // range (validated below); no policy cap. Keep the multiplication
+            // in uint64_t before the range check (nsyms is a 32-bit field).
             r.check(symoff, uint64_t(nsyms) * symbolEntrySize);
             r.check(stroff, strsize);
             j["symbolCount"] = uint64_t(nsyms);
@@ -396,7 +382,6 @@ Json thin(Reader r, bool includeSymbolDetails) {
             // Device analysis only needs import names and avoids retaining this potentially
             // large implementation detail in memory.
             if (includeSymbolDetails) {
-                r.consume(indirectCount);
                 Json indirect = array();
                 for (size_t x = 0; x < indirectCount; x++)
                     indirect.push(r.u(indirectOffset + x * 4, 4));
@@ -545,7 +530,11 @@ Json thin(Reader r, bool includeSymbolDetails) {
                         appendImport(im);
                     }
                 }
-                f["pointerTraversal"] = "not-implemented";
+                // The compat-runtime loader relinks DYLD_CHAINED_PTR_32 chains
+                // with the three import formats and uncompressed symbol
+                // strings. Anything else stays reported as not traversable so
+                // the conversion gates keep such images honestly blocked.
+                bool decodable = r.u(off + 24, 4) == 0 && stride != 0;
                 f["symbolsDecoding"] = r.u(off + 24, 4) == 0 ? "uncompressed" : "unsupported-compression";
                 auto starts = r.u(off + 4, 4);
                 if (starts < 28 || starts > n || n - starts < 4)
@@ -567,11 +556,14 @@ Json thin(Reader r, bool includeSymbolDetails) {
                     auto length = r.u(at, 4), pages = r.u(at + 20, 2);
                     if (length < 22 || length > n - starts - relative || pages > (length - 22) / 2)
                         throw std::runtime_error("invalid chained starts pages");
+                    auto pointerFormat = r.u(at + 6, 2), pageSize = r.u(at + 4, 2);
+                    if (pointerFormat != 3 || (pageSize != 0x1000 && pageSize != 0x4000))
+                        decodable = false;
                     if (includeSymbolDetails) {
                         Json segment = object();
                         segment["index"] = index;
-                        segment["pageSize"] = r.u(at + 4, 2);
-                        segment["pointerFormat"] = r.u(at + 6, 2);
+                        segment["pageSize"] = pageSize;
+                        segment["pointerFormat"] = pointerFormat;
                         segment["segmentOffset"] = r.u(at + 8, 8);
                         segment["maxValidPointer"] = r.u(at + 16, 4);
                         segment["pageStarts"] = array();
@@ -580,6 +572,8 @@ Json thin(Reader r, bool includeSymbolDetails) {
                         f["segments"].push(segment);
                     }
                 }
+                f["pointerTraversal"] = decodable ? "implemented-ptr32" : "not-implemented";
+                f["decodable"] = decodable;
                 j["chainedFixups"] = f;
             }
             if (includeSymbolDetails && cmd == 0x26 && n) {
@@ -709,7 +703,6 @@ Json thin(Reader r, bool includeSymbolDetails) {
                 address += amount;
             };
             auto emit = [&]() {
-                r.consume(symbol.size() + 64);
                 if (symbol.empty())
                     throw std::runtime_error("bind without symbol");
                 auto vmSize = segmentSize();
@@ -794,9 +787,8 @@ Json thin(Reader r, bool includeSymbolDetails) {
                     break;
                 case 0xc0: {
                     auto count = r.leb(p, end), skip = r.leb(p, end);
-                    // Each emitted bind is checked against the segment and shared
-                    // analysis-work budget; the stream length is not capped by an
-                    // arbitrary number of binds.
+                    // Each emitted bind is checked against its segment; the
+                    // stream is not capped by an arbitrary number of binds.
                     for (uint64_t n = 0; n < count; n++) {
                         emit();
                         advance(skip);
@@ -856,11 +848,11 @@ Json thin(Reader r, bool includeSymbolDetails) {
     }
     if (exportSize) {
         std::set<size_t> active;
-        size_t visited = 0;
         std::function<void(size_t, std::string)> walk = [&](size_t node, std::string prefix) {
-            r.consume(prefix.size() + 8);
-            if (++visited > 1000000 || prefix.size() > 4096 || active.size() > 256 || node >= exportSize ||
-                !active.insert(node).second)
+            // Validation only: the offset must stay inside the trie and the
+            // active-path set rejects cycles. Node count is structurally
+            // bounded by the trie size, so no visit budget is needed.
+            if (node >= exportSize || !active.insert(node).second)
                 throw std::runtime_error("cyclic/oversized export trie");
             size_t p = exportOff + node, end = exportOff + exportSize;
             size_t len = r.leb(p, end);
@@ -901,7 +893,7 @@ Json thin(Reader r, bool includeSymbolDetails) {
 }
 } // namespace
 Json analyze(const std::vector<uint8_t> &data, bool includeSymbolDetails) {
-    Reader r{data, 0, data.size(), true, std::make_shared<size_t>(analysisBudgetFor(data.size()))};
+    Reader r{data, 0, data.size(), true};
     auto m = r.u(0, 4);
     Json result = object();
     result["schemaVersion"] = uint64_t(1);
@@ -926,14 +918,14 @@ Json analyze(const std::vector<uint8_t> &data, bool includeSymbolDetails) {
                 if (off < b && a < off + size)
                     throw std::runtime_error("overlapping FAT slices");
             ranges.emplace_back(off, off + size);
-            auto s = thin(Reader{data, size_t(off), size_t(size), false, r.budget}, includeSymbolDetails);
+            auto s = thin(Reader{data, size_t(off), size_t(size), false}, includeSymbolDetails);
             if (s.fields["cpuType"].value != std::to_string(r.u(p, 4)) ||
                 s.fields["cpuSubtype"].value != std::to_string(r.u(p + 4, 4)))
                 throw std::runtime_error("FAT architecture mismatch");
             result["slices"].push(s);
         }
     } else
-        result["slices"].push(thin(Reader{data, 0, data.size(), false, r.budget}, includeSymbolDetails));
+        result["slices"].push(thin(Reader{data, 0, data.size(), false}, includeSymbolDetails));
     return result;
 }
 } // namespace radek

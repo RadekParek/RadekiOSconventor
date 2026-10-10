@@ -15,6 +15,12 @@ namespace radek::compat_runtime {
 
 using GuestAddress = std::uint32_t;
 
+// The guest is a 32-bit process, so the only hard bound on its memory is the
+// address space itself. Defaulting the allocation budget to the full address
+// space means the runtime never refuses a guest mapping for an artificial
+// budget reason; it stops only when the guest's own addressing runs out.
+inline constexpr std::size_t kGuestMemoryLimitUnlimited = std::size_t{1} << 32;
+
 enum class MemoryPermission : std::uint8_t {
     None = 0,
     Read = 1,
@@ -101,7 +107,7 @@ class GuestAddressSpace {
                      bool markHostWrite);
 
   public:
-    explicit GuestAddressSpace(std::size_t memoryLimit = 256U * 1024U * 1024U);
+    explicit GuestAddressSpace(std::size_t memoryLimit = kGuestMemoryLimitUnlimited);
 
     GuestAddress mapAt(GuestAddress base, std::size_t size, MemoryPermission permissions,
                        std::string name);

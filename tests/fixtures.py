@@ -20,6 +20,7 @@ def macho(
     blobs=None,
     section_name="__text",
     cstring=None,
+    vmsize=0x10000,
 ):
     wide = cpu == 0x100000C
     if code is None:
@@ -133,7 +134,9 @@ def macho(
             0,
         )
         segment = (
-            struct.pack("<II16sIIIIIIII", 1, 124, segment_name, 0x10000, 0x10000, 0, len(data), 5, 5, 1, 0)
+            struct.pack(
+                "<II16sIIIIIIII", 1, 124, segment_name, 0x10000, max(vmsize, len(data)), 0, len(data), 5, 5, 1, 0
+            )
             + section
         )
     commands = [

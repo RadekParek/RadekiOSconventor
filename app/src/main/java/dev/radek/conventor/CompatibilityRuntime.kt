@@ -11,16 +11,15 @@ import java.util.zip.ZipFile
  * Copies reviewed ARM64 compatibility libraries from the converter into generated APKs.
  *
  * The bounded converter packages libioscompat.so. The game boot-attempt package
- * also copies libcompat_runtime_v1.so and its required shared libunicorn.so
- * backend; Android resolves these dependencies from the generated APK's native
- * library directory, not from an analyzer-only path.
+ * also copies libcompat_runtime_v1.so, which statically links the Dynarmic
+ * ARM32 execution backend; Android resolves these libraries from the generated
+ * APK's native library directory, not from an analyzer-only path.
  */
 internal object CompatibilityRuntime {
     const val ABI = "arm64-v8a"
     const val SONAME = "libioscompat.so"
     /** Guest-CPU boot-attempt runtime (contract "game-runtime-v1") shipped by :compat-runtime-v1. */
     const val GAMERUNTIME_SONAME = "libcompat_runtime_v1.so"
-    const val UNICORN_SONAME = "libunicorn.so"
     private const val LIBCXX_SONAME = "libc++_shared.so"
     private const val MAX_LIBRARY_BYTES = 128L * 1024 * 1024
     private const val ELF_HEADER_BYTES = 64
@@ -45,9 +44,9 @@ internal object CompatibilityRuntime {
         extractFromApks(listOf(sourceApk), destination)
 
     /**
-     * Copies the reviewed ARM64 guest-CPU runtime and its shared Unicorn
-     * backend into generated game APKs. libioscompat remains exclusive to the
-     * bounded converter path.
+     * Copies the reviewed ARM64 guest-CPU runtime (with its statically linked
+     * Dynarmic backend) into generated game APKs. libioscompat remains
+     * exclusive to the bounded converter path.
      */
     fun extractGameRuntimeInstalled(context: Context, destination: File): List<Library> {
         val info = context.applicationInfo
@@ -61,8 +60,8 @@ internal object CompatibilityRuntime {
         extractSonames(
             sourceApks,
             destination,
-            listOf(GAMERUNTIME_SONAME, UNICORN_SONAME, LIBCXX_SONAME),
-            setOf(GAMERUNTIME_SONAME, UNICORN_SONAME),
+            listOf(GAMERUNTIME_SONAME, LIBCXX_SONAME),
+            setOf(GAMERUNTIME_SONAME),
         )
 
     /** Handles App Bundle installs where native libraries live in ABI split APKs. */

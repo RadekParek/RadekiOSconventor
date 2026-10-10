@@ -947,7 +947,7 @@ void testAudioSessionInitializeAndSetActiveResolveAndReturnStatus() {
           "audio-session-set-active-state-only");
 
     auto cpu = createArm32CpuBackend();
-#ifdef RADEK_TEST_REQUIRE_UNICORN
+#ifdef RADEK_TEST_REQUIRE_DYNARMIC
     CHECK(cpu->available());
 #endif
     if (cpu->available()) {
@@ -1226,7 +1226,7 @@ void testSjLjResumeBoundaryStopsGuestExecution() {
     SjLjUnwindAdapter unwind;
     unwind.registerBindings(registry);
     auto cpu = createArm32CpuBackend();
-#ifdef RADEK_TEST_REQUIRE_UNICORN
+#ifdef RADEK_TEST_REQUIRE_DYNARMIC
     CHECK(cpu->available());
 #endif
     if (!cpu->available())
@@ -1271,7 +1271,7 @@ void testObjectiveCMutationExceptionBoundaryIsReported() {
     CHECK(reason.find("guest catch/unwind is unsupported") != std::string::npos);
 
     auto cpu = createArm32CpuBackend();
-#ifdef RADEK_TEST_REQUIRE_UNICORN
+#ifdef RADEK_TEST_REQUIRE_DYNARMIC
     CHECK(cpu->available());
 #endif
     if (cpu->available()) {
@@ -1484,7 +1484,7 @@ void testImageObjectiveCMetadataDispatchesGuestMethods() {
     CHECK(copyContinuation.has_value() && copyContinuation->invoke);
     CHECK(copyContinuationAddress == copyContinuation->guestAddress);
 
-    // Host-only builds simulate a successful +copy IMP return; pinned-Unicorn
+    // Host-only builds simulate a successful +copy IMP return; pinned-Dynarmic
     // additionally executes the guest IMP and continuation end to end below.
     registers.r[0] = copiedValue;
     CHECK(registry.invokeCallout(retainCallout->guestAddress, registers, memory, reason) ==
@@ -1505,7 +1505,7 @@ void testImageObjectiveCMetadataDispatchesGuestMethods() {
     CHECK(copiedPropertySlot == copiedValue);
 
     auto cpu = createArm32CpuBackend();
-#ifdef RADEK_TEST_REQUIRE_UNICORN
+#ifdef RADEK_TEST_REQUIRE_DYNARMIC
     CHECK(cpu->available());
 #endif
     if (cpu->available()) {

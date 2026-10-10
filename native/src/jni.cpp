@@ -159,6 +159,14 @@ const char *findImplementedApiReplacement(const char *darwinSymbol) {
         }
     }
     if (!isCIdentifier(target)) return nullptr;
+    // Honesty guard: the analyzer registers a stub handler for every symbol it
+    // cannot otherwise map, and that registration creates a real export in
+    // libioscompat.so. Without this check the pipeline would mint a stub, then
+    // cite the stub as evidence that the API has an implementation available.
+    if (const radek_compat::Record *record = radek_compat::lookup(darwinSymbol);
+        record != nullptr && record->kind == radek_compat::Kind::Stub) {
+        return nullptr;
+    }
 
     static std::mutex mutex;
     static void *handle = nullptr;

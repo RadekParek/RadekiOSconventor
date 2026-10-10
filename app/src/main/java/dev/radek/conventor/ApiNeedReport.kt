@@ -3,63 +3,118 @@ package dev.radek.conventor
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** Formats the imported symbols that still need a real Android binding or behavior. */
+/**
+ * Formats ONLY the imported symbols that still need a real Android binding or
+ * behavior. Fully-resolved imports (a same-name NDK export verified on this
+ * device, or a concrete/tested compatibility implementation) are omitted so the
+ * output is a short, sendable list of exactly what is missing - no triage prose.
+ */
 internal object ApiNeedReport {
+
+    /** What is still needed for one import. */
+    private enum class Need {
+        STUB,              // explicit unimplemented stub handler
+        UNMAPPED,          // no provider of any kind
+        SEMANTIC,          // needs a real API/object rewrite
+        COMPILER_RUNTIME,  // needs the NDK compiler-rt/libunwind runtime
+        GUEST_ADAPTER,     // bounded guest adapter exists, semantics incomplete
+        NDK_UNVERIFIED,    // same-name NDK candidate, not confirmed on device
+    }
+
     fun format(mapping: JSONObject): String {
         val symbols = mapping.optJSONArray("symbols") ?: JSONArray()
         val total = mapping.optInt("distinctImportSymbols", symbols.length())
-        val directCandidates = mapping.optInt("mappedNameCandidates", 0)
-        val verifiedDirect = mapping.optInt("runtimeVerifiedNdkCandidates", 0)
-        val guestCatalog = mapping.optInt("guestRuntimeProviderCount", 0)
-        val stubs = mapping.optInt("compatStubHandlerCount", 0)
-        val unmapped = mapping.optInt("unmappedSymbolCount", 0)
+
+        val items = (0 until symbols.length()).mapNotNull { symbols.optJSONObject(it) }
+
+        // Split into "already has a real, working provider" vs "still needs work".
+        var resolved = 0
+        val byNeed = LinkedHashMap<Need, MutableList<JSONObject>>()
+        for (item in items) {
+            val need = needFor(item)
+            if (need == null) {
+                resolved++
+            } else {
+                byNeed.getOrPut(need) { mutableListOf() }.add(item)
+            }
+        }
+
+        val needCount = items.size - resolved
         val lines = mutableListOf<String>()
-        lines += "Per-IPA imported API needs"
-        lines += "Observed imports: $total"
-        lines += "Strict same-name NDK/system candidates: $directCandidates; current-device exports verified: $verifiedDirect"
-        lines += "Guest-runtime catalog matches: $guestCatalog; explicit compatibility stubs: $stubs; unmapped: $unmapped"
-        lines += ""
-        lines += "These are triage results, not a linked-game or complete-API count. An export candidate, guest adapter catalog entry, or stub does not rewrite the IPA callsite."
+        lines += "Unimplemented / unresolved NDK needs: $needCount of $total imports"
+        if (needCount == 0) {
+            lines += "Every observed import already has a verified export or a concrete implementation."
+            return lines.joinToString("\n")
+        }
+        lines += "Only symbols that still lack a real binding are listed; resolved imports are hidden."
         lines += ""
 
-        val ordered = (0 until symbols.length())
-            .mapNotNull { index -> symbols.optJSONObject(index) }
-            .sortedBy { it.optString("sourceSymbol") }
-        for (item in ordered) {
-            val symbol = item.optString("sourceSymbol", "<unnamed import>")
-            val classification = item.optString("classification", "UNMAPPED")
-            val target = item.optString("targetLibrary")
-                .takeIf { it.isNotBlank() }
-                ?.let { library ->
-                    val targetSymbol = item.optString("targetSymbol")
-                    if (targetSymbol.isBlank()) library else "$library:$targetSymbol"
-                }
-            val state = when (classification) {
-                "BIONIC_SYMBOL_CANDIDATE" -> if (item.optBoolean("verifiedOnDevice")) {
-                    "Same-name NDK/system export resolved on this device; IPA callsite is still not linked."
-                } else {
-                    "Same-name NDK/system candidate only; device export verification and binary relinking are not established."
-                }
-                "COMPILER_RUNTIME_CANDIDATE" ->
-                    "Toolchain/compiler-runtime candidate only; no compatible Android link is verified."
-                "GUEST_RUNTIME_ADAPTER_CATALOGUED" ->
-                    "Guest-runtime catalog entry only; not a same-name NDK export or proof of complete API semantics."
-                "IMPLEMENTED_API_REPLACEMENT_AVAILABLE", "COMPAT_VERIFIED_HANDLER_RESOLVED" ->
-                    "A concrete compatibility implementation is available, but this IPA callsite is not rewritten or linked."
-                "SEMANTIC_REWRITE_CANDIDATE" ->
-                    "Android semantic target only; the iOS object/lifecycle behavior still needs a real rewrite."
-                "COMPAT_STUB_HANDLER_REGISTERED" ->
-                    "UNIMPLEMENTED: a stub records the call and returns a safe default; it is not an API body."
-                else -> "UNRESOLVED: no reviewed provider or concrete API implementation is available."
-            }
-            val reason = item.optString("reason").takeIf { it.isNotBlank() }
-            lines += "$symbol"
-            lines += "  Classification: $classification"
-            if (target != null) lines += "  Candidate/provider: $target"
-            lines += "  Need: $state"
-            if (reason != null) lines += "  Detail: $reason"
+        // Ordered from most actionable (stubs / unmapped) to least.
+        section(lines, byNeed[Need.STUB], "STUBS - explicit unimplemented handlers, need a real body") { item ->
+            handlerOf(item)
         }
-        if (ordered.isEmpty()) lines += "No import rows were returned by the mapper."
+        section(lines, byNeed[Need.UNMAPPED], "UNMAPPED - no provider at all, need a mapping + implementation") { item ->
+            item.optString("reason").takeIf { it.isNotBlank() }?.let { "($it)" }.orEmpty()
+        }
+        section(lines, byNeed[Need.SEMANTIC], "SEMANTIC REWRITES - need a real API/object-lifecycle rewrite") { item ->
+            targetOf(item)
+        }
+        section(lines, byNeed[Need.COMPILER_RUNTIME], "COMPILER-RUNTIME - need the NDK compiler-rt/libunwind runtime") { item ->
+            targetOf(item)
+        }
+        section(lines, byNeed[Need.GUEST_ADAPTER], "GUEST ADAPTERS - bounded adapter only, semantics incomplete") { item ->
+            adapterOf(item)
+        }
+        section(lines, byNeed[Need.NDK_UNVERIFIED], "NDK CANDIDATES - same-name export, NOT yet verified on this device") { item ->
+            targetOf(item)
+        }
         return lines.joinToString("\n")
     }
+
+    /** Returns the need for an import, or null when it is already fully resolved. */
+    private fun needFor(item: JSONObject): Need? {
+        return when (item.optString("classification", "UNMAPPED")) {
+            "BIONIC_SYMBOL_CANDIDATE" ->
+                if (item.optBoolean("verifiedOnDevice")) null else Need.NDK_UNVERIFIED
+            "IMPLEMENTED_API_REPLACEMENT_AVAILABLE",
+            "COMPAT_VERIFIED_HANDLER_RESOLVED" -> null
+            "SEMANTIC_REWRITE_CANDIDATE" -> Need.SEMANTIC
+            "COMPILER_RUNTIME_CANDIDATE" -> Need.COMPILER_RUNTIME
+            "GUEST_RUNTIME_ADAPTER_CATALOGUED" -> Need.GUEST_ADAPTER
+            "COMPAT_STUB_HANDLER_REGISTERED" -> Need.STUB
+            else -> Need.UNMAPPED
+        }
+    }
+
+    private fun section(
+        lines: MutableList<String>,
+        group: List<JSONObject>?,
+        heading: String,
+        detail: (JSONObject) -> String,
+    ) {
+        if (group.isNullOrEmpty()) return
+        lines += "$heading: ${group.size}"
+        for (item in group.sortedBy { it.optString("sourceSymbol") }) {
+            val symbol = item.optString("sourceSymbol", "<unnamed import>")
+            val extra = detail(item)
+            lines += if (extra.isBlank()) "  $symbol" else "  $symbol  $extra"
+        }
+        lines += ""
+    }
+
+    private fun targetOf(item: JSONObject): String {
+        val library = item.optString("targetLibrary")
+        if (library.isNotBlank()) {
+            val targetSymbol = item.optString("targetSymbol")
+            return if (targetSymbol.isBlank()) "-> $library" else "-> $library:$targetSymbol"
+        }
+        val targetApi = item.optString("targetApi")
+        return if (targetApi.isNotBlank()) "-> $targetApi" else ""
+    }
+
+    private fun handlerOf(item: JSONObject): String =
+        item.optString("targetSymbol").takeIf { it.isNotBlank() }?.let { "-> stub:$it" }.orEmpty()
+
+    private fun adapterOf(item: JSONObject): String =
+        item.optString("targetSymbol").takeIf { it.isNotBlank() }?.let { "-> adapter:$it" }.orEmpty()
 }

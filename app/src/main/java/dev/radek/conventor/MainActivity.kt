@@ -647,7 +647,7 @@ class MainActivity : Activity() {
             }
             if (total > 0) {
                 button("List this IPA's unimplemented / unresolved NDK needs", parent = mappingCard) {
-                    showText("Android compatibility needs", ApiNeedReport.format(mapping))
+                    showText("Unimplemented / unresolved NDK needs", ApiNeedReport.format(mapping))
                 }
             }
             val generated = report.optJSONObject("hostConversion")?.optInt("generatedApiReplacements", 0) ?: 0
@@ -767,6 +767,11 @@ class MainActivity : Activity() {
             text("${proof.optInt("sourceBytes", 0)} executable bytes form one proven closed-integer routine covering 100% of __text. Force convert turns this proof into a signed APK whose statically recompiled entry runs through JNI (returned value is displayed on launch).", 12f, muted, parent = proofCard)
         }
         text("Compatibility report", 22f, textColor, true)
+        report.optString("nextBlocker").takeIf { it.isNotBlank() }?.let { next ->
+            // One red line: the single thing standing between this IPA and a
+            // fully converted APK. Copy it back and it gets fixed next.
+            text("NEXT BLOCKER: $next", 16f, Color.rgb(255, 68, 68), true)
+        }
         val blockers = report.optJSONArray("blockers")
         if (blockers != null) for (i in 0 until blockers.length()) text(blockers.getString(i), 15f, statusColor(state))
         if (report.has("error")) text(report.getString("error"), 15f, statusColor("FAILED"))

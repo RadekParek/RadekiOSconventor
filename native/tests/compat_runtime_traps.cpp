@@ -1,7 +1,7 @@
 // Boot-attempt trap coverage: unimplemented imports bind to abort-on-call
 // traps, real guest instructions run, and the first used missing import stops
 // execution with its name in the report. Loader assertions run everywhere;
-// execution assertions run only when the Unicorn ARM32 backend is linked.
+// execution assertions run only when the Dynarmic ARM32 backend is linked.
 #include "compat_runtime/runner.hpp"
 #include "compat_runtime/cpu.hpp"
 #include "compat_runtime/guest_memory.hpp"
@@ -227,7 +227,7 @@ void checkBootAttemptRunner(const std::vector<std::uint8_t> &bytes) {
         const auto empty = runner.run({}, true);
         CHECK(empty.fields.at("reason").value == "IPA main executable is empty.");
     }
-#ifdef RADEK_TEST_REQUIRE_UNICORN
+#ifdef RADEK_TEST_REQUIRE_DYNARMIC
     {
         ShimRegistry registry;
         TrapShimAdapter traps;
@@ -241,8 +241,10 @@ void checkBootAttemptRunner(const std::vector<std::uint8_t> &bytes) {
         const auto &execution = report.fields.at("execution").fields;
         CHECK(execution.at("entryPointReached").value == "true");
         CHECK(execution.at("status").value == "GUEST_EXCEPTION_RAISED");
-        // mov, add, ldr, ldr, trap fetch.
-        CHECK(execution.at("instructions").value == "5");
+        // mov, add, ldr, ldr. The trap-sentinel fetch that follows is
+        // intercepted by the backend's pre-code-read hook before it is
+        // translated, so Dynarmic counts four executed guest instructions.
+        CHECK(execution.at("instructions").value == "4");
         CHECK(execution.at("registers").fields.at("r0").value == "3");
         CHECK(report.fields.at("reason").value.find("_trapped_call") != std::string::npos);
         CHECK(traps.trapCalls() == 1);

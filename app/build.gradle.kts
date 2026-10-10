@@ -118,9 +118,9 @@ tasks.withType<Test> {
 }
 
 dependencies {
-    // The game-runtime APK builder copies libcompat_runtime_v1.so and its
-    // required libunicorn.so dependency out of this app's installed APK into
-    // every generated game APK. Depending on the module (rather than its
+    // The game-runtime APK builder copies libcompat_runtime_v1.so (which
+    // statically links the Dynarmic ARM32 execution backend) out of this app's
+    // installed APK into every generated game APK. Depending on the module (rather than its
     // Kotlin API) keeps the converter's own runtime untouched while packaging
     // the exact tested runtime pair.
     implementation(project(":compat-runtime-v1"))

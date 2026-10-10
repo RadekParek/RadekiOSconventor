@@ -20,7 +20,7 @@ class GuestRunner {
 
   public:
     GuestRunner(const ShimRegistry &shims, const CpuBackend &cpu,
-                std::size_t memoryLimit = 256U * 1024U * 1024U)
+                std::size_t memoryLimit = kGuestMemoryLimitUnlimited)
         : shims_(shims), cpu_(cpu), memoryLimit_(memoryLimit) {}
 
     radek::Json runMainBinary(const std::vector<std::uint8_t> &mainBinary,
@@ -69,12 +69,12 @@ class BootAttemptRunner {
   public:
     BootAttemptRunner(ShimRegistry &shims, const CpuBackend &cpu,
                       TrapShimAdapter &traps,
-                      std::size_t memoryLimit = 256U * 1024U * 1024U)
+                      std::size_t memoryLimit = kGuestMemoryLimitUnlimited)
         : shims_(shims), cpu_(cpu), traps_(traps), memoryLimit_(memoryLimit) {}
 
     BootAttemptRunner(ShimRegistry &shims, const CpuBackend &cpu,
                       TrapShimAdapter &traps, BootLifecycleHooks lifecycle,
-                      std::size_t memoryLimit = 256U * 1024U * 1024U)
+                      std::size_t memoryLimit = kGuestMemoryLimitUnlimited)
         : shims_(shims), cpu_(cpu), traps_(traps), memoryLimit_(memoryLimit),
           lifecycle_(std::move(lifecycle)) {}
 

@@ -32,6 +32,12 @@ struct LifecycleOutcome {
     std::uint32_t mainThreadFramesServiced = 0;
     std::uint32_t mainThreadFramesLimit = 0;
     bool mainThreadQueueExhausted = false;
+    // Run loop / frame pump: how many sources were serviced, whether the loop
+    // is still running, and whether it has returned to its caller.
+    std::uint32_t runLoopIterations = 0;
+    std::uint32_t runLoopPendingSources = 0;
+    bool runLoopRunning = false;
+    bool runLoopExited = false;
     std::vector<std::string> events;
 };
 
@@ -43,6 +49,11 @@ struct LifecycleOutcome {
  * is not a complete Apple Objective-C ABI or framework implementation.
  */
 class ShimAdapter {
+    // The host reaches the running guest through these free functions rather
+    // than by calling into guest code re-entrantly.
+    friend void configureActiveGuestViewport(std::uint32_t width, std::uint32_t height);
+    friend bool postTouchToActiveGuest(float x, float y, const char *phase);
+
     struct PropertyCopyContinuation {
         GuestAddress receiver = 0;
         std::int32_t offset = 0;
@@ -104,6 +115,62 @@ class ShimAdapter {
         GuestAddress queuedMainThreadTarget = 0;
         Selector queuedMainThreadSelector = 0;
         GuestAddress queuedMainThreadArgument = 0;
+
+        // ---- run loop (the frame pump) -----------------------------------
+        // `UIApplicationMain` never returns on a real device: it enters
+        // CFRunLoop and keeps servicing the app's timers and delayed
+        // selectors, which is what makes a game draw a *second* frame. The
+        // bounded adapter therefore keeps the sources the guest scheduled and
+        // re-enters the guest once per ready source instead of returning to
+        // `main()` after `applicationDidFinishLaunching:`.
+        struct RunLoopSource {
+            enum class Kind { Timer, DelayedSelector, Touch };
+            Kind kind = Kind::Timer;
+            GuestAddress target = 0;    // timer target, or receiver of a delayed selector
+            Selector selector = 0;
+            GuestAddress argument = 0;
+            // The NSTimer object itself, so `invalidate` can find the source it
+            // owns (the target is the delegate, which may own several timers).
+            GuestAddress timerObject = 0;
+            double intervalSeconds = 0.0;
+            double nextFireSeconds = 0.0;
+            bool repeats = false;
+            // Touch sources carry the host event; the run loop delivers them to
+            // the key window's view, since only the pumping run loop may enter
+            // guest code.
+            std::string touchPhase;     // "touchesBegan", "touchesMoved", "touchesEnded"
+            float touchX = 0.0f;
+            float touchY = 0.0f;
+        };
+        std::vector<RunLoopSource> runLoopSources;
+        bool runLoopRunning = false;
+        bool runLoopEntered = false;
+        bool runLoopStopped = false;
+        // Virtual run-loop clock. Each serviced source advances it to that
+        // source's fire time, so a repeating 1/60 s timer advances time like a
+        // real display link would instead of firing instantly forever.
+        double runLoopClockSeconds = 0.0;
+        std::uint32_t runLoopIterations = 0;
+        // Zero means unlimited, which is what the device game path needs: a
+        // running game must not be stopped after an arbitrary frame count.
+        std::uint32_t runLoopIterationLimit = 0;
+        std::uint32_t nextTimerToken = 1;
+        // Return address of whoever called CFRunLoopRun. The loop keeps it for
+        // its whole lifetime and only returns there once it has no sources.
+        GuestAddress runLoopCallerReturn = 0;
+        // `addSubview:` bookkeeping, so an input event can be delivered to the
+        // view that actually covers the touch instead of to the window.
+        std::map<GuestAddress, std::vector<GuestAddress>> subviews;
+
+        // ---- host viewport -----------------------------------------------
+        // The Android surface size handed down by the launcher. It is the
+        // fallback rectangle for a drawable whose frame the guest never
+        // materialized, and it is what `-[UIScreen bounds]`/`applicationFrame`
+        // report so a landscape game is not given a portrait rectangle.
+        std::uint32_t viewportWidth = 0;
+        std::uint32_t viewportHeight = 0;
+        bool viewportConfigured = false;
+
         std::vector<LifecycleFrame> frames;
         std::vector<std::string> events;
     };
@@ -170,8 +237,14 @@ class ShimAdapter {
                                           GuestAddress &slot);
     bool applicationMain(CpuRegisterState &registers, GuestAddressSpace &memory,
                          GuestAddress &guestTarget, std::string &reason);
+    /**
+     * Resumes the guest after a nested callout returns. When `guestTarget` is
+     * supplied and the run loop has another ready source, the continuation
+     * hands control straight to that guest callback instead of returning -
+     * which is what keeps a game drawing frame after frame.
+     */
     bool lifecycleContinuation(CpuRegisterState &registers, GuestAddressSpace &memory,
-                               std::string &reason);
+                               std::string &reason, GuestAddress *guestTarget = nullptr);
     bool lifecycleSelector(CpuRegisterState &registers, GuestAddressSpace &memory,
                            const std::string &selectorName, GuestAddress receiverAddress,
                            Object *receiverObject, const Class *receiverClass, Value *rawReturn,
@@ -201,6 +274,53 @@ class ShimAdapter {
      * entry and the background-thread object while the runner services it.
      */
     GuestAddress lifecycleCurrentThreadAddress(GuestAddressSpace &memory);
+
+    /**
+     * Publishes the host surface size (the Android window) to the guest. Call
+     * before the boot runs so `-[UIScreen bounds]`/`applicationFrame` and the
+     * EAGL drawable use the real rectangle instead of a hardcoded portrait one.
+     */
+    void configureViewport(GuestAddressSpace &memory, std::uint32_t width,
+                           std::uint32_t height);
+    /** Drawable rectangle: the host viewport when the guest set no frame. */
+    void effectiveViewport(const GuestAddressSpace &memory, std::uint32_t &width,
+                           std::uint32_t &height) const;
+
+    /**
+     * `CFRunLoopRun` / `CFRunLoopRunInMode`. Enters the run loop: each ready
+     * source re-enters the guest through the same nested-callout machinery
+     * `UIApplicationMain` uses, so a game keeps drawing frames instead of
+     * returning from `main()` after its startup callback.
+     */
+    bool runLoopRun(CpuRegisterState &registers, GuestAddressSpace &memory,
+                    GuestAddress &guestTarget, std::string &reason);
+    /** Stops the run loop (`CFRunLoopStop`). */
+    void runLoopStop(GuestAddressSpace &memory);
+    /**
+     * Services one ready source and, when there is one, redirects execution
+     * into that guest callback. Leaves `guestTarget` at 0 when the queue is
+     * empty, which is the loop's signal to exit.
+     */
+    bool serviceRunLoop(CpuRegisterState &registers, GuestAddressSpace &memory,
+                        GuestAddress &guestTarget, std::string &reason);
+
+    /** `+[NSTimer scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:]`. */
+    GuestAddress scheduleTimer(GuestAddressSpace &memory, double intervalSeconds,
+                               GuestAddress target, Selector selector, GuestAddress argument,
+                               bool repeats);
+    /** `-[NSObject performSelector:withObject:afterDelay:]` family. */
+    void scheduleDelayedSelector(GuestAddressSpace &memory, GuestAddress target,
+                                 Selector selector, GuestAddress argument, double delaySeconds);
+    /** Queues a host touch event for the run loop to deliver to the guest view. */
+    void postTouch(GuestAddressSpace &memory, const std::string &phase, float x, float y);
+    /** Cancels every scheduled source aimed at `target` (`-[NSTimer invalidate]`). */
+    void cancelRunLoopSourcesFor(GuestAddressSpace &memory, GuestAddress target);
+
+    /** Deepest subview of the key window covering (x, y); the window on miss. */
+    GuestAddress touchTargetFor(GuestAddressSpace &memory, float x, float y);
+    /** Whether the guest hid the status bar, for `applicationFrame`. */
+    bool statusBarHidden(const GuestAddressSpace &memory) const;
+
     bool beginNestedGuestCall(CpuRegisterState &registers, GuestAddressSpace &memory,
                               GuestAddress receiver, Selector selector, std::uint32_t kind,
                               GuestAddress argument, GuestAddress &guestTarget,
@@ -303,5 +423,19 @@ class ShimAdapter {
     GuestAddress createConstantString(GuestAddressSpace &memory, const std::string &value,
                                       std::string &reason);
 };
+
+/**
+ * Publishes the host surface size to the guest that is currently running, if
+ * any. The launcher calls this when its SurfaceView changes size so
+ * `-[UIScreen bounds]` and the EAGL drawable use the real rectangle.
+ */
+void configureActiveGuestViewport(std::uint32_t width, std::uint32_t height);
+
+/**
+ * Queues a host touch event for the currently running guest's run loop. The
+ * boot runs on one thread and re-enters the guest itself, so input is posted
+ * into the run loop rather than called in directly.
+ */
+bool postTouchToActiveGuest(float x, float y, const char *phase);
 
 } // namespace radek::compat_runtime::objc

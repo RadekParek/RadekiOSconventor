@@ -92,12 +92,6 @@ def find_gameboot_binary() -> Path | None:
     return Path(found) if found else None
 
 
-def unicorn_library_dir(gameboot_binary: Path) -> Path | None:
-    """Directory holding the Unicorn shared library next to a CMake host build."""
-    directory = gameboot_binary.parent / "_deps" / "unicorn-build"
-    return directory if directory.is_dir() else None
-
-
 def describe_macho(path: Path) -> dict:
     """Classify a thin or FAT Mach-O file without loading it whole."""
     with path.open("rb") as handle:
@@ -183,22 +177,28 @@ def probe_boot(
     executable: Path,
     gameboot_binary: Path | None = None,
     timeout: int = PROBE_TIMEOUT_SECONDS,
+    payload_dir: Path | None = None,
 ) -> dict:
-    """Run the host boot probe and summarize its JSON report (never raises)."""
+    """Run the host boot probe and summarize its JSON report (never raises).
+
+    ``payload_dir`` is the extracted .app bundle the guest's own file reads
+    are served from. Probing without it starves the guest's startup resource
+    loads, so the boot attempt is always probed with its bundle attached -
+    exactly like the installed game APK.
+    """
     binary = gameboot_binary or find_gameboot_binary()
     if binary is None or not binary.is_file():
         return {"status": "NOT_PROBED", "reason": "radek-gameboot host binary is not built"}
-    env = dict(os.environ)
-    library_dir = unicorn_library_dir(binary)
-    if library_dir is not None:
-        separator = os.pathsep
-        env["LD_LIBRARY_PATH"] = str(library_dir) + separator + env.get("LD_LIBRARY_PATH", "")
+    argv = [str(binary), str(executable)]
+    if payload_dir is not None:
+        argv.append(str(payload_dir))
+    argv.append("--diagnostic-probe")
     try:
         completed = subprocess.run(
             # The host probe is intentionally a finite diagnostic run. The
             # Android JNI path does not pass this flag and therefore keeps the
             # guest execution policy unlimited for gameplay.
-            [str(binary), str(executable), "--diagnostic-probe"],
+            argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout,
@@ -208,9 +208,23 @@ def probe_boot(
         return {"status": "NOT_PROBED", "reason": f"radek-gameboot timed out after {timeout}s"}
     except OSError as exc:
         return {"status": "NOT_PROBED", "reason": f"radek-gameboot could not start: {exc}"}
+    # The report is the probe's only JSON document, but the guest's own console
+    # output shares stdout with it once the bundle is attached. Parse the last
+    # line that is a complete JSON object instead of trusting the whole stream.
+    report = None
     try:
-        report = json.loads(completed.stdout.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        for line in reversed(completed.stdout.decode("utf-8").splitlines()):
+            stripped = line.strip()
+            if not stripped.startswith("{"):
+                continue
+            try:
+                report = json.loads(stripped)
+                break
+            except json.JSONDecodeError:
+                continue
+    except UnicodeDecodeError:
+        report = None
+    if not isinstance(report, dict):
         detail = completed.stderr.decode("utf-8", "replace").strip()
         return {"status": "NOT_PROBED", "reason": f"radek-gameboot report was not JSON: {detail[:300]}"}
     loader = report.get("loader") or {}
@@ -285,7 +299,7 @@ def run_gameboot(
                     bundle_bytes += member.stat().st_size
             probe: dict
             if run_probe:
-                probe = probe_boot(staged_path, gameboot_binary)
+                probe = probe_boot(staged_path, gameboot_binary, payload_dir=app_dir)
             else:
                 probe = {"status": "NOT_PROBED", "reason": "probe skipped by caller"}
             shutil.copyfile(staged_path, output / "main-executable.bin")

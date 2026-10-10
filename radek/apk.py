@@ -639,6 +639,9 @@ def validate_apk(
             "libGLESv2.so",
             "libEGL.so",
             "libz.so",
+            # AAudio backs the compat runtime's OpenAL output path; it ships
+            # with the platform since API 26 (the runtime's minSdk).
+            "libaaudio.so",
         }
         for name, info in libraries.items():
             unresolved = set(info["needed"]) - libraries.keys() - android_system

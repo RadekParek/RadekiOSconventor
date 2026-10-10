@@ -27,13 +27,13 @@ class UnavailableArm32Backend final : public CpuBackend {
 };
 } // namespace
 
-#ifdef RADEK_HAVE_UNICORN
-std::unique_ptr<CpuBackend> createUnicornArm32Backend();
+#ifdef RADEK_HAVE_DYNARMIC
+std::unique_ptr<CpuBackend> createDynarmicArm32Backend();
 #endif
 
 std::unique_ptr<CpuBackend> createArm32CpuBackend() {
-#ifdef RADEK_HAVE_UNICORN
-    return createUnicornArm32Backend();
+#ifdef RADEK_HAVE_DYNARMIC
+    return createDynarmicArm32Backend();
 #else
     return std::make_unique<UnavailableArm32Backend>();
 #endif

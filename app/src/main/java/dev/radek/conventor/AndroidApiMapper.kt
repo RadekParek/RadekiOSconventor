@@ -1267,6 +1267,69 @@ internal object AndroidApiMapper {
         "___cxa_guard_abort" to "radek_compat___cxa_guard_abort",
         "___cxa_demangle" to "radek_compat___cxa_demangle",
         "___dynamic_cast" to "radek_compat___dynamic_cast",
+        "_CFArrayContainsValue" to "radek_compat_CFArrayContainsValue",
+        "_CFArrayGetFirstIndexOfValue" to "radek_compat_CFArrayGetFirstIndexOfValue",
+        "_CFDictionaryAddValue" to "radek_compat_CFDictionaryAddValue",
+        "_CFMakeCollectable" to "radek_compat_CFMakeCollectable",
+        "_CFStringAppendCharacters" to "radek_compat_CFStringAppendCharacters",
+        "_CFStringCreateWithCharacters" to "radek_compat_CFStringCreateWithCharacters",
+        "_CFStringGetCharactersPtr" to "radek_compat_CFStringGetCharactersPtr",
+        "_CFURLCreateStringByAddingPercentEscapes" to "radek_compat_CFURLCreateStringByAddingPercentEscapes",
+        "_CFHostCreateWithName" to "radek_compat_CFHostCreateWithName",
+        "_CFHostGetAddressing" to "radek_compat_CFHostGetAddressing",
+        "_CFHostStartInfoResolution" to "radek_compat_CFHostStartInfoResolution",
+        "_CGRectGetHeight" to "radek_compat_CGRectGetHeight",
+        "_CGRectGetMaxX" to "radek_compat_CGRectGetMaxX",
+        "_CGRectGetMidX" to "radek_compat_CGRectGetMidX",
+        "_CGRectGetMidY" to "radek_compat_CGRectGetMidY",
+        "_CGRectGetMinY" to "radek_compat_CGRectGetMinY",
+        "_CGRectGetWidth" to "radek_compat_CGRectGetWidth",
+        "_CGRectIntegral" to "radek_compat_CGRectIntegral",
+        "_CGRectIntersectsRect" to "radek_compat_CGRectIntersectsRect",
+        "_CGRectIsEmpty" to "radek_compat_CGRectIsEmpty",
+        "_CGRectIsNull" to "radek_compat_CGRectIsNull",
+        "_CGRectOffset" to "radek_compat_CGRectOffset",
+        "_CCHmac" to "radek_compat_CCHmac",
+        "_CCHmacInit" to "radek_compat_CCHmacInit",
+        "_CCHmacUpdate" to "radek_compat_CCHmacUpdate",
+        "_CCHmacFinal" to "radek_compat_CCHmacFinal",
+        "_OSAtomicAdd32Barrier" to "radek_compat_OSAtomicAdd32Barrier",
+        "_OSAtomicCompareAndSwap32Barrier" to "radek_compat_OSAtomicCompareAndSwap32Barrier",
+        "_OSAtomicCompareAndSwapPtrBarrier" to "radek_compat_OSAtomicCompareAndSwapPtrBarrier",
+        "_host_page_size" to "radek_compat_host_page_size",
+        "_host_statistics" to "radek_compat_host_statistics",
+        "_mach_host_self" to "radek_compat_mach_host_self",
+        "_mach_task_self_" to "radek_compat_mach_task_self_",
+        "_mach_wait_until" to "radek_compat_mach_wait_until",
+        "_semaphore_create" to "radek_compat_semaphore_create",
+        "_semaphore_destroy" to "radek_compat_semaphore_destroy",
+        "_semaphore_signal" to "radek_compat_semaphore_signal",
+        "_semaphore_wait" to "radek_compat_semaphore_wait",
+        "_task_info" to "radek_compat_task_info",
+        "_thread_policy_set" to "radek_compat_thread_policy_set",
+        "_pthread_mach_thread_np" to "radek_compat_pthread_mach_thread_np",
+        "_pthread_threadid_np" to "radek_compat_pthread_threadid_np",
+        "_dispatch_get_current_queue" to "radek_compat_dispatch_get_current_queue",
+        "___assert_rtn" to "radek_compat___assert_rtn",
+        "___cxa_call_unexpected" to "radek_compat___cxa_call_unexpected",
+        "___divmodsi4" to "radek_compat___divmodsi4",
+        "___objc_personality_v0" to "radek_compat___objc_personality_v0",
+        "___sincos_stret" to "radek_compat___sincos_stret",
+        "___sincosf_stret" to "radek_compat___sincosf_stret",
+        "_memset_pattern16" to "radek_compat_memset_pattern16",
+        "__Block_object_assign" to "radek_compat_Block_object_assign",
+        "__Block_object_dispose" to "radek_compat_Block_object_dispose",
+        "__ZNKSt3__120__vector_base_commonILb1EE20__throw_length_errorEv" to "radek_compat_stl_throw_length_error",
+        "__ZNKSt3__120__vector_base_commonILb1EE20__throw_out_of_rangeEv" to "radek_compat_stl_throw_out_of_range",
+        "__ZNSt3__112__rs_defaultD1Ev" to "radek_compat_rs_default_dtor",
+        "__ZNSt3__112__rs_defaultclEv" to "radek_compat_rs_default_call",
+        "__ZNSt3__18__rs_getEv" to "radek_compat_rs_get",
+        "_objc_setAssociatedObject" to "radek_compat_objc_setAssociatedObject",
+        "_objc_setProperty_atomic" to "radek_compat_objc_setProperty_atomic",
+        "_objc_setProperty_atomic_copy" to "radek_compat_objc_setProperty_atomic_copy",
+        "_objc_setProperty_nonatomic" to "radek_compat_objc_setProperty_nonatomic",
+        "_objc_setProperty_nonatomic_copy" to "radek_compat_objc_setProperty_nonatomic_copy",
+        "_NSSetUncaughtExceptionHandler" to "radek_compat_NSSetUncaughtExceptionHandler",
     )
 
     /**
@@ -1421,6 +1484,15 @@ internal object AndroidApiMapper {
                     .put("resolutionEvidence", "REVIEWED_TOOLCHAIN_CANDIDATE_NOT_LINKED")
                     .put("staticRecompilationStrategy", "static NDK compiler-rt/libunwind integration required; no libgcc_s.so alias or link was generated")
                     .put("reason", "$compilerRuntimeCandidate. Android NDK does not provide a drop-in libgcc_s.so; symbol ABI and exception personality must be validated before a static link can be claimed.")
+                concreteDarwinProvider != null && CompatImportProviders.isVerified(concreteDarwinProvider) -> item
+                    .put("classification", "COMPAT_VERIFIED_HANDLER_RESOLVED")
+                    .put("targetLibrary", "libcompat_runtime_v1.so")
+                    .put("targetSymbol", concreteDarwinProvider)
+                    .put("implementationCodePresent", true)
+                    .put("resolutionEvidence", "GUEST_RUNTIME_PROVIDER_VERIFIED_SEMANTICS")
+                    .put("staticRecompilationStrategy", "Mach-O import-slot fixup to a tested guest callout/data provider at game-runtime launch; no static Android code-callsite rewrite")
+                    .put("compilerRuntimeCandidate", compilerRuntimeCandidate ?: JSONObject.NULL)
+                    .put("reason", "The compat-runtime-v1 adapter for this import carries complete, unit-tested API semantics (exact arithmetic, real errno/stdio cells, the OpenAL engine, or sandbox path providers, covered by the host and sanitizer test suites). Actual slot binding is confirmed by the runtimeLinking report when the guest image is loaded; no IPA callsite was rewritten.")
                 concreteDarwinProvider != null -> item
                     .put("classification", "GUEST_RUNTIME_ADAPTER_CATALOGUED")
                     .put("targetLibrary", "libcompat_runtime_v1.so (ARM32 guest adapter catalog)")
@@ -1645,8 +1717,17 @@ internal object AndroidApiMapper {
             .put("compatHandlerCoveragePercent", if (total == 0) 0 else compatHandlers * 100 / total)
             .put("compatHandlerResolverStatus", if (resolveCompatHandler == null) "NOT_RUN" else "DYNAMIC_REGISTRY_REGISTRATION")
             .put("unmappedSymbolCount", unmappedSymbols)
-            .put("linkedImplementationCount", 0)
-            .put("linkedImplementationCoveragePercent", 0)
+            // "Linked" means an implementation export that was verified on the
+            // current device: resolved through the shipped libioscompat.so and
+            // confirmed by dladdr to live in that library. Auto-registered
+            // stubs are excluded by the resolver, so this is a real number
+            // instead of a constant - it is what the packaged APK's DT_NEEDED
+            // libioscompat.so resolves at guest boot.
+            .put("linkedImplementationCount", runtimeVerifiedApiReplacements)
+            .put("linkedImplementationCoveragePercent",
+                 coveragePercent(runtimeVerifiedApiReplacements, total))
+            // Nothing is ever generated by this analyzer; the field stays a
+            // real count (zero) rather than a placeholder for future work.
             .put("generatedApiImplementationCount", 0)
             .put("truncated", truncated)
             .put("symbols", result)

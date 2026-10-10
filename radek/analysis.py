@@ -32,11 +32,9 @@ def analyzer_path() -> Path:
 
 
 def analyze(path: Path) -> dict:
-    proc = subprocess.run([str(analyzer_path()), str(path)], text=True, capture_output=True, timeout=60)
+    proc = subprocess.run([str(analyzer_path()), str(path)], text=True, capture_output=True, timeout=600)
     if proc.returncode:
         raise InputError("Mach-O analysis failed: " + proc.stderr.strip())
-    if len(proc.stdout) > 64 * 1024 * 1024:
-        raise InputError("analysis output exceeds limit")
     return json.loads(proc.stdout)
 
 

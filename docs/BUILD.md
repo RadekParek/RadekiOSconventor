@@ -45,7 +45,7 @@ conversion is attached under the strict contract. Proven IPAs become a signed AP
 entry routine runs through JNI and displays the message recovered from the IPA, with no extra user
 action. Everything else can be turned, via **Force convert to game APK**, into a separately named
 `game-runtime-v1` boot-attempt APK. By default it packages the selected 32-bit ARM executable,
-bundle resources, `libcompat_runtime_v1.so`, and its required `libunicorn.so` dependency. An optional
+bundle resources, `libcompat_runtime_v1.so`, and its required `statically linked dynarmic` dependency. An optional
 host-generated portable-C handoff can be imported; the builder verifies ARM64 ELF/class and
 architecture, Android dependencies, translated-function/JNI exports, executable binding and nested
 payload hashes before adding the translated library and memory payload. That runner is not connected

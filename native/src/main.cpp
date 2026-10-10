@@ -11,8 +11,8 @@ int main(int argc, char **argv) {
         if (!f)
             throw std::runtime_error("cannot open executable");
         auto n = f.tellg();
-        if (n < 0 || n > 256 * 1024 * 1024)
-            throw std::runtime_error("executable exceeds 256 MiB limit");
+        if (n < 0 || n > 1024 * 1024 * 1024)
+            throw std::runtime_error("executable exceeds 1 GiB limit");
         std::vector<uint8_t> b(static_cast<size_t>(n));
         f.seekg(0);
         if (!f.read(reinterpret_cast<char *>(b.data()), n))

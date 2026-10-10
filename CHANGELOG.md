@@ -86,7 +86,7 @@ Birds session is claimed here.
 ### The device game path no longer expires at 2,000,000 instructions
 
 The Android `game-runtime-v1` path now treats zero instruction and zero wall-clock
-limits as **unlimited**. The Unicorn backend no longer carries hidden 100-million/
+limits as **unlimited**. The Dynarmic backend no longer carries hidden 100-million/
 60-second ceilings, and the lifecycle adapter no longer cancels the guest after
 an eight-frame service window. A game loop can remain alive for rendering and
 input instead of being turned into a misleading `INSTRUCTION_LIMIT` diagnostic.
@@ -245,7 +245,7 @@ closes the app from the library itself.
 - CI caches the pinned Android SDK components (platform 35, build-tools 35.0.0,
   NDK 27.2.12479018, CMake 3.22.1) keyed by their exact versions, so repeat runs skip the
   multi-gigabyte NDK download.
-- CI uses `ccache` for the host CMake/Unicorn build and the Gradle NDK build
+- CI uses `ccache` for the host CMake/Dynarmic build and the Gradle NDK build
   (`RADEK_USE_CCACHE=1`; both Gradle modules pass the launcher arguments only when that
   variable is set, so environments without ccache behave exactly as before) and caches it
   between runs.

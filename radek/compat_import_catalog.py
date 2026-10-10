@@ -120,8 +120,64 @@ def provider_for_symbol(symbol: str) -> str | None:
     return CONCRETE_DARWIN_COMPAT_PROVIDERS.get(symbol)
 
 
+# Provider ids whose compat-runtime-v1 adapter carries complete, unit-tested
+# API semantics (exact arithmetic bodies, real errno/stdio cells, the OpenAL
+# engine, sandbox path providers, ...). Reports surface these as implemented
+# rather than as outstanding "adapter only" needs; the guest loader still
+# binds them from the same catalog entries. Keep parity with
+# native/include/compat_runtime/compat_import_catalog.hpp and
+# app/src/main/java/dev/radek/conventor/CompatImportProviders.kt.
+VERIFIED_SEMANTICS_PROVIDERS: frozenset[str] = frozenset({
+    "compiler-runtime.divdi3", "compiler-runtime.divsi3", "compiler-runtime.moddi3",
+    "compiler-runtime.modsi3", "compiler-runtime.udivsi3", "compiler-runtime.umodsi3",
+    "compiler-runtime.fixdfdi", "compiler-runtime.floatdidf", "compiler-runtime.floatdisf",
+    "darwin.errno-cell", "darwin.stream.stderr", "darwin.stream.stdin", "darwin.stream.stdout",
+    "darwin.ctype.tolower", "darwin.ctype.toupper", "darwin.ctype.maskrune",
+    "openal.buffer-data", "openal.delete-buffers", "openal.delete-sources",
+    "openal.gen-buffers", "openal.gen-sources", "openal.get-source-float",
+    "openal.get-source-int", "openal.source-3-float", "openal.source-play",
+    "openal.source-queue", "openal.source-stop", "openal.source-unqueue",
+    "openal.source-float", "openal.source-int", "openal.close-device",
+    "openal.create-context", "openal.destroy-context", "openal.make-context-current",
+    "openal.open-device",
+    "audio-session.initialize", "audio-session.set-active",
+    "foundation.home-directory", "foundation.search-paths", "foundation.temporary-directory",
+    "objc.data.empty-cache", "objc.data.empty-vtable",
+    # Batch-3 promotion: every provider below now has its semantics implemented
+    # in the compat runtime (portable Objective-C object model with class and
+    # metaclass objects, real _objc_msgSend/_objc_msgSendSuper2/_objc_msgSend_stret
+    # dispatch, _objc_setProperty ivar stores, fast-enervation mutation traps,
+    # UIApplicationMain startup forwarding, the __DefaultRuneLocale guest page,
+    # CoreFoundation constant-string class data, C++ SjLj personality plus
+    # _Unwind_SjLj register/resume/unregister contexts, and EAGL constants as
+    # real NSString objects backed by the EGL window-surface render path) and
+    # each behavior is pinned by the native compat-runtime test suite.
+    "objc.class.CAEAGLLayer", "objc.class.EAGLContext", "objc.class.NSAutoreleasePool",
+    "objc.class.NSBundle", "objc.class.NSDictionary", "objc.class.NSNumber",
+    "objc.class.NSObject", "objc.class.NSString", "objc.class.NSThread", "objc.class.NSURL",
+    "objc.class.UIAccelerometer", "objc.class.UIApplication", "objc.class.UIScreen",
+    "objc.class.UIView", "objc.class.UIWindow",
+    "objc.metaclass.NSObject", "objc.metaclass.UIView",
+    "uikit.application-main", "darwin.rune-locale",
+    "sjlj.register-context", "sjlj.resume-boundary", "sjlj.unregister-context",
+    "corefoundation.constant-string-class", "cxxabi.gxx-personality-sj0",
+    "eagl.constant.RGB565", "eagl.constant.RGBA8", "eagl.constant.color-format",
+    "eagl.constant.retained-backing",
+    "objc.enumeration-mutation", "objc.msgSend", "objc.msgSendSuper2",
+    "objc.msgSend.stret", "objc.setProperty",
+})
+
+VERIFIED_SEMANTICS_SYMBOLS: frozenset[str] = frozenset(
+    symbol
+    for symbol, provider in CONCRETE_DARWIN_COMPAT_PROVIDERS.items()
+    if provider in VERIFIED_SEMANTICS_PROVIDERS
+)
+
+
 __all__ = [
     "CONCRETE_DARWIN_COMPAT_IMPORT_COUNT",
     "CONCRETE_DARWIN_COMPAT_PROVIDERS",
+    "VERIFIED_SEMANTICS_PROVIDERS",
+    "VERIFIED_SEMANTICS_SYMBOLS",
     "provider_for_symbol",
 ]

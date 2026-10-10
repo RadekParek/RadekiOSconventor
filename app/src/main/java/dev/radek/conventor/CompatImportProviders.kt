@@ -89,11 +89,101 @@ internal object CompatImportProviders {
         "_objc_setProperty" to "objc.setProperty",
     )
 
+    // Provider ids whose compat-runtime-v1 adapter carries complete,
+    // unit-tested API semantics (exact arithmetic bodies, real errno/stdio
+    // cells, the OpenAL engine, sandbox path providers, ...). The mapper
+    // reports these as implemented; unverified entries remain outstanding
+    // "adapter only" needs. Keep parity with
+    // native/include/compat_runtime/compat_import_catalog.hpp and
+    // radek/compat_import_catalog.py.
+    val verifiedSemanticsProviders: Set<String> = setOf(
+        "audio-session.initialize",
+        "audio-session.set-active",
+        "compiler-runtime.divdi3",
+        "compiler-runtime.divsi3",
+        "compiler-runtime.fixdfdi",
+        "compiler-runtime.floatdidf",
+        "compiler-runtime.floatdisf",
+        "compiler-runtime.moddi3",
+        "compiler-runtime.modsi3",
+        "compiler-runtime.udivsi3",
+        "compiler-runtime.umodsi3",
+        "corefoundation.constant-string-class",
+        "cxxabi.gxx-personality-sj0",
+        "darwin.ctype.maskrune",
+        "darwin.ctype.tolower",
+        "darwin.ctype.toupper",
+        "darwin.errno-cell",
+        "darwin.rune-locale",
+        "darwin.stream.stderr",
+        "darwin.stream.stdin",
+        "darwin.stream.stdout",
+        "eagl.constant.RGB565",
+        "eagl.constant.RGBA8",
+        "eagl.constant.color-format",
+        "eagl.constant.retained-backing",
+        "foundation.home-directory",
+        "foundation.search-paths",
+        "foundation.temporary-directory",
+        "objc.class.CAEAGLLayer",
+        "objc.class.EAGLContext",
+        "objc.class.NSAutoreleasePool",
+        "objc.class.NSBundle",
+        "objc.class.NSDictionary",
+        "objc.class.NSNumber",
+        "objc.class.NSObject",
+        "objc.class.NSString",
+        "objc.class.NSThread",
+        "objc.class.NSURL",
+        "objc.class.UIAccelerometer",
+        "objc.class.UIApplication",
+        "objc.class.UIScreen",
+        "objc.class.UIView",
+        "objc.class.UIWindow",
+        "objc.data.empty-cache",
+        "objc.data.empty-vtable",
+        "objc.enumeration-mutation",
+        "objc.metaclass.NSObject",
+        "objc.metaclass.UIView",
+        "objc.msgSend",
+        "objc.msgSend.stret",
+        "objc.msgSendSuper2",
+        "objc.setProperty",
+        "openal.buffer-data",
+        "openal.close-device",
+        "openal.create-context",
+        "openal.delete-buffers",
+        "openal.delete-sources",
+        "openal.destroy-context",
+        "openal.gen-buffers",
+        "openal.gen-sources",
+        "openal.get-source-float",
+        "openal.get-source-int",
+        "openal.make-context-current",
+        "openal.open-device",
+        "openal.source-3-float",
+        "openal.source-float",
+        "openal.source-int",
+        "openal.source-play",
+        "openal.source-queue",
+        "openal.source-stop",
+        "openal.source-unqueue",
+        "sjlj.register-context",
+        "sjlj.resume-boundary",
+        "sjlj.unregister-context",
+        "uikit.application-main",
+    )
+
     init {
         check(bySymbol.size == EXPECTED_DARWIN_ONLY_IMPORT_COUNT) {
             "Darwin compatibility provider catalog drifted: ${bySymbol.size}"
         }
+        check(verifiedSemanticsProviders.all { p -> bySymbol.values.contains(p) }) {
+            "verified-semantics set must reference catalogued providers"
+        }
     }
 
     fun providerFor(symbol: String): String? = bySymbol[symbol]
+
+    fun isVerified(provider: String): Boolean = provider in verifiedSemanticsProviders
 }

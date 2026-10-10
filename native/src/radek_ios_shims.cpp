@@ -15,15 +15,30 @@
  * which the generators emit whenever any CoreFoundation shim is selected.
  */
 
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <errno.h>
 #include <math.h>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
+#include <netdb.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <string>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/syscall.h>
 #include <sys/time.h>
 #include <time.h>
+#include <type_traits>
 #include <unistd.h>
+#include <unordered_map>
+#include <vector>
 
 
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_NEEDS_CF_RUNTIME)
@@ -75,6 +90,7 @@ enum class RadekCFKind : uint32_t {
     Number = 6,
     Date = 7,
     RunLoop = 8,
+    Host = 9,
 };
 
 struct radek_CFRuntime {
@@ -89,6 +105,13 @@ struct radek_CFRuntime {
     double number = 0.0;        // Number
     double absoluteTime = 0.0;  // Date
     std::unique_ptr<RadekCFRunLoopState> runLoop; // RunLoop
+    // String: lazily materialised UTF-16 view backing CFStringGetCharactersPtr.
+    mutable std::u16string charsCache;
+    mutable bool charsCacheValid = false;
+    // Host: DNS resolution results (CFHost).
+    std::string hostName;
+    std::vector<std::vector<uint8_t>> hostAddresses; // serialised sockaddr_storage values
+    bool hostResolved = false;
 
     ~radek_CFRuntime();
 };
@@ -264,6 +287,91 @@ static inline bool radekCfKeyEquals(const radek_CFRuntime *left, const radek_CFR
         return left->text == right->text;
     }
     return false;
+}
+
+// UTF-16 (with surrogate pairs) -> UTF-8. Unpaired surrogates encode as
+// U+FFFD, matching CF's replacement behaviour for malformed sequences.
+static inline void radekCfUtf16ToUtf8(const uint16_t *characters, size_t count, std::string &out) {
+    size_t index = 0;
+    while (index < count) {
+        uint32_t codePoint = characters[index++];
+        if (codePoint >= 0xD800 && codePoint <= 0xDBFF && index < count) {
+            const uint32_t low = characters[index];
+            if (low >= 0xDC00 && low <= 0xDFFF) {
+                codePoint = 0x10000 + ((codePoint - 0xD800) << 10) + (low - 0xDC00);
+                ++index;
+            }
+        } else if (codePoint >= 0xDC00 && codePoint <= 0xDFFF) {
+            codePoint = 0xFFFD;
+        }
+        if (codePoint < 0x80) {
+            out.push_back(static_cast<char>(codePoint));
+        } else if (codePoint < 0x800) {
+            out.push_back(static_cast<char>(0xC0 | (codePoint >> 6)));
+            out.push_back(static_cast<char>(0x80 | (codePoint & 0x3F)));
+        } else if (codePoint < 0x10000) {
+            out.push_back(static_cast<char>(0xE0 | (codePoint >> 12)));
+            out.push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (codePoint & 0x3F)));
+        } else {
+            out.push_back(static_cast<char>(0xF0 | (codePoint >> 18)));
+            out.push_back(static_cast<char>(0x80 | ((codePoint >> 12) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (codePoint & 0x3F)));
+        }
+    }
+}
+
+// UTF-8 -> UTF-16 (with surrogate pairs) for the CFStringGetCharactersPtr view.
+static inline void radekCfUtf8ToUtf16(const std::string &text, std::u16string &out) {
+    size_t index = 0;
+    const size_t size = text.size();
+    while (index < size) {
+        const unsigned char lead = static_cast<unsigned char>(text[index]);
+        uint32_t codePoint = 0;
+        size_t continuation = 0;
+        if (lead < 0x80) {
+            codePoint = lead;
+        } else if ((lead & 0xE0) == 0xC0) {
+            codePoint = lead & 0x1F;
+            continuation = 1;
+        } else if ((lead & 0xF0) == 0xE0) {
+            codePoint = lead & 0x0F;
+            continuation = 2;
+        } else if ((lead & 0xF8) == 0xF0) {
+            codePoint = lead & 0x07;
+            continuation = 3;
+        } else {
+            out.push_back(static_cast<char16_t>(0xFFFD));
+            ++index;
+            continue;
+        }
+        if (index + continuation >= size) {
+            out.push_back(static_cast<char16_t>(0xFFFD));
+            break;
+        }
+        bool valid = true;
+        for (size_t step = 1; step <= continuation; ++step) {
+            const unsigned char follow = static_cast<unsigned char>(text[index + step]);
+            if ((follow & 0xC0) != 0x80) {
+                valid = false;
+                break;
+            }
+            codePoint = (codePoint << 6) | (follow & 0x3F);
+        }
+        index += continuation + 1;
+        if (!valid) {
+            out.push_back(static_cast<char16_t>(0xFFFD));
+            continue;
+        }
+        if (codePoint >= 0x10000) {
+            codePoint -= 0x10000;
+            out.push_back(static_cast<char16_t>(0xD800 + (codePoint >> 10)));
+            out.push_back(static_cast<char16_t>(0xDC00 + (codePoint & 0x3FF)));
+        } else {
+            out.push_back(static_cast<char16_t>(codePoint));
+        }
+    }
 }
 
 extern "C" radek_CFAllocatorRef radek_compat_CFAllocatorGetDefault(void) {
@@ -6891,3 +6999,1409 @@ extern "C" uintptr_t radek_compat___dynamic_cast(uintptr_t a0, uintptr_t a1, uin
 }
 #endif
 
+
+/* ========================================================================== */
+/* Batch 2 (Bioshock/Angry Birds device-report inventory): CoreFoundation     */
+/* queries/characters/percent-escaping/DNS, CoreGraphics rect math,           */
+/* CommonCrypto HMAC (MD5/SHA1/SHA256), OSAtomic, Mach surface, C++ ABI       */
+/* helpers, Blocks runtime, Objective-C property/association helpers.         */
+/* ========================================================================== */
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_NEEDS_CF_RUNTIME)
+
+// CFRange normalisation shared by the batch-2 array accessors: clamp the
+// requested range to the array bounds exactly like CFArrayIsValidRange.
+static inline bool radekCfValidRange(radek_CFIndex rangeLocation, radek_CFIndex rangeLength,
+                                     size_t count, size_t &begin, size_t &end) {
+    if (rangeLength < 0 || rangeLocation < 0) return false;
+    if (static_cast<size_t>(rangeLocation) > count) return false;
+    begin = static_cast<size_t>(rangeLocation);
+    size_t length = static_cast<size_t>(rangeLength);
+    if (begin + length > count) length = count - begin;
+    end = begin + length;
+    return true;
+}
+
+// Content comparison for array/dictionary values: CF strings compare by text
+// (matching kCFTypeArrayCallBacks equal-callback semantics); everything else
+// compares by pointer identity.
+static inline bool radekCfValueEquals(const void *left, const void *right) {
+    if (left == right) return true;
+    const radek_CFRuntime *leftObject = radekCfConst(left);
+    const radek_CFRuntime *rightObject = radekCfConst(right);
+    if (leftObject != nullptr && rightObject != nullptr &&
+        leftObject->kind == RadekCFKind::String && rightObject->kind == RadekCFKind::String) {
+        return leftObject->text == rightObject->text;
+    }
+    return false;
+}
+
+#endif  // CF runtime helpers
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CFArrayContainsValue)
+extern "C" radek_Boolean radek_compat_CFArrayContainsValue(radek_CFArrayRef array, radek_CFRange range,
+                                                           const void *value) {
+    const radek_CFRuntime *object = radekCfConst(array);
+    if (!radekCfIsKind(object, RadekCFKind::Array)) return 0;
+    size_t begin = 0;
+    size_t end = 0;
+    if (!radekCfValidRange(range.location, range.length, object->elements.size(), begin, end)) return 0;
+    for (size_t index = begin; index < end; ++index) {
+        if (radekCfValueEquals(object->elements[index], value)) return 1;
+    }
+    return 0;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CFArrayGetFirstIndexOfValue)
+extern "C" radek_CFIndex radek_compat_CFArrayGetFirstIndexOfValue(radek_CFArrayRef array, radek_CFRange range,
+                                                                  const void *value) {
+    const radek_CFRuntime *object = radekCfConst(array);
+    if (!radekCfIsKind(object, RadekCFKind::Array)) return -1;
+    size_t begin = 0;
+    size_t end = 0;
+    if (!radekCfValidRange(range.location, range.length, object->elements.size(), begin, end)) return -1;
+    for (size_t index = begin; index < end; ++index) {
+        if (radekCfValueEquals(object->elements[index], value)) return static_cast<radek_CFIndex>(index);
+    }
+    return -1;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CFDictionaryAddValue)
+extern "C" radek_Boolean radek_compat_CFDictionaryAddValue(radek_CFMutableDictionaryRef dictionary,
+                                                           const void *key, const void *value) {
+    radek_CFRuntime *object = radekCfMutable(dictionary);
+    if (object == nullptr || object->kind != RadekCFKind::Dictionary) return 0;
+    const radek_CFRuntime *keyObject = radekCfConst(key);
+    const radek_CFRuntime *valueObject = radekCfConst(value);
+    if (keyObject == nullptr || valueObject == nullptr) return 0;
+    for (const auto &pair : object->pairs) {
+        if (radekCfKeyEquals(pair.first, keyObject)) return 0;  // CFDictionaryAddValue never overwrites.
+    }
+    radekCfRetainInternal(keyObject);
+    radekCfRetainInternal(valueObject);
+    object->pairs.emplace_back(keyObject, valueObject);
+    return 1;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CFMakeCollectable)
+extern "C" radek_CFTypeRef radek_compat_CFMakeCollectable(radek_CFTypeRef object) {
+    // Garbage collection does not exist in this runtime; the documented
+    // behaviour of CFMakeCollectable on non-GC builds is to hand the object
+    // back unchanged.
+    return object;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CFStringAppendCharacters)
+extern "C" void radek_compat_CFStringAppendCharacters(radek_CFMutableStringRef string,
+                                                      const radek_UniChar *characters, radek_CFIndex count) {
+    radek_CFRuntime *object = radekCfMutable(string);
+    if (object == nullptr || object->kind != RadekCFKind::String) return;
+    if (characters == nullptr || count <= 0) return;
+    radekCfUtf16ToUtf8(reinterpret_cast<const uint16_t *>(characters), static_cast<size_t>(count),
+                       object->text);
+    object->charsCacheValid = false;  // Any cached UTF-16 view is now stale.
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CFStringCreateWithCharacters)
+extern "C" radek_CFStringRef radek_compat_CFStringCreateWithCharacters(radek_CFAllocatorRef allocator,
+                                                                       const radek_UniChar *characters,
+                                                                       radek_CFIndex count) {
+    (void)allocator;
+    if (characters == nullptr || count < 0) return nullptr;
+    auto *object = new radek_CFRuntime();
+    object->kind = RadekCFKind::String;
+    radekCfUtf16ToUtf8(reinterpret_cast<const uint16_t *>(characters), static_cast<size_t>(count),
+                       object->text);
+    return object;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CFStringGetCharactersPtr)
+extern "C" const radek_UniChar *radek_compat_CFStringGetCharactersPtr(radek_CFStringRef string) {
+    const radek_CFRuntime *object = radekCfConst(string);
+    if (!radekCfIsKind(object, RadekCFKind::String)) return nullptr;
+    if (!object->charsCacheValid) {
+        object->charsCache.clear();
+        radekCfUtf8ToUtf16(object->text, object->charsCache);
+        object->charsCacheValid = true;
+    }
+    return reinterpret_cast<const radek_UniChar *>(object->charsCache.data());
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CFURLCreateStringByAddingPercentEscapes)
+extern "C" radek_CFStringRef radek_compat_CFURLCreateStringByAddingPercentEscapes(
+    radek_CFAllocatorRef allocator, radek_CFStringRef original,
+    radek_CFStringRef charactersToLeaveUnescaped, radek_CFStringRef legalURLCharactersToBeEscaped,
+    radek_CFStringEncoding encoding) {
+    (void)allocator;
+    (void)encoding;  // The runtime stores UTF-8 internally; escapes are computed per UTF-8 byte.
+    const radek_CFRuntime *source = radekCfConst(original);
+    if (!radekCfIsKind(source, RadekCFKind::String)) return nullptr;
+    const radek_CFRuntime *leave = radekCfConst(charactersToLeaveUnescaped);
+    const radek_CFRuntime *force = radekCfConst(legalURLCharactersToBeEscaped);
+    const std::string &leaveText = (leave != nullptr && leave->kind == RadekCFKind::String) ? leave->text : std::string();
+    const std::string &forceText = (force != nullptr && force->kind == RadekCFKind::String) ? force->text : std::string();
+    static const char *hexDigits = "0123456789ABCDEF";
+    std::string escaped;
+    escaped.reserve(source->text.size());
+    for (unsigned char byte : source->text) {
+        const bool unreserved = (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') ||
+                                (byte >= '0' && byte <= '9') || byte == '-' || byte == '.' ||
+                                byte == '_' || byte == '~';
+        const bool legalUrl = unreserved || byte == '/' || byte == ':' || byte == ',' || byte == ';' ||
+                              byte == '?' || byte == '@' || byte == '&' || byte == '=' || byte == '+' ||
+                              byte == '$' || byte == '#' || byte == '[' || byte == ']';
+        bool mustEscape = !legalUrl;
+        if (force != nullptr && forceText.find(static_cast<char>(byte)) != std::string::npos) mustEscape = true;
+        if (leave != nullptr && leaveText.find(static_cast<char>(byte)) != std::string::npos) mustEscape = false;
+        if (mustEscape) {
+            escaped.push_back('%');
+            escaped.push_back(hexDigits[byte >> 4]);
+            escaped.push_back(hexDigits[byte & 0x0F]);
+        } else {
+            escaped.push_back(static_cast<char>(byte));
+        }
+    }
+    auto *object = new radek_CFRuntime();
+    object->kind = RadekCFKind::String;
+    object->text = std::move(escaped);
+    return object;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CFHostCreateWithName)
+extern "C" radek_CFTypeRef radek_compat_CFHostCreateWithName(radek_CFAllocatorRef allocator,
+                                                             radek_CFStringRef hostname) {
+    (void)allocator;
+    const radek_CFRuntime *name = radekCfConst(hostname);
+    if (!radekCfIsKind(name, RadekCFKind::String)) return nullptr;
+    auto *object = new radek_CFRuntime();
+    object->kind = RadekCFKind::Host;
+    object->hostName = name->text;
+    return object;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CFHostStartInfoResolution)
+extern "C" radek_Boolean radek_compat_CFHostStartInfoResolution(radek_CFTypeRef host, int32_t info,
+                                                                void *error) {
+    radek_CFRuntime *object = radekCfMutable(const_cast<radek_CFRuntime *>(host));
+    if (object == nullptr || object->kind != RadekCFKind::Host) return 0;
+    if (info != 0) return 0;  // kCFHostAddresses is the only resolution this runtime performs.
+    // CFStreamError is {int32 domain, int32 error}; kCFStreamErrorDomainPOSIX == 2.
+    auto *streamError = static_cast<int32_t *>(error);
+    struct addrinfo hints;
+    std::memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *results = nullptr;
+    const int status = getaddrinfo(object->hostName.c_str(), nullptr, &hints, &results);
+    if (status != 0 || results == nullptr) {
+        object->hostAddresses.clear();
+        object->hostResolved = false;
+        if (streamError != nullptr) {
+            streamError[0] = 2;             // kCFStreamErrorDomainPOSIX
+            streamError[1] = (status != 0) ? errno : EAI_FAIL;
+        }
+        return 0;
+    }
+    object->hostAddresses.clear();
+    for (struct addrinfo *entry = results; entry != nullptr; entry = entry->ai_next) {
+        std::vector<uint8_t> storage(sizeof(struct sockaddr_storage), uint8_t{0});
+        std::memcpy(storage.data(), entry->ai_addr, static_cast<size_t>(entry->ai_addrlen));
+        object->hostAddresses.push_back(std::move(storage));
+    }
+    freeaddrinfo(results);
+    object->hostResolved = true;
+    if (streamError != nullptr) {
+        streamError[0] = 0;
+        streamError[1] = 0;
+    }
+    return 1;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CFHostGetAddressing)
+extern "C" radek_CFArrayRef radek_compat_CFHostGetAddressing(radek_CFTypeRef host,
+                                                             radek_Boolean *hasBeenResolved) {
+    const radek_CFRuntime *object = radekCfConst(host);
+    if (object == nullptr || object->kind != RadekCFKind::Host) return nullptr;
+    if (hasBeenResolved != nullptr) *hasBeenResolved = object->hostResolved ? 1 : 0;
+    if (!object->hostResolved) return nullptr;
+    auto *array = new radek_CFRuntime();
+    array->kind = RadekCFKind::Array;
+    array->elements.reserve(object->hostAddresses.size());
+    for (const std::vector<uint8_t> &address : object->hostAddresses) {
+        auto *data = new radek_CFRuntime();
+        data->kind = RadekCFKind::Data;
+        data->bytes = address;
+        radekCfRetainInternal(data);  // The array retains on append; balance the create reference.
+        array->elements.push_back(data);
+        radekCfReleaseInternal(data);
+    }
+    return array;
+}
+#endif
+
+/* --- CoreGraphics rect math (CGRect is an HFA of four floats on arm32) ---- */
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CGRectGetHeight)
+extern "C" float radek_compat_CGRectGetHeight(radek_CGRect rect) { return rect.size.height; }
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CGRectGetMaxX)
+extern "C" float radek_compat_CGRectGetMaxX(radek_CGRect rect) {
+    return rect.origin.x + rect.size.width;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CGRectGetMidX)
+extern "C" float radek_compat_CGRectGetMidX(radek_CGRect rect) {
+    return rect.origin.x + rect.size.width * 0.5f;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CGRectGetMidY)
+extern "C" float radek_compat_CGRectGetMidY(radek_CGRect rect) {
+    return rect.origin.y + rect.size.height * 0.5f;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CGRectGetMinY)
+extern "C" float radek_compat_CGRectGetMinY(radek_CGRect rect) { return rect.origin.y; }
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CGRectGetWidth)
+extern "C" float radek_compat_CGRectGetWidth(radek_CGRect rect) { return rect.size.width; }
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CGRectIsNull)
+extern "C" radek_Boolean radek_compat_CGRectIsNull(radek_CGRect rect) {
+    const bool infinite = std::isinf(rect.origin.x) && std::isinf(rect.origin.y) &&
+                          rect.size.width == 0.0f && rect.size.height == 0.0f;
+    return infinite ? 1 : 0;  // CGRectNull is {{+inf, +inf}, {0, 0}}.
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CGRectIsEmpty)
+extern "C" radek_Boolean radek_compat_CGRectIsEmpty(radek_CGRect rect) {
+    if (radek_compat_CGRectIsNull(rect)) return 1;
+    return (rect.size.width <= 0.0f || rect.size.height <= 0.0f) ? 1 : 0;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CGRectIntegral)
+extern "C" radek_CGRect radek_compat_CGRectIntegral(radek_CGRect rect) {
+    if (radek_compat_CGRectIsNull(rect)) return rect;
+    const float left = floorf(rect.origin.x);
+    const float top = floorf(rect.origin.y);
+    radek_CGRect integral;
+    integral.origin.x = left;
+    integral.origin.y = top;
+    integral.size.width = ceilf(rect.origin.x + rect.size.width) - left;
+    integral.size.height = ceilf(rect.origin.y + rect.size.height) - top;
+    return integral;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CGRectOffset)
+extern "C" radek_CGRect radek_compat_CGRectOffset(radek_CGRect rect, float dx, float dy) {
+    if (radek_compat_CGRectIsNull(rect)) return rect;
+    rect.origin.x += dx;
+    rect.origin.y += dy;
+    return rect;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CGRectIntersectsRect)
+extern "C" radek_Boolean radek_compat_CGRectIntersectsRect(radek_CGRect left, radek_CGRect right) {
+    if (radek_compat_CGRectIsEmpty(left) || radek_compat_CGRectIsEmpty(right)) return 0;
+    const float overlapX = std::min(left.origin.x + left.size.width, right.origin.x + right.size.width) -
+                           std::max(left.origin.x, right.origin.x);
+    const float overlapY = std::min(left.origin.y + left.size.height, right.origin.y + right.size.height) -
+                           std::max(left.origin.y, right.origin.y);
+    return (overlapX > 0.0f && overlapY > 0.0f) ? 1 : 0;
+}
+#endif
+
+/* --- CommonCrypto HMAC: real incremental MD5/SHA1/SHA256 -------------------- */
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CCHmac) || \
+    defined(RADEK_API_radek_compat_CCHmacInit) || defined(RADEK_API_radek_compat_CCHmacUpdate) || \
+    defined(RADEK_API_radek_compat_CCHmacFinal)
+
+namespace {
+
+struct RadekDigest {
+    uint32_t state[8];
+    uint8_t buffer[64];
+    uint64_t totalBytes;
+    uint32_t buffered;
+};
+
+struct RadekDigestVtable {
+    void (*initState)(uint32_t *state);
+    void (*compress)(uint32_t *state, const uint8_t block[64]);
+    uint32_t digestLength;
+};
+
+inline uint32_t radekRotl32(uint32_t value, unsigned bits) {
+    return (value << bits) | (value >> (32u - bits));
+}
+inline uint32_t radekRotr32(uint32_t value, unsigned bits) {
+    return (value >> bits) | (value << (32u - bits));
+}
+inline uint32_t radekLoadLe32(const uint8_t *bytes) {
+    return static_cast<uint32_t>(bytes[0]) | (static_cast<uint32_t>(bytes[1]) << 8) |
+           (static_cast<uint32_t>(bytes[2]) << 16) | (static_cast<uint32_t>(bytes[3]) << 24);
+}
+inline uint32_t radekLoadBe32(const uint8_t *bytes) {
+    return (static_cast<uint32_t>(bytes[0]) << 24) | (static_cast<uint32_t>(bytes[1]) << 16) |
+           (static_cast<uint32_t>(bytes[2]) << 8) | static_cast<uint32_t>(bytes[3]);
+}
+
+/* -- MD5 (RFC 1321) -- */
+const uint32_t kRadekMd5K[64] = {
+    0xD76AA478u, 0xE8C7B756u, 0x242070DBu, 0xC1BDCEEEu, 0xF57C0FAFu, 0x4787C62Au, 0xA8304613u, 0xFD469501u,
+    0x698098D8u, 0x8B44F7AFu, 0xFFFF5BB1u, 0x895CD7BEu, 0x6B901122u, 0xFD987193u, 0xA679438Eu, 0x49B40821u,
+    0xF61E2562u, 0xC040B340u, 0x265E5A51u, 0xE9B6C7AAu, 0xD62F105Du, 0x02441453u, 0xD8A1E681u, 0xE7D3FBC8u,
+    0x21E1CDE6u, 0xC33707D6u, 0xF4D50D87u, 0x455A14EDu, 0xA9E3E905u, 0xFCEFA3F8u, 0x676F02D9u, 0x8D2A4C8Au,
+    0xFFFA3942u, 0x8771F681u, 0x6D9D6122u, 0xFDE5380Cu, 0xA4BEEA44u, 0x4BDECFA9u, 0xF6BB4B60u, 0xBEBFBC70u,
+    0x289B7EC6u, 0xEAA127FAu, 0xD4EF3085u, 0x04881D05u, 0xD9D4D039u, 0xE6DB99E5u, 0x1FA27CF8u, 0xC4AC5665u,
+    0xF4292244u, 0x432AFF97u, 0xAB9423A7u, 0xFC93A039u, 0x655B59C3u, 0x8F0CCC92u, 0xFFEFF47Du, 0x85845DD1u,
+    0x6FA87E4Fu, 0xFE2CE6E0u, 0xA3014314u, 0x4E0811A1u, 0xF7537E82u, 0xBD3AF235u, 0x2AD7D2BBu, 0xEB86D391u,
+};
+const unsigned kRadekMd5Shift[64] = {
+    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+    5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+    4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+    6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+};
+
+void radekMd5Init(uint32_t *state) {
+    state[0] = 0x67452301u;
+    state[1] = 0xEFCDAB89u;
+    state[2] = 0x98BADCFEu;
+    state[3] = 0x10325476u;
+}
+
+void radekMd5Compress(uint32_t *state, const uint8_t block[64]) {
+    uint32_t words[16];
+    for (int i = 0; i < 16; ++i) words[i] = radekLoadLe32(block + 4 * i);
+    uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
+    for (int i = 0; i < 64; ++i) {
+        uint32_t f = 0;
+        int g = 0;
+        if (i < 16) {
+            f = (b & c) | (~b & d);
+            g = i;
+        } else if (i < 32) {
+            f = (d & b) | (~d & c);
+            g = (5 * i + 1) & 15;
+        } else if (i < 48) {
+            f = b ^ c ^ d;
+            g = (3 * i + 5) & 15;
+        } else {
+            f = c ^ (b | ~d);
+            g = (7 * i) & 15;
+        }
+        const uint32_t temp = d;
+        d = c;
+        c = b;
+        b = b + radekRotl32(a + f + kRadekMd5K[i] + words[g], kRadekMd5Shift[i]);
+        a = temp;
+    }
+    state[0] += a;
+    state[1] += b;
+    state[2] += c;
+    state[3] += d;
+}
+
+/* -- SHA-1 (FIPS 180-1) -- */
+void radekSha1Init(uint32_t *state) {
+    state[0] = 0x67452301u;
+    state[1] = 0xEFCDAB89u;
+    state[2] = 0x98BADCFEu;
+    state[3] = 0x10325476u;
+    state[4] = 0xC3D2E1F0u;
+}
+
+void radekSha1Compress(uint32_t *state, const uint8_t block[64]) {
+    uint32_t words[80];
+    for (int i = 0; i < 16; ++i) words[i] = radekLoadBe32(block + 4 * i);
+    for (int i = 16; i < 80; ++i) {
+        words[i] = radekRotl32(words[i - 3] ^ words[i - 8] ^ words[i - 14] ^ words[i - 16], 1);
+    }
+    uint32_t a = state[0], b = state[1], c = state[2], d = state[3], e = state[4];
+    for (int i = 0; i < 80; ++i) {
+        uint32_t f = 0;
+        uint32_t k = 0;
+        if (i < 20) {
+            f = (b & c) | (~b & d);
+            k = 0x5A827999u;
+        } else if (i < 40) {
+            f = b ^ c ^ d;
+            k = 0x6ED9EBA1u;
+        } else if (i < 60) {
+            f = (b & c) | (b & d) | (c & d);
+            k = 0x8F1BBCDCu;
+        } else {
+            f = b ^ c ^ d;
+            k = 0xCA62C1D6u;
+        }
+        const uint32_t temp = radekRotl32(a, 5) + f + e + k + words[i];
+        e = d;
+        d = c;
+        c = radekRotl32(b, 30);
+        b = a;
+        a = temp;
+    }
+    state[0] += a;
+    state[1] += b;
+    state[2] += c;
+    state[3] += d;
+    state[4] += e;
+}
+
+/* -- SHA-256 (FIPS 180-4) -- */
+const uint32_t kRadekSha256K[64] = {
+    0x428A2F98u, 0x71374491u, 0xB5C0FBCFu, 0xE9B5DBA5u, 0x3956C25Bu, 0x59F111F1u, 0x923F82A4u, 0xAB1C5ED5u,
+    0xD807AA98u, 0x12835B01u, 0x243185BEu, 0x550C7DC3u, 0x72BE5D74u, 0x80DEB1FEu, 0x9BDC06A7u, 0xC19BF174u,
+    0xE49B69C1u, 0xEFBE4786u, 0x0FC19DC6u, 0x240CA1CCu, 0x2DE92C6Fu, 0x4A7484AAu, 0x5CB0A9DCu, 0x76F988DAu,
+    0x983E5152u, 0xA831C66Du, 0xB00327C8u, 0xBF597FC7u, 0xC6E00BF3u, 0xD5A79147u, 0x06CA6351u, 0x14292967u,
+    0x27B70A85u, 0x2E1B2138u, 0x4D2C6DFCu, 0x53380D13u, 0x650A7354u, 0x766A0ABBu, 0x81C2C92Eu, 0x92722C85u,
+    0xA2BFE8A1u, 0xA81A664Bu, 0xC24B8B70u, 0xC76C51A3u, 0xD192E819u, 0xD6990624u, 0xF40E3585u, 0x106AA070u,
+    0x19A4C116u, 0x1E376C08u, 0x2748774Cu, 0x34B0BCB5u, 0x391C0CB3u, 0x4ED8AA4Au, 0x5B9CCA4Fu, 0x682E6FF3u,
+    0x748F82EEu, 0x78A5636Fu, 0x84C87814u, 0x8CC70208u, 0x90BEFFFAu, 0xA4506CEBu, 0xBEF9A3F7u, 0xC67178F2u,
+};
+
+void radekSha256Init(uint32_t *state) {
+    state[0] = 0x6A09E667u;
+    state[1] = 0xBB67AE85u;
+    state[2] = 0x3C6EF372u;
+    state[3] = 0xA54FF53Au;
+    state[4] = 0x510E527Fu;
+    state[5] = 0x9B05688Cu;
+    state[6] = 0x1F83D9ABu;
+    state[7] = 0x5BE0CD19u;
+}
+
+void radekSha256Compress(uint32_t *state, const uint8_t block[64]) {
+    uint32_t words[64];
+    for (int i = 0; i < 16; ++i) words[i] = radekLoadBe32(block + 4 * i);
+    for (int i = 16; i < 64; ++i) {
+        const uint32_t s0 = radekRotr32(words[i - 15], 7) ^ radekRotr32(words[i - 15], 18) ^ (words[i - 15] >> 3);
+        const uint32_t s1 = radekRotr32(words[i - 2], 17) ^ radekRotr32(words[i - 2], 19) ^ (words[i - 2] >> 10);
+        words[i] = words[i - 16] + s0 + words[i - 7] + s1;
+    }
+    uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
+    uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
+    for (int i = 0; i < 64; ++i) {
+        const uint32_t bigS1 = radekRotr32(e, 6) ^ radekRotr32(e, 11) ^ radekRotr32(e, 25);
+        const uint32_t ch = (e & f) ^ (~e & g);
+        const uint32_t temp1 = h + bigS1 + ch + kRadekSha256K[i] + words[i];
+        const uint32_t bigS0 = radekRotr32(a, 2) ^ radekRotr32(a, 13) ^ radekRotr32(a, 22);
+        const uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+        const uint32_t temp2 = bigS0 + maj;
+        h = g;
+        g = f;
+        f = e;
+        e = d + temp1;
+        d = c;
+        c = b;
+        b = a;
+        a = temp1 + temp2;
+    }
+    state[0] += a;
+    state[1] += b;
+    state[2] += c;
+    state[3] += d;
+    state[4] += e;
+    state[5] += f;
+    state[6] += g;
+    state[7] += h;
+}
+
+const RadekDigestVtable *radekDigestVtable(uint32_t algorithm) {
+    switch (algorithm) {
+        case RADEK_kCCHmacAlgSHA1: {
+            static const RadekDigestVtable vtable = {&radekSha1Init, &radekSha1Compress, 20};
+            return &vtable;
+        }
+        case RADEK_kCCHmacAlgMD5: {
+            static const RadekDigestVtable vtable = {&radekMd5Init, &radekMd5Compress, 16};
+            return &vtable;
+        }
+        case RADEK_kCCHmacAlgSHA256: {
+            static const RadekDigestVtable vtable = {&radekSha256Init, &radekSha256Compress, 32};
+            return &vtable;
+        }
+        default:
+            return nullptr;
+    }
+}
+
+void radekDigestInit(RadekDigest &digest, const RadekDigestVtable &vtable) {
+    std::memset(&digest, 0, sizeof(digest));
+    vtable.initState(digest.state);
+}
+
+void radekDigestUpdate(RadekDigest &digest, const RadekDigestVtable &vtable, const uint8_t *data,
+                       size_t length) {
+    digest.totalBytes += length;
+    while (length > 0) {
+        const size_t space = 64 - digest.buffered;
+        const size_t chunk = length < space ? length : space;
+        std::memcpy(digest.buffer + digest.buffered, data, chunk);
+        digest.buffered += static_cast<uint32_t>(chunk);
+        data += chunk;
+        length -= chunk;
+        if (digest.buffered == 64) {
+            vtable.compress(digest.state, digest.buffer);
+            digest.buffered = 0;
+        }
+    }
+}
+
+void radekDigestFinal(RadekDigest &digest, const RadekDigestVtable &vtable, uint8_t *out) {
+    // MD5 pads with a LITTLE-endian 64-bit length (RFC 1321); SHA-1/SHA-256
+    // pad with a big-endian one, and also serialise their state big-endian.
+    const bool littleEndian = (vtable.initState == &radekMd5Init);
+    const uint64_t totalBits = digest.totalBytes * 8u;
+    uint8_t pad = 0x80;
+    radekDigestUpdate(digest, vtable, &pad, 1);
+    uint8_t zero = 0;
+    while (digest.buffered != 56) radekDigestUpdate(digest, vtable, &zero, 1);
+    uint8_t lengthBytes[8];
+    for (int i = 0; i < 8; ++i) {
+        lengthBytes[i] = littleEndian ? static_cast<uint8_t>(totalBits >> (8 * i))
+                                      : static_cast<uint8_t>(totalBits >> (56 - 8 * i));
+    }
+    radekDigestUpdate(digest, vtable, lengthBytes, 8);
+    for (uint32_t word = 0; word * 4 < vtable.digestLength; ++word) {
+        if (littleEndian) {
+            out[4 * word + 0] = static_cast<uint8_t>(digest.state[word]);
+            out[4 * word + 1] = static_cast<uint8_t>(digest.state[word] >> 8);
+            out[4 * word + 2] = static_cast<uint8_t>(digest.state[word] >> 16);
+            out[4 * word + 3] = static_cast<uint8_t>(digest.state[word] >> 24);
+        } else {
+            out[4 * word + 0] = static_cast<uint8_t>(digest.state[word] >> 24);
+            out[4 * word + 1] = static_cast<uint8_t>(digest.state[word] >> 16);
+            out[4 * word + 2] = static_cast<uint8_t>(digest.state[word] >> 8);
+            out[4 * word + 3] = static_cast<uint8_t>(digest.state[word]);
+        }
+    }
+}
+
+// Darwin's CCHmacContext is uint32_t ctx[96] (384 bytes). The incremental
+// state below is 220 bytes, so it always fits inside caller storage.
+struct RadekHmacContext {
+    uint32_t magic;  // "RHMC"
+    uint32_t algorithm;
+    uint32_t digestLength;
+    uint32_t padding;
+    RadekDigest inner;
+    RadekDigest outer;
+};
+static_assert(sizeof(RadekHmacContext) <= sizeof(radek_CCHmacContext),
+              "HMAC state must fit Darwin's CCHmacContext");
+const uint32_t kRadekHmacMagic = 0x52484D43u;
+
+static inline RadekHmacContext *radekHmacContext(radek_CCHmacContext *context) {
+    auto *state = reinterpret_cast<RadekHmacContext *>(context);
+    return (state != nullptr && state->magic == kRadekHmacMagic) ? state : nullptr;
+}
+
+static inline void radekHmacInit(radek_CCHmacContext *context, uint32_t algorithm, const uint8_t *key,
+                                 size_t keyLength) {
+    const RadekDigestVtable *vtable = radekDigestVtable(algorithm);
+    auto *state = reinterpret_cast<RadekHmacContext *>(context);
+    if (context == nullptr || vtable == nullptr) return;
+    std::memset(state, 0, sizeof(*state));
+    state->magic = kRadekHmacMagic;
+    state->algorithm = algorithm;
+    state->digestLength = vtable->digestLength;
+    uint8_t keyBlock[64];
+    std::memset(keyBlock, 0, sizeof(keyBlock));
+    if (keyLength > 64) {
+        RadekDigest hashed;
+        radekDigestInit(hashed, *vtable);
+        radekDigestUpdate(hashed, *vtable, key, keyLength);
+        uint8_t digest[32];
+        radekDigestFinal(hashed, *vtable, digest);
+        std::memcpy(keyBlock, digest, vtable->digestLength);
+    } else if (key != nullptr && keyLength > 0) {
+        std::memcpy(keyBlock, key, keyLength);
+    }
+    uint8_t padBlock[64];
+    for (int i = 0; i < 64; ++i) padBlock[i] = keyBlock[i] ^ 0x36;
+    radekDigestInit(state->inner, *vtable);
+    radekDigestUpdate(state->inner, *vtable, padBlock, 64);
+    for (int i = 0; i < 64; ++i) padBlock[i] = keyBlock[i] ^ 0x5C;
+    radekDigestInit(state->outer, *vtable);
+    radekDigestUpdate(state->outer, *vtable, padBlock, 64);
+}
+
+}  // namespace
+
+#endif  // CCHmac selection
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CCHmacInit)
+extern "C" void radek_compat_CCHmacInit(radek_CCHmacContext *context, radek_CCHmacAlgorithm algorithm,
+                                        const void *key, uintptr_t keyLength) {
+    radekHmacInit(context, algorithm, static_cast<const uint8_t *>(key), keyLength);
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CCHmacUpdate)
+extern "C" void radek_compat_CCHmacUpdate(radek_CCHmacContext *context, const void *data,
+                                          uintptr_t dataLength) {
+    RadekHmacContext *state = radekHmacContext(context);
+    if (state == nullptr) return;
+    const RadekDigestVtable *vtable = radekDigestVtable(state->algorithm);
+    if (vtable == nullptr) return;
+    radekDigestUpdate(state->inner, *vtable, static_cast<const uint8_t *>(data), dataLength);
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CCHmacFinal)
+extern "C" void radek_compat_CCHmacFinal(radek_CCHmacContext *context, void *macOut) {
+    RadekHmacContext *state = radekHmacContext(context);
+    if (state == nullptr || macOut == nullptr) return;
+    const RadekDigestVtable *vtable = radekDigestVtable(state->algorithm);
+    if (vtable == nullptr) return;
+    uint8_t innerDigest[32];
+    radekDigestFinal(state->inner, *vtable, innerDigest);
+    radekDigestUpdate(state->outer, *vtable, innerDigest, vtable->digestLength);
+    radekDigestFinal(state->outer, *vtable, static_cast<uint8_t *>(macOut));
+    state->magic = 0;  // Context is consumed, exactly like CCHmacFinal.
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CCHmac)
+extern "C" void radek_compat_CCHmac(radek_CCHmacAlgorithm algorithm, const void *key, uintptr_t keyLength,
+                                    const void *data, uintptr_t dataLength, void *macOut) {
+    // Self-contained: never calls the Init/Update/Final entry points, so a
+    // per-IPA build selecting only _CCHmac stays link-complete.
+    radek_CCHmacContext context;
+    radekHmacInit(&context, algorithm, static_cast<const uint8_t *>(key), keyLength);
+    RadekHmacContext *state = radekHmacContext(&context);
+    if (state == nullptr || macOut == nullptr) return;
+    const RadekDigestVtable *vtable = radekDigestVtable(state->algorithm);
+    if (vtable == nullptr) return;
+    radekDigestUpdate(state->inner, *vtable, static_cast<const uint8_t *>(data), dataLength);
+    uint8_t innerDigest[32];
+    radekDigestFinal(state->inner, *vtable, innerDigest);
+    radekDigestUpdate(state->outer, *vtable, innerDigest, vtable->digestLength);
+    radekDigestFinal(state->outer, *vtable, static_cast<uint8_t *>(macOut));
+}
+#endif
+
+/* --- OSAtomic (libkern) --------------------------------------------------- */
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_OSAtomicAdd32Barrier)
+extern "C" int32_t radek_compat_OSAtomicAdd32Barrier(int32_t delta, volatile int32_t *value) {
+    if (value == nullptr) return 0;
+    return __atomic_add_fetch(value, delta, __ATOMIC_SEQ_CST);  // Returns the new value.
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_OSAtomicCompareAndSwap32Barrier)
+extern "C" radek_Boolean radek_compat_OSAtomicCompareAndSwap32Barrier(int32_t oldValue, int32_t newValue,
+                                                                      volatile int32_t *value) {
+    if (value == nullptr) return 0;
+    return __atomic_compare_exchange_n(value, &oldValue, newValue, false, __ATOMIC_SEQ_CST,
+                                       __ATOMIC_SEQ_CST)
+               ? 1
+               : 0;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_OSAtomicCompareAndSwapPtrBarrier)
+extern "C" radek_Boolean radek_compat_OSAtomicCompareAndSwapPtrBarrier(void *oldValue, void *newValue,
+                                                                       void *volatile *value) {
+    if (value == nullptr) return 0;
+    return __atomic_compare_exchange_n(value, &oldValue, newValue, false, __ATOMIC_SEQ_CST,
+                                       __ATOMIC_SEQ_CST)
+               ? 1
+               : 0;
+}
+#endif
+
+/* --- Mach kernel surface: ports, host info, semaphores, timing ------------ */
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_mach_host_self)
+extern "C" radek_mach_port_t radek_compat_mach_host_self(void) {
+    return 0x103u;  // Stable synthetic host port name; Mach IPC itself is absent.
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_mach_task_self_)
+extern "C" radek_mach_port_t radek_compat_mach_task_self_(void) {
+    return 0x103u;  // Stable synthetic task port name, matching mach_host_self.
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_host_page_size)
+extern "C" radek_kern_return_t radek_compat_host_page_size(radek_mach_port_t host, uintptr_t *pageSize) {
+    (void)host;
+    if (pageSize == nullptr) return 4;  // KERN_INVALID_ARGUMENT
+    const long page = sysconf(_SC_PAGESIZE);
+    *pageSize = (page > 0) ? static_cast<uintptr_t>(page) : 4096u;
+    return 0;  // KERN_SUCCESS
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_host_statistics)
+namespace {
+// Reads MemTotal / MemFree / MemAvailable from /proc/meminfo, in KiB.
+bool radekReadMemInfo(long long &totalKb, long long &freeKb, long long &availableKb) {
+    totalKb = freeKb = availableKb = 0;
+    FILE *stream = fopen("/proc/meminfo", "r");
+    if (stream == nullptr) return false;
+    char line[128];
+    while (fgets(line, sizeof(line), stream) != nullptr) {
+        long long value = 0;
+        if (sscanf(line, "MemTotal: %lld kB", &value) == 1) totalKb = value;
+        if (sscanf(line, "MemFree: %lld kB", &value) == 1) freeKb = value;
+        if (sscanf(line, "MemAvailable: %lld kB", &value) == 1) availableKb = value;
+    }
+    fclose(stream);
+    return totalKb > 0;
+}
+}  // namespace
+
+extern "C" radek_kern_return_t radek_compat_host_statistics(radek_mach_port_t host, int32_t flavor,
+                                                            void *info, uint32_t *infoCount) {
+    (void)host;
+    if (info == nullptr || infoCount == nullptr) return 4;  // KERN_INVALID_ARGUMENT
+    auto *words = static_cast<uint32_t *>(info);
+    if (flavor == 2) {  // HOST_VM_INFO
+        const uint32_t hostVmInfoCount = 23;  // sizeof(struct host_vm_info) / sizeof(natural_t)
+        if (*infoCount < hostVmInfoCount) return 4;
+        std::memset(words, 0, hostVmInfoCount * sizeof(uint32_t));
+        long long totalKb = 0, freeKb = 0, availableKb = 0;
+        if (radekReadMemInfo(totalKb, freeKb, availableKb)) {
+            const auto toPages = [](long long kb) {
+                return static_cast<uint32_t>((kb * 1024) / 4096);
+            };
+            words[0] = toPages(freeKb);                              // free_count
+            words[1] = (availableKb > freeKb) ? toPages(availableKb - freeKb) : 0;  // active_count
+            words[2] = (totalKb > availableKb) ? toPages(totalKb - availableKb) : 0;  // inactive_count
+        }
+        *infoCount = hostVmInfoCount;
+        return 0;  // KERN_SUCCESS
+    }
+    if (flavor == 3) {  // HOST_CPU_LOAD_INFO: 4 tick counters.
+        if (*infoCount < 4) return 4;
+        std::memset(words, 0, 4 * sizeof(uint32_t));
+        *infoCount = 4;
+        return 0;
+    }
+    return 4;  // Unsupported flavor: report the argument as invalid, like Mach does.
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_mach_wait_until)
+extern "C" radek_kern_return_t radek_compat_mach_wait_until(uint64_t deadlineNanoseconds) {
+    // radek mach_absolute_time runs on CLOCK_MONOTONIC nanoseconds, so the
+    // deadline is directly comparable.
+    struct timespec deadline;
+    deadline.tv_sec = static_cast<time_t>(deadlineNanoseconds / 1000000000ull);
+    deadline.tv_nsec = static_cast<long>(deadlineNanoseconds % 1000000000ull);
+    while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, nullptr) == EINTR) {
+    }
+    return 0;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_semaphore_create) || \
+    defined(RADEK_API_radek_compat_semaphore_destroy) || defined(RADEK_API_radek_compat_semaphore_signal) || \
+    defined(RADEK_API_radek_compat_semaphore_wait)
+namespace {
+
+struct RadekMachSemaphore {
+    std::mutex mutex;
+    std::condition_variable condition;
+    int count = 0;
+};
+
+std::mutex &radekSemaphoreTableMutex() {
+    static std::mutex tableMutex;
+    return tableMutex;
+}
+
+std::unordered_map<uint32_t, std::shared_ptr<RadekMachSemaphore>> &radekSemaphoreTable() {
+    static std::unordered_map<uint32_t, std::shared_ptr<RadekMachSemaphore>> table;
+    return table;
+}
+
+static inline std::shared_ptr<RadekMachSemaphore> radekSemaphoreFind(uint32_t port) {
+    std::lock_guard<std::mutex> lock(radekSemaphoreTableMutex());
+    auto found = radekSemaphoreTable().find(port);
+    return found == radekSemaphoreTable().end() ? nullptr : found->second;
+}
+
+}  // namespace
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_semaphore_create)
+extern "C" radek_kern_return_t radek_compat_semaphore_create(radek_mach_port_t task,
+                                                             radek_mach_port_t *semaphore, int32_t policy,
+                                                             int32_t value) {
+    (void)task;
+    (void)policy;
+    if (semaphore == nullptr) return 4;
+    auto state = std::make_shared<RadekMachSemaphore>();
+    state->count = value;
+    static uint32_t nextPort = 0x4000u;
+    std::lock_guard<std::mutex> lock(radekSemaphoreTableMutex());
+    const uint32_t port = nextPort++;
+    radekSemaphoreTable().emplace(port, std::move(state));
+    *semaphore = port;
+    return 0;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_semaphore_destroy)
+extern "C" radek_kern_return_t radek_compat_semaphore_destroy(radek_mach_port_t task,
+                                                              radek_mach_port_t semaphore) {
+    (void)task;
+    std::lock_guard<std::mutex> lock(radekSemaphoreTableMutex());
+    return radekSemaphoreTable().erase(semaphore) > 0 ? 0 : 4;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_semaphore_signal)
+extern "C" radek_kern_return_t radek_compat_semaphore_signal(radek_mach_port_t semaphore) {
+    auto state = radekSemaphoreFind(semaphore);
+    if (state == nullptr) return 4;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        ++state->count;
+    }
+    state->condition.notify_one();
+    return 0;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_semaphore_wait)
+extern "C" radek_kern_return_t radek_compat_semaphore_wait(radek_mach_port_t semaphore,
+                                                           radek_mach_msg_timeout_t timeout) {
+    auto state = radekSemaphoreFind(semaphore);
+    if (state == nullptr) return 4;
+    std::unique_lock<std::mutex> lock(state->mutex);
+    const auto available = [&state] { return state->count > 0; };
+    if (timeout == 0xFFFFFFFFu) {  // MACH_MSG_TIMEOUT_NEVER
+        state->condition.wait(lock, available);
+    } else {
+        if (!state->condition.wait_for(lock, std::chrono::milliseconds(timeout), available)) {
+            return 49;  // KERN_OPERATION_TIMED_OUT
+        }
+    }
+    --state->count;
+    return 0;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_task_info)
+extern "C" radek_kern_return_t radek_compat_task_info(radek_mach_port_t task, int32_t flavor, void *info,
+                                                      uint32_t *infoCount) {
+    (void)task;
+    if (info == nullptr || infoCount == nullptr || *infoCount == 0) return 4;  // KERN_INVALID_ARGUMENT
+    auto *words = static_cast<uint32_t *>(info);
+    const size_t bytes = static_cast<size_t>(*infoCount) * sizeof(uint32_t);
+    std::memset(words, 0, bytes);
+    if (flavor == 4 || flavor == 14 || flavor == 20) {
+        // TASK_BASIC_INFO / TASK_BASIC_INFO_2 / MACH_TASK_BASIC_INFO all begin
+        // with {user_time, system_time, policy, suspend_count, virtual_size,
+        // resident_size, ...}; fill the two sizes from the process itself.
+        long vmSizeKb = -1;
+        long vmRssKb = -1;
+        FILE *stream = fopen("/proc/self/status", "r");
+        if (stream != nullptr) {
+            char line[128];
+            while (fgets(line, sizeof(line), stream) != nullptr) {
+                long value = 0;
+                if (sscanf(line, "VmSize: %ld kB", &value) == 1) vmSizeKb = value;
+                if (sscanf(line, "VmRSS: %ld kB", &value) == 1) vmRssKb = value;
+            }
+            fclose(stream);
+        }
+        // Word layout: user_time(2), system_time(2), policy(1), suspend_count(1),
+        // virtual_size(1), resident_size(1).
+        if (bytes >= 8 * sizeof(uint32_t)) {
+            if (vmSizeKb >= 0) words[6] = static_cast<uint32_t>(vmSizeKb) * 1024u;
+            if (vmRssKb >= 0) words[7] = static_cast<uint32_t>(vmRssKb) * 1024u;
+        }
+    }
+    return 0;  // KERN_SUCCESS: the zero-filled info struct is a valid answer.
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_thread_policy_set)
+extern "C" radek_kern_return_t radek_compat_thread_policy_set(uint32_t thread, int32_t flavor,
+                                                              void *policy, uint32_t count) {
+    (void)thread;
+    (void)flavor;
+    (void)policy;
+    (void)count;
+    // Thread QoS/priority policy has no portable bionic equivalent reachable
+    // from here; Darwin returns KERN_SUCCESS for well-formed policy requests,
+    // and accepting them keeps converted scheduler glue running.
+    return 0;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_pthread_mach_thread_np) || \
+    defined(RADEK_API_radek_compat_pthread_threadid_np)
+namespace {
+// pthread_t is an integer on bionic/glibc and a pointer elsewhere; fold both
+// into a uintptr_t without tripping either cast rule. The template form makes
+// the untaken branch a discarded statement, so the reinterpret_cast is never
+// instantiated for integer pthread_t targets.
+template <typename PthreadHandle>
+static inline uintptr_t radekPthreadHandleBitsImpl(PthreadHandle thread) {
+    if constexpr (std::is_pointer<PthreadHandle>::value) {
+        return reinterpret_cast<uintptr_t>(thread);
+    } else {
+        return static_cast<uintptr_t>(thread);
+    }
+}
+static inline uintptr_t radekPthreadHandleBits(pthread_t thread) {
+    return radekPthreadHandleBitsImpl(thread);
+}
+}  // namespace
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_pthread_mach_thread_np)
+extern "C" uint64_t radek_compat_pthread_mach_thread_np(pthread_t thread) {
+    // A stable, non-zero identifier derived from the thread handle. Mach port
+    // names are opaque per-thread handles; callers only compare or log them.
+    const uint64_t value = static_cast<uint64_t>(radekPthreadHandleBits(thread));
+    return (value & 0x7FFFFFFFull) != 0 ? (value & 0x7FFFFFFFull) : 1u;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_pthread_threadid_np)
+extern "C" int32_t radek_compat_pthread_threadid_np(pthread_t thread, uint64_t *threadId) {
+    if (threadId == nullptr) return 22;  // EINVAL
+    if (thread == pthread_self()) {
+        const long tid = syscall(SYS_gettid);
+        *threadId = (tid > 0) ? static_cast<uint64_t>(tid) : 1u;
+    } else {
+        const uint64_t value = static_cast<uint64_t>(radekPthreadHandleBits(thread));
+        *threadId = (value & 0x7FFFFFFFull) != 0 ? (value & 0x7FFFFFFFull) : 1u;
+    }
+    return 0;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_dispatch_get_current_queue)
+extern "C" uintptr_t radek_compat_dispatch_get_current_queue(void) {
+    // No libdispatch is present; return one stable non-null queue token so
+    // equality comparisons against dispatch_get_main_queue-style checks work.
+    static const char kRadekFakeMainQueue = 0;
+    return reinterpret_cast<uintptr_t>(&kRadekFakeMainQueue);
+}
+#endif
+
+/* --- C / C++ ABI helpers --------------------------------------------------- */
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat___assert_rtn)
+extern "C" void radek_compat___assert_rtn(const char *function, const char *file, int32_t line,
+                                          const char *assertion) {
+    // Darwin prints exactly this format and aborts; reproduce that honestly.
+    fprintf(stderr, "Assertion failed: (%s), function %s, file %s, line %d.\n",
+            assertion != nullptr ? assertion : "?", function != nullptr ? function : "?",
+            file != nullptr ? file : "?", static_cast<int>(line));
+    fflush(stderr);
+    abort();
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat___cxa_call_unexpected)
+extern "C" void radek_compat___cxa_call_unexpected(void *exceptionObject) {
+    (void)exceptionObject;
+    // An exception escaped a dynamic-exception-specification frame. The
+    // documented C++ behaviour is std::terminate().
+    std::terminate();
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat___divmodsi4)
+extern "C" radek_divmodsi4_result radek_compat___divmodsi4(int32_t numerator, int32_t denominator) {
+    radek_divmodsi4_result result;
+    if (denominator == 0) {
+        // Division by zero traps on real hardware; return zeros as the defined
+        // safe value instead of taking the process down.
+        result.quotient = 0;
+        result.remainder = 0;
+        return result;
+    }
+    if (numerator == INT32_MIN && denominator == -1) {
+        result.quotient = INT32_MIN;  // Saturate the only overflowing case.
+        result.remainder = 0;
+        return result;
+    }
+    result.quotient = numerator / denominator;
+    result.remainder = numerator % denominator;
+    return result;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat___objc_personality_v0)
+extern "C" int32_t __gxx_personality_v0(int32_t version, int32_t actions, uint64_t exceptionClass,
+                                        void *exceptionObject, void *context);
+extern "C" int32_t radek_compat___objc_personality_v0(int32_t version, int32_t actions,
+                                                      uint64_t exceptionClass, uintptr_t exceptionObject,
+                                                      uintptr_t context) {
+    // Darwin's __objc_personality_v0 wraps the C++ personality and only
+    // intercepts Objective-C exception classes. Without an Objective-C
+    // runtime the correct behaviour is to delegate straight to the C++
+    // personality, which this binary links.
+    return __gxx_personality_v0(version, actions, exceptionClass,
+                                reinterpret_cast<void *>(exceptionObject),
+                                reinterpret_cast<void *>(context));
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat___sincos_stret)
+extern "C" radek_sincos_result radek_compat___sincos_stret(double angle) {
+    radek_sincos_result result;
+    result.sin = sin(angle);
+    result.cos = cos(angle);
+    return result;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat___sincosf_stret)
+extern "C" radek_sincosf_result radek_compat___sincosf_stret(float angle) {
+    radek_sincosf_result result;
+    result.sin = sinf(angle);
+    result.cos = cosf(angle);
+    return result;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_memset_pattern16)
+extern "C" void radek_compat_memset_pattern16(void *destination, const void *pattern16, uintptr_t length) {
+    if (destination == nullptr || pattern16 == nullptr || length == 0) return;
+    auto *cursor = static_cast<uint8_t *>(destination);
+    const auto *pattern = static_cast<const uint8_t *>(pattern16);
+    while (length >= 16) {
+        std::memcpy(cursor, pattern, 16);
+        cursor += 16;
+        length -= 16;
+    }
+    if (length > 0) std::memcpy(cursor, pattern, length);
+}
+#endif
+
+/* --- Blocks runtime: real copy/dispose semantics (libclosure-equivalent) -- */
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_Block_object_assign) || \
+    defined(RADEK_API_radek_compat_Block_object_dispose)
+namespace {
+
+struct RadekBlockLiteral {
+    void *isa;
+    int32_t flags;
+    int32_t reserved;
+    void *invoke;
+    void *descriptor;
+};
+
+struct RadekBlockDescriptor {
+    uintptr_t reserved;
+    uintptr_t size;
+    void (*copyHelper)(void *dst, const void *src);
+    void (*disposeHelper)(const void *src);
+};
+
+struct RadekBlockByref {
+    void *isa;
+    struct RadekBlockByref *forwarding;
+    int32_t flags;
+    int32_t size;
+};
+
+// Flags from libclosure's Block_private.h.
+const int32_t kRadekBlockRefCountMask = 0xFFFF;
+const int32_t kRadekBlockNeedsFree = 1 << 24;
+const int32_t kRadekBlockHasCopyDispose = 1 << 25;
+const int32_t kRadekBlockIsGlobal = 1 << 28;
+const int32_t kRadekBlockFieldIsObject = 3;
+const int32_t kRadekBlockFieldIsBlock = 7;
+const int32_t kRadekBlockFieldIsByref = 8;
+const int32_t kRadekBlockByrefNeedsFree = 1 << 25;  // Heap-allocated byref copy.
+
+std::mutex &radekBlockMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+}  // namespace
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_Block_object_assign)
+extern "C" void radek_compat_Block_object_assign(void *destination, const void *source, int32_t flags) {
+    if (destination == nullptr || source == nullptr) return;
+    auto *slot = static_cast<void **>(destination);
+    switch (flags & 0x00FF) {  // BLOCK_ALL_COPY_DISPOSE_FLAGS low bits
+        case kRadekBlockFieldIsObject: {
+            // No Objective-C runtime exists here, so there is no retain to
+            // perform; store the object pointer unchanged.
+            *slot = const_cast<void *>(source);
+            break;
+        }
+        case kRadekBlockFieldIsBlock: {
+            auto *block = const_cast<RadekBlockLiteral *>(static_cast<const RadekBlockLiteral *>(source));
+            if ((block->flags & kRadekBlockNeedsFree) != 0) {
+                // Heap block: bump the reference count and share it.
+                std::lock_guard<std::mutex> lock(radekBlockMutex());
+                block->flags += 2;  // latching_incr_int: refcount += 2 per libclosure.
+                *slot = block;
+            } else if ((block->flags & kRadekBlockIsGlobal) != 0) {
+                *slot = block;  // Global blocks are immortal.
+            } else {
+                // Stack block: move it to the heap and run its copy helper.
+                auto *descriptor = static_cast<RadekBlockDescriptor *>(block->descriptor);
+                if (descriptor == nullptr || descriptor->size < sizeof(RadekBlockLiteral)) {
+                    *slot = block;
+                    break;
+                }
+                auto *copy = static_cast<RadekBlockLiteral *>(malloc(descriptor->size));
+                if (copy == nullptr) {
+                    *slot = block;
+                    break;
+                }
+                std::memcpy(copy, block, descriptor->size);
+                copy->flags &= ~kRadekBlockRefCountMask;
+                copy->flags |= kRadekBlockNeedsFree | 2;  // one reference, needs free.
+                copy->descriptor = descriptor;
+                if ((copy->flags & kRadekBlockHasCopyDispose) != 0 &&
+                    descriptor->copyHelper != nullptr) {
+                    descriptor->copyHelper(copy, block);
+                }
+                *slot = copy;
+            }
+            break;
+        }
+        case kRadekBlockFieldIsByref: {
+            // __block variable: allocate the heap copy and repoint both
+            // forwarding pointers at it, exactly like _Block_byref_assign_copy.
+            auto *byref = const_cast<RadekBlockByref *>(static_cast<const RadekBlockByref *>(source));
+            if (byref->size < static_cast<int32_t>(sizeof(RadekBlockByref))) {
+                *slot = byref;
+                break;
+            }
+            auto *copy = static_cast<RadekBlockByref *>(malloc(static_cast<size_t>(byref->size)));
+            if (copy == nullptr) {
+                *slot = byref;
+                break;
+            }
+            std::memcpy(copy, byref, static_cast<size_t>(byref->size));
+            copy->isa = nullptr;
+            copy->forwarding = copy;
+            copy->flags |= kRadekBlockByrefNeedsFree;  // Marks the copy as heap-owned.
+            byref->forwarding = copy;
+            *slot = copy;
+            break;
+        }
+        default:
+            *slot = const_cast<void *>(source);  // Weak/unknown: plain store.
+            break;
+    }
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_Block_object_dispose)
+extern "C" void radek_compat_Block_object_dispose(const void *object, int32_t flags) {
+    if (object == nullptr) return;
+    switch (flags & 0x00FF) {
+        case kRadekBlockFieldIsBlock: {
+            auto *block = const_cast<RadekBlockLiteral *>(static_cast<const RadekBlockLiteral *>(object));
+            if ((block->flags & kRadekBlockNeedsFree) == 0) break;
+            bool freeNow = false;
+            {
+                std::lock_guard<std::mutex> lock(radekBlockMutex());
+                block->flags -= 2;  // latching_decr_int.
+                freeNow = (block->flags & kRadekBlockRefCountMask) == 0;
+            }
+            if (freeNow) {
+                auto *descriptor = static_cast<RadekBlockDescriptor *>(block->descriptor);
+                if (descriptor != nullptr && (block->flags & kRadekBlockHasCopyDispose) != 0 &&
+                    descriptor->disposeHelper != nullptr) {
+                    descriptor->disposeHelper(block);
+                }
+                free(block);
+            }
+            break;
+        }
+        case kRadekBlockFieldIsByref: {
+            // Only heap copies (the NEEDS_FREE bit set by the assign path) are
+            // owned allocations; stack byrefs are left alone, like libclosure.
+            auto *byref = const_cast<RadekBlockByref *>(static_cast<const RadekBlockByref *>(object));
+            if ((byref->flags & kRadekBlockByrefNeedsFree) != 0) free(byref);
+            break;
+        }
+        default:
+            break;  // Objects: no runtime to release with; nothing to do.
+    }
+}
+#endif
+
+/* --- libc++ internals the converted C++ links against ---------------------- */
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_stl_throw_length_error)
+extern "C" void radek_compat_stl_throw_length_error(const char *message) {
+    // Throws through the same libc++abi the converted code links against, so
+    // a guest catch(const std::length_error&) catches exactly this object.
+    throw std::length_error(message != nullptr ? message : "length_error");
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_stl_throw_out_of_range)
+extern "C" void radek_compat_stl_throw_out_of_range(const char *message) {
+    throw std::out_of_range(message != nullptr ? message : "out_of_range");
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_rs_default_dtor)
+extern "C" void radek_compat_rs_default_dtor(void *randomShuffleState) {
+    (void)randomShuffleState;
+    // std::__1::__rs::__rs_default owns no resources; its destructor is a no-op.
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_rs_default_call)
+extern "C" uint32_t radek_compat_rs_default_call(void *randomShuffleState) {
+    (void)randomShuffleState;
+    // Random source behind std::random_shuffle. xorshift32 gives the uniform
+    // draw std::random_shuffle requires without needing libc++'s private state.
+    static uint32_t state = 0x9E3779B9u;
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return state;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_rs_get)
+extern "C" uint32_t radek_compat_rs_get(void) {
+    // __rs_get returns a default-constructed __rs_default (one 32-bit word).
+    return 0u;
+}
+#endif
+
+/* --- Objective-C runtime entry points -------------------------------------- */
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_objc_setAssociatedObject)
+namespace {
+struct RadekAssociationKey {
+    void *object;
+    const void *key;
+    bool operator==(const RadekAssociationKey &other) const {
+        return object == other.object && key == other.key;
+    }
+};
+struct RadekAssociationKeyHash {
+    size_t operator()(const RadekAssociationKey &entry) const {
+        return std::hash<void *>()(entry.object) ^ (std::hash<const void *>()(entry.key) * 31u);
+    }
+};
+std::mutex &radekAssociationMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+std::unordered_map<RadekAssociationKey, void *, RadekAssociationKeyHash> &radekAssociationTable() {
+    static std::unordered_map<RadekAssociationKey, void *, RadekAssociationKeyHash> table;
+    return table;
+}
+}  // namespace
+
+extern "C" void radek_compat_objc_setAssociatedObject(void *object, const void *key, void *value,
+                                                      int32_t policy) {
+    (void)policy;  // Retain/copy policies differ only in the value's memory management.
+    if (object == nullptr || key == nullptr) return;
+    std::lock_guard<std::mutex> lock(radekAssociationMutex());
+    auto &table = radekAssociationTable();
+    const RadekAssociationKey pairKey{object, key};
+    if (value == nullptr) {
+        table.erase(pairKey);  // Setting nil removes the association.
+    } else {
+        table[pairKey] = value;
+    }
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_objc_setProperty_atomic) || \
+    defined(RADEK_API_radek_compat_objc_setProperty_atomic_copy) || \
+    defined(RADEK_API_radek_compat_objc_setProperty_nonatomic) || \
+    defined(RADEK_API_radek_compat_objc_setProperty_nonatomic_copy)
+namespace {
+// The ivar is a pointer-sized slot at (self + offset). Without an Objective-C
+// runtime there is no retain/release to run, so the store itself IS the
+// documented visible effect; the atomic variants use a sequentially
+// consistent store.
+static inline void radekObjcStoreProperty(void *self, uintptr_t offset, void *newValue, bool atomic) {
+    if (self == nullptr) return;
+    void **slot = reinterpret_cast<void **>(static_cast<char *>(self) + offset);
+    if (atomic) {
+        __atomic_store_n(slot, newValue, __ATOMIC_SEQ_CST);
+    } else {
+        *slot = newValue;
+    }
+}
+}  // namespace
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_objc_setProperty_atomic)
+extern "C" void radek_compat_objc_setProperty_atomic(void *self, uintptr_t offset, void *newValue) {
+    radekObjcStoreProperty(self, offset, newValue, true);
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_objc_setProperty_atomic_copy)
+extern "C" void radek_compat_objc_setProperty_atomic_copy(void *self, uintptr_t offset, void *newValue) {
+    radekObjcStoreProperty(self, offset, newValue, true);
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_objc_setProperty_nonatomic)
+extern "C" void radek_compat_objc_setProperty_nonatomic(void *self, uintptr_t offset, void *newValue) {
+    radekObjcStoreProperty(self, offset, newValue, false);
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_objc_setProperty_nonatomic_copy)
+extern "C" void radek_compat_objc_setProperty_nonatomic_copy(void *self, uintptr_t offset, void *newValue) {
+    radekObjcStoreProperty(self, offset, newValue, false);
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_NSSetUncaughtExceptionHandler)
+extern "C" radek_NSUncaughtExceptionHandler radek_compat_NSGetUncaughtExceptionHandler(
+    radek_NSUncaughtExceptionHandler newHandler);
+
+extern "C" void radek_compat_NSSetUncaughtExceptionHandler(radek_NSUncaughtExceptionHandler handler) {
+    // The registered handler is kept observable so tests and diagnostics can
+    // confirm the store; no Objective-C runtime exists here to invoke it.
+    radek_compat_NSGetUncaughtExceptionHandler(handler);
+}
+
+extern "C" radek_NSUncaughtExceptionHandler radek_compat_NSGetUncaughtExceptionHandler(
+    radek_NSUncaughtExceptionHandler newHandler) {
+    static radek_NSUncaughtExceptionHandler storedHandler = nullptr;
+    const radek_NSUncaughtExceptionHandler previous = storedHandler;
+    if (newHandler != nullptr) storedHandler = newHandler;
+    return previous;
+}
+#endif

@@ -1136,6 +1136,129 @@ uintptr_t radek_compat___cxa_guard_release(uintptr_t a0 RADEK_COMPAT_DEF0, uintp
 uintptr_t radek_compat___cxa_guard_abort(uintptr_t a0 RADEK_COMPAT_DEF0, uintptr_t a1 RADEK_COMPAT_DEF0, uintptr_t a2 RADEK_COMPAT_DEF0, uintptr_t a3 RADEK_COMPAT_DEF0);
 uintptr_t radek_compat___cxa_demangle(uintptr_t a0 RADEK_COMPAT_DEF0, uintptr_t a1 RADEK_COMPAT_DEF0, uintptr_t a2 RADEK_COMPAT_DEF0, uintptr_t a3 RADEK_COMPAT_DEF0);
 uintptr_t radek_compat___dynamic_cast(uintptr_t a0 RADEK_COMPAT_DEF0, uintptr_t a1 RADEK_COMPAT_DEF0, uintptr_t a2 RADEK_COMPAT_DEF0, uintptr_t a3 RADEK_COMPAT_DEF0);
+/* Batch 2: CoreFoundation queries/characters/percent-escaping/DNS, CoreGraphics
+ * rect math, CommonCrypto HMAC, OSAtomic barriers, Mach kernel/semaphore
+ * surface, C++ ABI helpers, Blocks runtime, Objective-C property helpers.
+ *
+ * These prototypes are ABI-typed (not the generic uintptr_t form) wherever the
+ * Darwin prototype passes floats, doubles, or small structs by value: the
+ * converted guest calls these through the standard AAPCS/softfp calling
+ * convention, so the C types here decide which registers carry the values. */
+typedef uint16_t radek_UniChar;
+typedef struct radek_CFRange {
+    radek_CFIndex location;
+    radek_CFIndex length;
+} radek_CFRange;
+typedef struct radek_CGPoint {
+    float x;
+    float y;
+} radek_CGPoint;
+typedef struct radek_CGSize {
+    float width;
+    float height;
+} radek_CGSize;
+typedef struct radek_CGRect {
+    radek_CGPoint origin;
+    radek_CGSize size;
+} radek_CGRect;
+/* kCCHmacAlgSHA1/MD5/SHA256 from CommonCrypto/CommonHMAC.h */
+typedef uint32_t radek_CCHmacAlgorithm;
+#define RADEK_kCCHmacAlgSHA1 ((uint32_t)0)
+#define RADEK_kCCHmacAlgMD5 ((uint32_t)1)
+#define RADEK_kCCHmacAlgSHA256 ((uint32_t)2)
+/* Darwin's CCHmacContext is `uint32_t ctx[96]` (384 bytes); callers always
+ * over-allocate. The shim state stored inside is documented in the .cpp. */
+typedef struct radek_CCHmacContext {
+    uint32_t ctx[96];
+} radek_CCHmacContext;
+typedef uint32_t radek_mach_port_t;
+typedef uint32_t radek_mach_msg_timeout_t;
+typedef int32_t radek_kern_return_t;
+typedef void (*radek_NSUncaughtExceptionHandler)(void *exception);
+
+radek_Boolean radek_compat_CFArrayContainsValue(radek_CFArrayRef array, radek_CFRange range, const void *value);
+radek_CFIndex radek_compat_CFArrayGetFirstIndexOfValue(radek_CFArrayRef array, radek_CFRange range, const void *value);
+radek_Boolean radek_compat_CFDictionaryAddValue(radek_CFMutableDictionaryRef dictionary, const void *key, const void *value);
+radek_CFTypeRef radek_compat_CFMakeCollectable(radek_CFTypeRef object);
+void radek_compat_CFStringAppendCharacters(radek_CFMutableStringRef string, const radek_UniChar *characters, radek_CFIndex count);
+radek_CFStringRef radek_compat_CFStringCreateWithCharacters(radek_CFAllocatorRef allocator, const radek_UniChar *characters, radek_CFIndex count);
+const radek_UniChar *radek_compat_CFStringGetCharactersPtr(radek_CFStringRef string);
+radek_CFStringRef radek_compat_CFURLCreateStringByAddingPercentEscapes(radek_CFAllocatorRef allocator, radek_CFStringRef original, radek_CFStringRef charactersToLeaveUnescaped, radek_CFStringRef legalURLCharactersToBeEscaped, radek_CFStringEncoding encoding);
+radek_CFTypeRef radek_compat_CFHostCreateWithName(radek_CFAllocatorRef allocator, radek_CFStringRef hostname);
+radek_CFArrayRef radek_compat_CFHostGetAddressing(radek_CFTypeRef host, radek_Boolean *hasBeenResolved);
+radek_Boolean radek_compat_CFHostStartInfoResolution(radek_CFTypeRef host, int32_t info, void *error);
+float radek_compat_CGRectGetHeight(radek_CGRect rect);
+float radek_compat_CGRectGetMaxX(radek_CGRect rect);
+float radek_compat_CGRectGetMidX(radek_CGRect rect);
+float radek_compat_CGRectGetMidY(radek_CGRect rect);
+float radek_compat_CGRectGetMinY(radek_CGRect rect);
+float radek_compat_CGRectGetWidth(radek_CGRect rect);
+radek_CGRect radek_compat_CGRectIntegral(radek_CGRect rect);
+radek_Boolean radek_compat_CGRectIntersectsRect(radek_CGRect left, radek_CGRect right);
+radek_Boolean radek_compat_CGRectIsEmpty(radek_CGRect rect);
+radek_Boolean radek_compat_CGRectIsNull(radek_CGRect rect);
+radek_CGRect radek_compat_CGRectOffset(radek_CGRect rect, float dx, float dy);
+void radek_compat_CCHmac(radek_CCHmacAlgorithm algorithm, const void *key, uintptr_t keyLength, const void *data, uintptr_t dataLength, void *macOut);
+void radek_compat_CCHmacInit(radek_CCHmacContext *context, radek_CCHmacAlgorithm algorithm, const void *key, uintptr_t keyLength);
+void radek_compat_CCHmacUpdate(radek_CCHmacContext *context, const void *data, uintptr_t dataLength);
+void radek_compat_CCHmacFinal(radek_CCHmacContext *context, void *macOut);
+int32_t radek_compat_OSAtomicAdd32Barrier(int32_t delta, volatile int32_t *value);
+radek_Boolean radek_compat_OSAtomicCompareAndSwap32Barrier(int32_t oldValue, int32_t newValue, volatile int32_t *value);
+radek_Boolean radek_compat_OSAtomicCompareAndSwapPtrBarrier(void *oldValue, void *newValue, void *volatile *value);
+radek_kern_return_t radek_compat_host_page_size(radek_mach_port_t host, uintptr_t *pageSize);
+radek_kern_return_t radek_compat_host_statistics(radek_mach_port_t host, int32_t flavor, void *info, uint32_t *infoCount);
+radek_mach_port_t radek_compat_mach_host_self(void);
+radek_mach_port_t radek_compat_mach_task_self_(void);
+radek_kern_return_t radek_compat_mach_wait_until(uint64_t deadlineNanoseconds);
+radek_kern_return_t radek_compat_semaphore_create(radek_mach_port_t task, radek_mach_port_t *semaphore, int32_t policy, int32_t value);
+radek_kern_return_t radek_compat_semaphore_destroy(radek_mach_port_t task, radek_mach_port_t semaphore);
+radek_kern_return_t radek_compat_semaphore_signal(radek_mach_port_t semaphore);
+radek_kern_return_t radek_compat_semaphore_wait(radek_mach_port_t semaphore, radek_mach_msg_timeout_t timeout);
+radek_kern_return_t radek_compat_task_info(radek_mach_port_t task, int32_t flavor, void *info, uint32_t *infoCount);
+radek_kern_return_t radek_compat_thread_policy_set(uint32_t thread, int32_t flavor, void *policy, uint32_t count);
+uint64_t radek_compat_pthread_mach_thread_np(pthread_t thread);
+int32_t radek_compat_pthread_threadid_np(pthread_t thread, uint64_t *threadId);
+uintptr_t radek_compat_dispatch_get_current_queue(void);
+void radek_compat___assert_rtn(const char *function, const char *file, int32_t line, const char *assertion);
+void radek_compat___cxa_call_unexpected(void *exceptionObject);
+/* compiler-rt's arm __divmodsi4: returns {quotient, remainder} in r0:r1. */
+typedef struct radek_divmodsi4_result {
+    int32_t quotient;
+    int32_t remainder;
+} radek_divmodsi4_result;
+radek_divmodsi4_result radek_compat___divmodsi4(int32_t numerator, int32_t denominator);
+int32_t radek_compat___objc_personality_v0(int32_t version, int32_t actions, uint64_t exceptionClass, uintptr_t exceptionObject, uintptr_t context);
+/* AAPCS returns these 2-member homogeneous float aggregates in d0:d1 / s0:s1;
+ * there is no hidden struct-return pointer (LLVM lowers iOS sincos to exactly
+ * this: one double in, {sin, cos} back in FP registers). */
+typedef struct radek_sincos_result {
+    double sin;
+    double cos;
+} radek_sincos_result;
+typedef struct radek_sincosf_result {
+    float sin;
+    float cos;
+} radek_sincosf_result;
+radek_sincos_result radek_compat___sincos_stret(double angle);
+radek_sincosf_result radek_compat___sincosf_stret(float angle);
+void radek_compat_memset_pattern16(void *destination, const void *pattern16, uintptr_t length);
+void radek_compat_Block_object_assign(void *destination, const void *source, int32_t flags);
+void radek_compat_Block_object_dispose(const void *object, int32_t flags);
+void radek_compat_stl_throw_length_error(const char *message);
+void radek_compat_stl_throw_out_of_range(const char *message);
+void radek_compat_rs_default_dtor(void *randomShuffleState);
+uint32_t radek_compat_rs_default_call(void *randomShuffleState);
+uint32_t radek_compat_rs_get(void);
+void radek_compat_objc_setAssociatedObject(void *object, const void *key, void *value, int32_t policy);
+void radek_compat_objc_setProperty_atomic(void *self, uintptr_t offset, void *newValue);
+void radek_compat_objc_setProperty_atomic_copy(void *self, uintptr_t offset, void *newValue);
+void radek_compat_objc_setProperty_nonatomic(void *self, uintptr_t offset, void *newValue);
+void radek_compat_objc_setProperty_nonatomic_copy(void *self, uintptr_t offset, void *newValue);
+void radek_compat_NSSetUncaughtExceptionHandler(radek_NSUncaughtExceptionHandler handler);
+/* Test/diagnostic accessor backing the setter above; returns the previously
+ * registered handler (or the current one when newHandler is NULL). */
+radek_NSUncaughtExceptionHandler radek_compat_NSGetUncaughtExceptionHandler(
+    radek_NSUncaughtExceptionHandler newHandler);
 
 #define RADEK_IOS_SHIM_TABLE(X) \
     X("_CFAllocatorGetDefault", radek_compat_CFAllocatorGetDefault) \
@@ -2066,7 +2189,70 @@ uintptr_t radek_compat___dynamic_cast(uintptr_t a0 RADEK_COMPAT_DEF0, uintptr_t 
     X("___cxa_guard_release", radek_compat___cxa_guard_release) \
     X("___cxa_guard_abort", radek_compat___cxa_guard_abort) \
     X("___cxa_demangle", radek_compat___cxa_demangle) \
-    X("___dynamic_cast", radek_compat___dynamic_cast)
+    X("___dynamic_cast", radek_compat___dynamic_cast) \
+    X("_CFArrayContainsValue", radek_compat_CFArrayContainsValue) \
+    X("_CFArrayGetFirstIndexOfValue", radek_compat_CFArrayGetFirstIndexOfValue) \
+    X("_CFDictionaryAddValue", radek_compat_CFDictionaryAddValue) \
+    X("_CFMakeCollectable", radek_compat_CFMakeCollectable) \
+    X("_CFStringAppendCharacters", radek_compat_CFStringAppendCharacters) \
+    X("_CFStringCreateWithCharacters", radek_compat_CFStringCreateWithCharacters) \
+    X("_CFStringGetCharactersPtr", radek_compat_CFStringGetCharactersPtr) \
+    X("_CFURLCreateStringByAddingPercentEscapes", radek_compat_CFURLCreateStringByAddingPercentEscapes) \
+    X("_CFHostCreateWithName", radek_compat_CFHostCreateWithName) \
+    X("_CFHostGetAddressing", radek_compat_CFHostGetAddressing) \
+    X("_CFHostStartInfoResolution", radek_compat_CFHostStartInfoResolution) \
+    X("_CGRectGetHeight", radek_compat_CGRectGetHeight) \
+    X("_CGRectGetMaxX", radek_compat_CGRectGetMaxX) \
+    X("_CGRectGetMidX", radek_compat_CGRectGetMidX) \
+    X("_CGRectGetMidY", radek_compat_CGRectGetMidY) \
+    X("_CGRectGetMinY", radek_compat_CGRectGetMinY) \
+    X("_CGRectGetWidth", radek_compat_CGRectGetWidth) \
+    X("_CGRectIntegral", radek_compat_CGRectIntegral) \
+    X("_CGRectIntersectsRect", radek_compat_CGRectIntersectsRect) \
+    X("_CGRectIsEmpty", radek_compat_CGRectIsEmpty) \
+    X("_CGRectIsNull", radek_compat_CGRectIsNull) \
+    X("_CGRectOffset", radek_compat_CGRectOffset) \
+    X("_CCHmac", radek_compat_CCHmac) \
+    X("_CCHmacInit", radek_compat_CCHmacInit) \
+    X("_CCHmacUpdate", radek_compat_CCHmacUpdate) \
+    X("_CCHmacFinal", radek_compat_CCHmacFinal) \
+    X("_OSAtomicAdd32Barrier", radek_compat_OSAtomicAdd32Barrier) \
+    X("_OSAtomicCompareAndSwap32Barrier", radek_compat_OSAtomicCompareAndSwap32Barrier) \
+    X("_OSAtomicCompareAndSwapPtrBarrier", radek_compat_OSAtomicCompareAndSwapPtrBarrier) \
+    X("_host_page_size", radek_compat_host_page_size) \
+    X("_host_statistics", radek_compat_host_statistics) \
+    X("_mach_host_self", radek_compat_mach_host_self) \
+    X("_mach_task_self_", radek_compat_mach_task_self_) \
+    X("_mach_wait_until", radek_compat_mach_wait_until) \
+    X("_semaphore_create", radek_compat_semaphore_create) \
+    X("_semaphore_destroy", radek_compat_semaphore_destroy) \
+    X("_semaphore_signal", radek_compat_semaphore_signal) \
+    X("_semaphore_wait", radek_compat_semaphore_wait) \
+    X("_task_info", radek_compat_task_info) \
+    X("_thread_policy_set", radek_compat_thread_policy_set) \
+    X("_pthread_mach_thread_np", radek_compat_pthread_mach_thread_np) \
+    X("_pthread_threadid_np", radek_compat_pthread_threadid_np) \
+    X("_dispatch_get_current_queue", radek_compat_dispatch_get_current_queue) \
+    X("___assert_rtn", radek_compat___assert_rtn) \
+    X("___cxa_call_unexpected", radek_compat___cxa_call_unexpected) \
+    X("___divmodsi4", radek_compat___divmodsi4) \
+    X("___objc_personality_v0", radek_compat___objc_personality_v0) \
+    X("___sincos_stret", radek_compat___sincos_stret) \
+    X("___sincosf_stret", radek_compat___sincosf_stret) \
+    X("_memset_pattern16", radek_compat_memset_pattern16) \
+    X("__Block_object_assign", radek_compat_Block_object_assign) \
+    X("__Block_object_dispose", radek_compat_Block_object_dispose) \
+    X("__ZNKSt3__120__vector_base_commonILb1EE20__throw_length_errorEv", radek_compat_stl_throw_length_error) \
+    X("__ZNKSt3__120__vector_base_commonILb1EE20__throw_out_of_rangeEv", radek_compat_stl_throw_out_of_range) \
+    X("__ZNSt3__112__rs_defaultD1Ev", radek_compat_rs_default_dtor) \
+    X("__ZNSt3__112__rs_defaultclEv", radek_compat_rs_default_call) \
+    X("__ZNSt3__18__rs_getEv", radek_compat_rs_get) \
+    X("_objc_setAssociatedObject", radek_compat_objc_setAssociatedObject) \
+    X("_objc_setProperty_atomic", radek_compat_objc_setProperty_atomic) \
+    X("_objc_setProperty_atomic_copy", radek_compat_objc_setProperty_atomic_copy) \
+    X("_objc_setProperty_nonatomic", radek_compat_objc_setProperty_nonatomic) \
+    X("_objc_setProperty_nonatomic_copy", radek_compat_objc_setProperty_nonatomic_copy) \
+    X("_NSSetUncaughtExceptionHandler", radek_compat_NSSetUncaughtExceptionHandler)
 
 #ifdef __cplusplus
 }  // extern "C"

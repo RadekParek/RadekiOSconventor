@@ -11,8 +11,14 @@ concurrency:
   group: radek-build-${{ github.ref }}
   cancel-in-progress: true
 
+# Two independent jobs run in parallel:
+#   host-pipeline  - native analyzer, compat-runtime host tests, sanitizers,
+#                    Angry Birds probe and the host-side conversions.
+#   converter-apk  - Android unit tests, the converter APK and the packaged
+#                    game-runtime libraries.
+# Nothing is skipped between them; splitting only cuts wall-clock time.
 jobs:
-  build:
+  host-pipeline:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -27,6 +33,34 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+      # The host CMake build points FETCHCONTENT_SOURCE_DIR_DYNARMIC at this
+      # cached pinned checkout (see the shared comment in the converter-apk
+      # job); on a cache hit nothing clones the ~full dynarmic history.
+      - name: Cache pinned Dynarmic sources
+        uses: actions/cache@v6
+        with:
+          path: .local/dynarmic-fetch
+          key: radek-dynarmic-fetch-v1-a2ef15df6d833ab7bc66131a90350637f26dd2d4
+      - name: Prepare pinned Dynarmic sources
+        run: |
+          set -euo pipefail
+          src=.local/dynarmic-fetch/dynarmic-src
+          pin=a2ef15df6d833ab7bc66131a90350637f26dd2d4
+          if [ -d "$src/.git" ] && [ "$(git -C "$src" rev-parse HEAD 2>/dev/null)" = "$pin" ]; then
+            echo "Pinned Dynarmic checkout already present at the pinned commit."
+          else
+            rm -rf .local/dynarmic-fetch
+            mkdir -p .local/dynarmic-fetch
+            git clone https://github.com/suyu-emu/dynarmic.git "$src"
+            git -C "$src" checkout --detach "$pin"
+          fi
+          git -C "$src" submodule update --init --depth 1 \
+            externals/mcl externals/fmt externals/xbyak externals/oaknut externals/robin-map \
+            externals/zydis externals/zycore
+          # The suyu-emu mcl external ships a placeholder boost/variant.hpp that
+          # includes an absolute CPM cache path from the packager's machine; drop
+          # it so <boost/variant.hpp> resolves from the vendored Boost headers.
+          rm -f "$src/externals/mcl/include/boost/variant.hpp"
       # Reuse the pinned SDK components between runs. On a hit nothing is
       # downloaded; sdkmanager below then finds every package already installed
       # and returns immediately. Keyed by the exact pinned versions, so a version
@@ -47,15 +81,22 @@ jobs:
           packages: platform-tools
       - name: Install pinned platform, build tools, NDK and CMake
         run: python3 tools/ci_run.py sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0' 'ndk;27.2.12479018' 'cmake;3.22.1'
-      # The host C++ analyzer, the compat runtime and the NDK build all compile
-      # the same pinned Unicorn sources; a compiler cache removes most of that
-      # repeat work on later runs. Missing ccache simply disables it.
+      # The host C++ analyzer, the compat runtime and the sanitizer suites all
+      # compile the same sources repeatedly; a compiler cache removes most of
+      # that repeat work on later runs. The PATH masquerade routes plain
+      # g++/gcc/cc invocations (tools/build_native.py, tools/test_sanitized.sh)
+      # through ccache as well. Missing ccache simply disables all of it.
       - name: Prepare compiler cache
         run: |
           if command -v ccache >/dev/null 2>&1; then
             ccache --max-size=2G
             echo "RADEK_USE_CCACHE=1" >> "$GITHUB_ENV"
             echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+            mkdir -p "$HOME/.ccache-bin"
+            for tool in cc c++ gcc g++; do
+              ln -sf "$(command -v ccache)" "$HOME/.ccache-bin/$tool"
+            done
+            echo "$HOME/.ccache-bin" >> "$GITHUB_PATH"
             echo "ccache enabled ($(ccache --version | head -1))"
           else
             echo "ccache unavailable; building without a compiler cache"
@@ -67,8 +108,6 @@ jobs:
           key: radek-ccache-${{ runner.os }}-${{ hashFiles('native/CMakeLists.txt', 'app/build.gradle.kts', 'compat-runtime-v1/build.gradle.kts') }}
           restore-keys: |
             radek-ccache-${{ runner.os }}-
-      - name: Configure Gradle and validate wrapper
-        uses: gradle/actions/setup-gradle@v5
       # Install this before every host-test stage. The sanitizer suite imports
       # radek.pipeline, which imports the optional game lifter at module load
       # time; installing it only after the sanitizer step makes CI fail before
@@ -77,14 +116,15 @@ jobs:
         run: python3 -m pip install --disable-pip-version-check --no-cache-dir 'capstone==5.0.7'
       - name: Build native analyzer and run C++ runtime tests
         run: python3 tools/build_native.py
-      - name: Configure and run CMake compat-runtime-v1 with pinned Unicorn ARM32 host tests
+      - name: Configure and run CMake compat-runtime-v1 with pinned Dynarmic ARM32 host tests
         run: |
           launcher=""
           if [ "${RADEK_USE_CCACHE:-0}" = "1" ]; then
             launcher="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
           fi
-          cmake -S native -B .local/native-cmake -DRADEK_BUILD_COMPAT_RUNTIME=ON -DRADEK_FETCH_UNICORN=ON $launcher
-          cmake --build .local/native-cmake --parallel 2
+          cmake -S native -B .local/native-cmake -DRADEK_BUILD_COMPAT_RUNTIME=ON -DRADEK_FETCH_DYNARMIC=ON \
+            -DFETCHCONTENT_SOURCE_DIR_DYNARMIC="$PWD/.local/dynarmic-fetch/dynarmic-src" $launcher
+          cmake --build .local/native-cmake --parallel "$(nproc)"
           ctest --test-dir .local/native-cmake --output-on-failure
       - name: Validate compat-runtime-v1 smoke database
         run: |
@@ -221,7 +261,8 @@ jobs:
               ("fixture has 254 distinct imports", providers.get("totalObservedImports") == 254),
               ("fixture has 181 same-name NDK candidates", providers.get("sameNameNdkCandidateCount") == 181),
               ("fixture same-name NDK provider count is 181", providers.get("sameNameNdkProviderCount") == 181),
-              ("73 fixture imports use guest adapters", providers.get("guestRuntimeAdapterCatalogCount") == 73),
+              ("0 outstanding guest adapters remain", providers.get("guestRuntimeAdapterCatalogCount") == 0),
+              ("73 fixture imports resolve to verified adapter semantics", providers.get("verifiedGuestAdapterCount") == 73),
               ("guest-adapter inventory remains 75 names", providers.get("guestRuntimeAdapterCatalogInventoryCount") == 75),
               ("reviewed NDK catalog remains 1,229 names", providers.get("fullNdkCandidateInventoryCount") == 1229),
               ("portable-C translation has functions and no failed functions",
@@ -383,36 +424,6 @@ jobs:
           python3 -m radek validate .local/simple-conversion/simple.apk \
             --package "$PKG" \
             --entry dev.radek.generated.MainActivity
-      - name: Android unit tests, converter APK, and compat-runtime-v1 Android library
-        run: python3 tools/ci_run.py ./gradlew --no-daemon :app:testDebugUnitTest :gameruntime-template:testDebugUnitTest :app:lintDebug :app:assembleDebug :compat-runtime-v1:lintDebug :compat-runtime-v1:assembleDebug
-      - name: Verify game-runtime shared libraries are packaged in the converter APK
-        run: |
-          python3 - <<'PY'
-          from zipfile import ZipFile
-
-          apk_path = "app/build/outputs/apk/debug/app-debug.apk"
-          required = (
-              "lib/arm64-v8a/libcompat_runtime_v1.so",
-              "lib/arm64-v8a/libunicorn.so",
-          )
-          with ZipFile(apk_path) as apk:
-              entries = set(apk.namelist())
-          missing = [name for name in required if name not in entries]
-          if missing:
-              raise SystemExit(f"converter APK is missing game-runtime native dependencies: {missing}")
-          print("Converter APK contains:", ", ".join(required))
-          PY
-      - name: Validate converter application APK
-        run: |
-          mkdir -p artifacts
-          cp app/build/outputs/apk/debug/app-debug.apk artifacts/RadekiOSConventor-debug.apk
-          python3 -m radek validate artifacts/RadekiOSConventor-debug.apk --package dev.radek.conventor --entry dev.radek.conventor.MainActivity --converter-app > artifacts/validation.json
-      - name: Upload RadekiOSConventor APK
-        uses: actions/upload-artifact@v6
-        with:
-          name: RadekiOSConventor-debug.apk
-          path: artifacts/RadekiOSConventor-debug.apk
-          if-no-files-found: error
       - name: Collect sample conversion artifacts
         if: always() && hashFiles('.local/sample-conversion/**') != ''
         run: |
@@ -466,6 +477,129 @@ jobs:
           name: angrybirds-gameboot-artifacts
           path: artifacts/angrybirds-gameboot/
           if-no-files-found: warn
+
+  converter-apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      # Dynarmic is consumed by two CMake builds (the host compat-runtime tests
+      # and the Gradle NDK build of compat-runtime-v1). The pinned checkout is
+      # prepared once into this cached directory and both consumers are pointed
+      # at it through FETCHCONTENT_SOURCE_DIR_DYNARMIC, which bypasses
+      # FetchContent's populate subbuild entirely. That matters: a shared
+      # FETCHCONTENT_BASE_DIR stores a per-populate CMakeCache, and a second
+      # consumer with a different generator (the NDK build uses Ninja, the host
+      # build Makefiles) fails with "generator does not match". On a cache hit
+      # neither consumer clones the ~full dynarmic history.
+      - name: Cache pinned Dynarmic sources
+        uses: actions/cache@v6
+        with:
+          path: .local/dynarmic-fetch
+          key: radek-dynarmic-fetch-v1-a2ef15df6d833ab7bc66131a90350637f26dd2d4
+      - name: Prepare pinned Dynarmic sources
+        run: |
+          set -euo pipefail
+          src=.local/dynarmic-fetch/dynarmic-src
+          pin=a2ef15df6d833ab7bc66131a90350637f26dd2d4
+          if [ -d "$src/.git" ] && [ "$(git -C "$src" rev-parse HEAD 2>/dev/null)" = "$pin" ]; then
+            echo "Pinned Dynarmic checkout already present at the pinned commit."
+          else
+            rm -rf .local/dynarmic-fetch
+            mkdir -p .local/dynarmic-fetch
+            git clone https://github.com/suyu-emu/dynarmic.git "$src"
+            git -C "$src" checkout --detach "$pin"
+          fi
+          git -C "$src" submodule update --init --depth 1 \
+            externals/mcl externals/fmt externals/xbyak externals/oaknut externals/robin-map \
+            externals/zydis externals/zycore
+          # The suyu-emu mcl external ships a placeholder boost/variant.hpp that
+          # includes an absolute CPM cache path from the packager's machine; drop
+          # it so <boost/variant.hpp> resolves from the vendored Boost headers.
+          rm -f "$src/externals/mcl/include/boost/variant.hpp"
+          # Point the Gradle NDK build at this checkout (consumed by
+          # compat-runtime-v1/build.gradle.kts as FETCHCONTENT_SOURCE_DIR_DYNARMIC).
+          echo "RADEK_DYNARMIC_SOURCE_DIR=$PWD/.local/dynarmic-fetch/dynarmic-src" >> "$GITHUB_ENV"
+      - name: Cache pinned Android SDK components
+        uses: actions/cache@v6
+        with:
+          path: |
+            /usr/local/lib/android/sdk/ndk/27.2.12479018
+            /usr/local/lib/android/sdk/cmake/3.22.1
+            /usr/local/lib/android/sdk/build-tools/35.0.0
+            /usr/local/lib/android/sdk/platforms/android-35
+          key: radek-android-sdk-${{ runner.os }}-platform35-bt35.0.0-ndk27.2.12479018-cmake3.22.1
+      - name: Android SDK and licenses
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: '11076708'
+          packages: platform-tools
+      - name: Install pinned platform, build tools, NDK and CMake
+        run: python3 tools/ci_run.py sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0' 'ndk;27.2.12479018' 'cmake;3.22.1'
+      # ccache backs the Gradle NDK build of compat-runtime-v1 when
+      # RADEK_USE_CCACHE=1 (see compat-runtime-v1/build.gradle.kts).
+      - name: Prepare compiler cache
+        run: |
+          if command -v ccache >/dev/null 2>&1; then
+            ccache --max-size=2G
+            echo "RADEK_USE_CCACHE=1" >> "$GITHUB_ENV"
+            echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+            echo "ccache enabled ($(ccache --version | head -1))"
+          else
+            echo "ccache unavailable; building without a compiler cache"
+          fi
+      - name: Cache compiler cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.ccache
+          key: radek-ccache-${{ runner.os }}-${{ hashFiles('native/CMakeLists.txt', 'app/build.gradle.kts', 'compat-runtime-v1/build.gradle.kts') }}
+          restore-keys: |
+            radek-ccache-${{ runner.os }}-
+      - name: Configure Gradle and validate wrapper
+        uses: gradle/actions/setup-gradle@v5
+      # The APK validation below runs the radek CLI, which imports the
+      # optional game lifter at module load time.
+      - name: Install optional host lifter dependency (capstone)
+        run: python3 -m pip install --disable-pip-version-check --no-cache-dir 'capstone==5.0.7'
+      - name: Android unit tests, converter APK, and compat-runtime-v1 Android library
+        run: python3 tools/ci_run.py ./gradlew --no-daemon :app:testDebugUnitTest :gameruntime-template:testDebugUnitTest :app:lintDebug :app:assembleDebug :compat-runtime-v1:lintDebug :compat-runtime-v1:assembleDebug
+      - name: Verify game-runtime shared libraries are packaged in the converter APK
+        run: |
+          python3 - <<'PY'
+          from zipfile import ZipFile
+
+          apk_path = "app/build/outputs/apk/debug/app-debug.apk"
+          required = (
+              "lib/arm64-v8a/libcompat_runtime_v1.so",
+          )
+          with ZipFile(apk_path) as apk:
+              entries = set(apk.namelist())
+          missing = [name for name in required if name not in entries]
+          if missing:
+              raise SystemExit(f"converter APK is missing game-runtime native dependencies: {missing}")
+          print("Converter APK contains:", ", ".join(required))
+          PY
+      - name: Validate converter application APK
+        run: |
+          mkdir -p artifacts
+          cp app/build/outputs/apk/debug/app-debug.apk artifacts/RadekiOSConventor-debug.apk
+          python3 -m radek validate artifacts/RadekiOSConventor-debug.apk --package dev.radek.conventor --entry dev.radek.conventor.MainActivity --converter-app > artifacts/validation.json
+      - name: Upload RadekiOSConventor APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: RadekiOSConventor-debug.apk
+          path: artifacts/RadekiOSConventor-debug.apk
+          if-no-files-found: error
       - name: Upload test reports
         if: always() && hashFiles('app/build/reports/**', 'artifacts/validation.json') != ''
         uses: actions/upload-artifact@v6

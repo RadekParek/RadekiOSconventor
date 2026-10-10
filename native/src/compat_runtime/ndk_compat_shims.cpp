@@ -1170,7 +1170,7 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
 
     // ---- pthread state -----------------------------------------------------
     // A real ARM32 guest start routine cannot be called as a host function
-    // pointer. Run one bounded pthread entry synchronously on the same Unicorn
+    // pointer. Run one bounded pthread entry synchronously on the same Dynarmic
     // CPU instead: the transfer preserves the guest ABI, and the continuation
     // restores the creator's LR so pthread_create still returns normally. This
     // is deliberately single-CPU scheduling, not a claim that host threads

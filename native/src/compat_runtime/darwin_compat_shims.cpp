@@ -1,5 +1,6 @@
 #include "compat_runtime/darwin_compat_shims.hpp"
 
+#include "compat_runtime/openal_backend.hpp"
 #include "compat_runtime/virtual_file_system.hpp"
 
 #include <array>
@@ -28,6 +29,20 @@ constexpr std::uint32_t kCtypeSpace = 0x00004000;
 constexpr std::uint32_t kCtypeUpper = 0x00008000;
 constexpr std::uint32_t kCtypeXdigit = 0x00010000;
 constexpr std::uint32_t kCtypeBlank = 0x00020000;
+
+// OpenAL enum values the guest uses, so the mixer can answer state queries and
+// decode buffer formats without guessing.
+constexpr std::uint32_t kAlSourceState = 0x1010;
+constexpr std::uint32_t kAlPlaying = 0x1012;
+constexpr std::uint32_t kAlStopped = 0x1014;
+constexpr std::uint32_t kAlBuffersProcessed = 0x1016;
+constexpr std::uint32_t kAlLooping = 0x1007;
+constexpr std::uint32_t kAlGain = 0x100A;
+constexpr std::uint32_t kAlBuffer = 0x1009;
+constexpr std::uint32_t kAlFormatMono8 = 0x1100;
+constexpr std::uint32_t kAlFormatMono16 = 0x1101;
+constexpr std::uint32_t kAlFormatStereo8 = 0x1102;
+constexpr std::uint32_t kAlFormatStereo16 = 0x1103;
 
 std::uint32_t classificationOf(int character) {
     if (character < 0 || character > 127)
@@ -284,13 +299,23 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
                         note("alGenBuffers could not write every generated name");
                 }
             }
-            note("OpenAL entry points are state-only: no audio device is opened and no samples "
-                 "are produced");
             return true;
         });
-    registerFunction(registry, "_alDeleteBuffers", "openal-delete-buffers-state-only",
-        [this](CpuRegisterState &, GuestAddressSpace &, std::string &) {
+    registerFunction(registry, "_alDeleteBuffers", "openal-delete-buffers-mixer",
+        [this](CpuRegisterState &registers, GuestAddressSpace &memory, std::string &) {
             ++openalCalls_;
+            const auto count = registers.r[0];
+            const auto names = registers.r[1];
+            for (std::uint32_t index = 0; index < count && index < 4096; ++index) {
+                std::uint8_t raw[4]{};
+                if (names == 0 || !memory.read(names + index * 4U, raw, sizeof(raw)))
+                    break;
+                const auto name = static_cast<std::uint32_t>(raw[0]) |
+                                  (static_cast<std::uint32_t>(raw[1]) << 8) |
+                                  (static_cast<std::uint32_t>(raw[2]) << 16) |
+                                  (static_cast<std::uint32_t>(raw[3]) << 24);
+                openal::engine().deleteBuffer(name);
+            }
             return true;
         });
     registerFunction(registry, "_alGenSources", "openal-gen-sources-state-only",
@@ -322,21 +347,23 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
                 sourceIntState_.erase(name);
                 sourceFloatBits_.erase(name);
                 sourceQueues_.erase(name);
+                openal::engine().deleteSource(static_cast<std::uint32_t>(name));
             }
             return true;
         });
-    registerFunction(registry, "_alSourcePlay", "openal-source-play-state-only",
-        [this](CpuRegisterState &, GuestAddressSpace &, std::string &) {
+    registerFunction(registry, "_alSourcePlay", "openal-source-play-mixer",
+        [this](CpuRegisterState &registers, GuestAddressSpace &, std::string &) {
             ++openalCalls_;
-            note("alSourcePlay is recorded and ignored: this runtime produces no audio");
+            openal::engine().play(registers.r[0]);
             return true;
         });
-    registerFunction(registry, "_alSourceStop", "openal-source-stop-state-only",
-        [this](CpuRegisterState &, GuestAddressSpace &, std::string &) {
+    registerFunction(registry, "_alSourceStop", "openal-source-stop-mixer",
+        [this](CpuRegisterState &registers, GuestAddressSpace &, std::string &) {
             ++openalCalls_;
+            openal::engine().stop(registers.r[0]);
             return true;
         });
-    registerFunction(registry, "_alSourceQueueBuffers", "openal-source-queue-state-only",
+    registerFunction(registry, "_alSourceQueueBuffers", "openal-source-queue-mixer",
         [this](CpuRegisterState &registers, GuestAddressSpace &memory, std::string &) {
             ++openalCalls_;
             const auto source = registers.r[0];
@@ -351,19 +378,24 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
                                   (static_cast<std::uint32_t>(raw[2]) << 16) |
                                   (static_cast<std::uint32_t>(raw[3]) << 24);
                 sourceQueues_[source].push_back(name);
+                openal::engine().queue(source, name);
             }
             return true;
         });
-    registerFunction(registry, "_alSourceUnqueueBuffers", "openal-source-unqueue-state-only",
+    registerFunction(registry, "_alSourceUnqueueBuffers", "openal-source-unqueue-mixer",
         [this](CpuRegisterState &registers, GuestAddressSpace &memory, std::string &) {
             ++openalCalls_;
             const auto source = registers.r[0];
             const auto count = registers.r[1];
             const auto out = registers.r[2];
+            // The mixer is the source of truth for which buffers have actually
+            // been consumed; hand those back and mirror the removal in the
+            // shim's own bookkeeping.
+            const auto names = openal::engine().unqueue(source, count);
             auto &queue = sourceQueues_[source];
             for (std::uint32_t index = 0; index < count && index < 4096; ++index) {
-                const std::uint32_t name = queue.empty() ? 0 : queue.front();
-                if (!queue.empty())
+                const std::uint32_t name = index < names.size() ? names[index] : 0;
+                if (!queue.empty() && index < names.size())
                     queue.erase(queue.begin());
                 if (out != 0 && !writeWord(memory, out + index * 4U, name))
                     break;
@@ -373,7 +405,17 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
     registerFunction(registry, "_alSourcei", "openal-source-int-state-only",
         [this](CpuRegisterState &registers, GuestAddressSpace &, std::string &) {
             ++openalCalls_;
-            sourceIntState_[registers.r[0]][registers.r[1]] = registers.r[2];
+            const auto sourceName = registers.r[0];
+            const auto parameter = registers.r[1];
+            const auto value = registers.r[2];
+            sourceIntState_[sourceName][parameter] = value;
+            if (parameter == kAlLooping) {
+                openal::engine().setLooping(sourceName, value != 0);
+            } else if (parameter == kAlBuffer && value != 0) {
+                // alSourcei(AL_BUFFER, id) attaches a one-shot buffer directly;
+                // treat it as a single-entry queue so the mixer can play it.
+                openal::engine().queue(sourceName, value);
+            }
             return true;
         });
     registerFunction(registry, "_alSource3i", "openal-source-3int-state-only",
@@ -385,8 +427,13 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
     registerFunction(registry, "_alSourcef", "openal-source-float-state-only",
         [this](CpuRegisterState &registers, GuestAddressSpace &, std::string &) {
             ++openalCalls_;
-            sourceFloatBits_[registers.r[0]][registers.r[1]] =
-                static_cast<std::uint32_t>(registers.d[0] & 0xffffffffU);
+            const auto bits = static_cast<std::uint32_t>(registers.d[0] & 0xffffffffU);
+            sourceFloatBits_[registers.r[0]][registers.r[1]] = bits;
+            if (registers.r[1] == kAlGain) {
+                float gain = 1.0f;
+                std::memcpy(&gain, &bits, sizeof(gain));
+                openal::engine().setGain(registers.r[0], gain);
+            }
             return true;
         });
     registerFunction(registry, "_alSource3f", "openal-source-3float-state-only",
@@ -399,12 +446,26 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
     registerFunction(registry, "_alGetSourcei", "openal-get-source-int-state-only",
         [this](CpuRegisterState &registers, GuestAddressSpace &memory, std::string &) {
             ++openalCalls_;
-            const auto found = sourceIntState_.find(registers.r[0]);
+            const auto sourceName = registers.r[0];
+            const auto parameter = registers.r[1];
             std::uint32_t value = 0;
-            if (found != sourceIntState_.end()) {
-                const auto entry = found->second.find(registers.r[1]);
-                if (entry != found->second.end())
-                    value = entry->second;
+            bool answered = false;
+            if (parameter == kAlBuffersProcessed) {
+                // Streaming games poll this to know which buffers to unqueue
+                // and refill; answer from the mixer's real playback position.
+                value = openal::engine().processedCount(sourceName);
+                answered = true;
+            } else if (parameter == kAlSourceState) {
+                value = openal::engine().isPlaying(sourceName) ? kAlPlaying : kAlStopped;
+                answered = true;
+            }
+            if (!answered) {
+                const auto found = sourceIntState_.find(sourceName);
+                if (found != sourceIntState_.end()) {
+                    const auto entry = found->second.find(parameter);
+                    if (entry != found->second.end())
+                        value = entry->second;
+                }
             }
             if (registers.r[2] != 0 && !writeWord(memory, registers.r[2], value))
                 note("alGetSourcei could not write its guest out-parameter");
@@ -424,17 +485,51 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
                 note("alGetSourcef could not write its guest out-parameter");
             return true;
         });
-    registerFunction(registry, "_alBufferData", "openal-buffer-data-state-only",
-        [this](CpuRegisterState &, GuestAddressSpace &, std::string &) {
+    registerFunction(registry, "_alBufferData", "openal-buffer-data-capture",
+        [this](CpuRegisterState &registers, GuestAddressSpace &memory, std::string &) {
             ++openalCalls_;
-            note("alBufferData is recorded and dropped: no audio device is opened");
+            // alBufferData(buffer, format, data, size, freq): AAPCS puts buffer,
+            // format, data and size in r0..r3; freq arrives on the stack.
+            const auto bufferName = registers.r[0];
+            const auto format = registers.r[1];
+            const auto data = registers.r[2];
+            const auto size = registers.r[3];
+            std::uint32_t stackArguments[2] = {0, 0};
+            std::uint32_t frequency = 44100;
+            if (registers.r[13] != 0 &&
+                memory.read(registers.r[13], stackArguments, sizeof(std::uint32_t)))
+                frequency = stackArguments[0];
+            openal::PcmBuffer buffer;
+            buffer.name = bufferName;
+            switch (format) {
+                case kAlFormatMono8: buffer.channels = 1; buffer.bitsPerSample = 8; break;
+                case kAlFormatMono16: buffer.channels = 1; buffer.bitsPerSample = 16; break;
+                case kAlFormatStereo8: buffer.channels = 2; buffer.bitsPerSample = 8; break;
+                case kAlFormatStereo16: buffer.channels = 2; buffer.bitsPerSample = 16; break;
+                default: buffer.channels = 1; buffer.bitsPerSample = 16; break;
+            }
+            buffer.sampleRate = frequency == 0 ? 44100 : frequency;
+            if (size > 0 && size <= 64U * 1024U * 1024U && data != 0) {
+                buffer.bytes.resize(size);
+                if (!memory.read(data, buffer.bytes.data(), size)) {
+                    note("alBufferData could not read the guest PCM payload");
+                    buffer.bytes.clear();
+                }
+            }
+            openal::engine().storeBuffer(buffer);
             return true;
         });
-    registerFunction(registry, "_alcOpenDevice", "openal-open-device-state-only",
+    registerFunction(registry, "_alcOpenDevice", "openal-open-device-mixer",
         [this](CpuRegisterState &registers, GuestAddressSpace &, std::string &) {
             ++openalCalls_;
+            // Open the real output stream where one exists (AAudio on Android).
+            // When no backend is available the mixer still tracks state, so the
+            // game stays silent instead of crashing.
+            const bool opened = openal::engine().openDevice();
             registers.r[0] = nextDeviceToken_++;
-            note("alcOpenDevice returns a state-only device token; no audio backend is opened");
+            note(opened ? "alcOpenDevice opened the host audio output stream"
+                        : "alcOpenDevice has no host audio backend on this build; the "
+                          "mixer runs without device output");
             return true;
         });
     registerFunction(registry, "_alcCloseDevice", "openal-close-device-state-only",
@@ -457,6 +552,9 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
     registerFunction(registry, "_alcMakeContextCurrent", "openal-make-context-current-state-only",
         [this](CpuRegisterState &registers, GuestAddressSpace &, std::string &) {
             ++openalCalls_;
+            // Making a context current is the point the game starts issuing
+            // plays from; make sure the output stream is open (idempotent).
+            openal::engine().openDevice();
             registers.r[0] = 1; // ALC_TRUE
             return true;
         });
