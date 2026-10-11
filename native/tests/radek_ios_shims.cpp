@@ -1404,6 +1404,15 @@ void testBatch2CGRect() {
     CHECK(offset.origin.x == 2.25f && offset.origin.y == 1.5f);
     CHECK(offset.size.width == 10.0f && offset.size.height == 20.0f);
 
+    // CGRectInset moves the origin in and shrinks the size by twice the inset.
+    const radek_CGRect inset = radek_compat_CGRectInset(rect, 2.0f, 3.0f);
+    CHECK(inset.origin.x == 3.25f && inset.origin.y == 5.5f);
+    CHECK(inset.size.width == 6.0f && inset.size.height == 14.0f);
+    const radek_CGRect insetNull{{INFINITY, INFINITY}, {0.0f, 0.0f}};
+    CHECK(radek_compat_CGRectIsNull(radek_compat_CGRectInset(insetNull, 5.0f, 5.0f)) == 1);
+    CHECK(radek_compat_CGRectEqualToRect(rect, rect) == 1);
+    CHECK(radek_compat_CGRectEqualToRect(rect, offset) == 0);
+
     const radek_CGRect overlapping{{5.0f, 5.0f}, {10.0f, 10.0f}};
     const radek_CGRect disjoint{{100.0f, 100.0f}, {5.0f, 5.0f}};
     CHECK(radek_compat_CGRectIntersectsRect(rect, overlapping) == 1);

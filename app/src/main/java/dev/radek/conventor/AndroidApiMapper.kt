@@ -1289,6 +1289,8 @@ internal object AndroidApiMapper {
         "_CGRectIsEmpty" to "radek_compat_CGRectIsEmpty",
         "_CGRectIsNull" to "radek_compat_CGRectIsNull",
         "_CGRectOffset" to "radek_compat_CGRectOffset",
+        "_CGRectInset" to "radek_compat_CGRectInset",
+        "_CGRectEqualToRect" to "radek_compat_CGRectEqualToRect",
         "_CCHmac" to "radek_compat_CCHmac",
         "_CCHmacInit" to "radek_compat_CCHmacInit",
         "_CCHmacUpdate" to "radek_compat_CCHmacUpdate",

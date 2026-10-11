@@ -7319,6 +7319,26 @@ extern "C" radek_CGRect radek_compat_CGRectOffset(radek_CGRect rect, float dx, f
 }
 #endif
 
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CGRectInset)
+extern "C" radek_CGRect radek_compat_CGRectInset(radek_CGRect rect, float dx, float dy) {
+    // CGRectNull stays null; otherwise the origin moves in and the size shrinks by
+    // twice the inset, with no standardization of a negative size.
+    if (radek_compat_CGRectIsNull(rect)) return rect;
+    rect.origin.x += dx;
+    rect.origin.y += dy;
+    rect.size.width -= 2.0f * dx;
+    rect.size.height -= 2.0f * dy;
+    return rect;
+}
+#endif
+
+#if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CGRectEqualToRect)
+extern "C" radek_Boolean radek_compat_CGRectEqualToRect(radek_CGRect left, radek_CGRect right) {
+    return (left.origin.x == right.origin.x && left.origin.y == right.origin.y &&
+            left.size.width == right.size.width && left.size.height == right.size.height) ? 1 : 0;
+}
+#endif
+
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_CGRectIntersectsRect)
 extern "C" radek_Boolean radek_compat_CGRectIntersectsRect(radek_CGRect left, radek_CGRect right) {
     if (radek_compat_CGRectIsEmpty(left) || radek_compat_CGRectIsEmpty(right)) return 0;
