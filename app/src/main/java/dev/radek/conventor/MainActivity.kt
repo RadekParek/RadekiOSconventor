@@ -129,20 +129,31 @@ class MainActivity : Activity() {
     private var pendingNdkNeedsName: String = "ndk-needs.txt"
     private val maxTranslatedRuntimeInputBytes = 1024L * 1024 * 1024
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
+
+    /** Accent presets for the converter UI; each has a dark-theme and a light-theme tone. */
+    private data class AccentScheme(val id: String, val label: String, val dark: Int, val light: Int)
+    private val accentSchemes = listOf(
+        AccentScheme("teal", "Teal (default)", Color.rgb(92, 227, 181), Color.rgb(0, 125, 112)),
+        AccentScheme("blue", "Blue", Color.rgb(125, 180, 255), Color.rgb(29, 78, 216)),
+        AccentScheme("amber", "Amber", Color.rgb(251, 191, 36), Color.rgb(180, 83, 9)),
+        AccentScheme("violet", "Violet", Color.rgb(196, 167, 255), Color.rgb(109, 40, 217)),
+    )
+
     private fun applyThemePalette() {
         lightMode = preferences.getBoolean("light_theme", false)
+        val scheme = accentSchemes.firstOrNull { it.id == preferences.getString("accent_scheme", "teal") } ?: accentSchemes[0]
         if (lightMode) {
             bgColor = Color.rgb(245, 247, 250)
             panel = Color.WHITE
             muted = Color.rgb(92, 104, 119)
-            accent = Color.rgb(0, 125, 112)
+            accent = scheme.light
             textColor = Color.rgb(22, 32, 46)
             outlineColor = Color.rgb(220, 226, 234)
         } else {
             bgColor = Color.rgb(11, 16, 29)
             panel = Color.rgb(20, 29, 47)
             muted = Color.rgb(160, 178, 199)
-            accent = Color.rgb(92, 227, 181)
+            accent = scheme.dark
             textColor = Color.WHITE
             outlineColor = Color.rgb(45, 59, 79)
         }
@@ -498,6 +509,25 @@ class MainActivity : Activity() {
             settingsScreen()
         }
 
+        val accentCard = card()
+        text("Accent color", 17f, textColor, true, accentCard)
+        val currentScheme = preferences.getString("accent_scheme", "teal")
+        val currentLabel = accentSchemes.firstOrNull { it.id == currentScheme }?.label ?: accentSchemes[0].label
+        button("Accent · $currentLabel", parent = accentCard) {
+            val labels = accentSchemes.map { it.label }.toTypedArray()
+            val selectedIndex = accentSchemes.indexOfFirst { it.id == currentScheme }.coerceAtLeast(0)
+            AlertDialog.Builder(this)
+                .setTitle("Accent color")
+                .setSingleChoiceItems(labels, selectedIndex) { dialog, which ->
+                    preferences.edit().putString("accent_scheme", accentSchemes[which].id).apply()
+                    dialog.dismiss()
+                    applyThemePalette()
+                    settingsScreen()
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+
         val host = card()
         text("Host analysis target ABI", 17f, textColor, true, host)
         val preferredAbi = preferences.getString("target_abi", "auto") ?: "auto"
@@ -533,6 +563,7 @@ class MainActivity : Activity() {
         button("Restore defaults") {
             preferences.edit()
                 .putBoolean("light_theme", false)
+                .putString("accent_scheme", "teal")
                 .putString("target_abi", "auto")
                 .apply()
             applyThemePalette()
