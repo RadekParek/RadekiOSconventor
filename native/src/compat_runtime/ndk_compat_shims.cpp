@@ -5,6 +5,7 @@
 #include "compat_runtime/virtual_file_system.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -429,7 +430,20 @@ void ShimAdapter::registerGenericCandidate(ShimRegistry &registry, const char *s
                      });
 }
 
+namespace {
+std::atomic<std::uint64_t> gBusyMutexAttempts{0};
+std::atomic<std::uint32_t> gLastBusyMutex{0};
+} // namespace
+
+std::uint64_t liveBusyMutexAttempts() {
+    return gBusyMutexAttempts.load(std::memory_order_relaxed);
+}
+
+std::uint32_t liveLastBusyMutex() { return gLastBusyMutex.load(std::memory_order_relaxed); }
+
 bool ShimAdapter::noteWorkerMutexBusy(CpuRegisterState &registers, GuestAddressSpace &memory) {
+    gBusyMutexAttempts.fetch_add(1, std::memory_order_relaxed);
+    gLastBusyMutex.store(static_cast<std::uint32_t>(registers.r[0]), std::memory_order_relaxed);
     // Long enough that a worker which is only briefly contended keeps running;
     // short enough that a worker stuck on its creator's mutex is ended in
     // milliseconds rather than stalling the whole boot.

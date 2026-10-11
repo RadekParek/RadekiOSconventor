@@ -30,6 +30,8 @@
 
 #include <jni.h>
 
+#include <cstdio>
+
 #include <android/native_window_jni.h>
 #include <android/native_window.h>
 
@@ -188,6 +190,10 @@ Java_dev_radek_gameruntime_GameBootActivity_getRendererProgress(JNIEnv *env, jcl
     report["framesPresented"] = progress.framesPresented;
     report["guestImportCalls"] = radek::compat_runtime::liveCalloutCount();
     report["lastGuestImport"] = radek::compat_runtime::liveLastCalloutSymbol();
+    report["busyMutexAttempts"] = radek::compat_runtime::ndk::liveBusyMutexAttempts();
+    char busyMutex[16];
+    std::snprintf(busyMutex, sizeof(busyMutex), "0x%08x", radek::compat_runtime::ndk::liveLastBusyMutex());
+    report["lastBusyMutex"] = std::string(busyMutex);
     report["lastNote"] = progress.lastNote.empty() ? std::string("none") : progress.lastNote;
     report["note"] = "A successful EGL swap records a presented frame, not verified image content or gameplay.";
     return jsonString(env, report);

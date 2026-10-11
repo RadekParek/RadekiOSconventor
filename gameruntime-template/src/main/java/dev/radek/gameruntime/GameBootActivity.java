@@ -189,8 +189,11 @@ public final class GameBootActivity extends Activity {
                         + " · refused " + refusedCalls;
                 long imports = progress.optLong("guestImportCalls", 0);
                 String lastImport = progress.optString("lastGuestImport", "none");
+                long busyMutex = progress.optLong("busyMutexAttempts", 0);
                 String importSuffix = " · guest imports " + imports + " · last import "
-                        + (lastImport.isEmpty() ? "none" : lastImport);
+                        + (lastImport.isEmpty() ? "none" : lastImport)
+                        + " · busy mutex waits " + busyMutex + " at "
+                        + progress.optString("lastBusyMutex", "none");
                 String lastNote = progress.optString("lastNote", "none");
                 String noteSuffix = lastNote.equals("none") || lastNote.isEmpty()
                         ? "" : " · last note: " + lastNote;

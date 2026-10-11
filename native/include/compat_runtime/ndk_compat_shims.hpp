@@ -14,6 +14,10 @@
 
 namespace radek::compat_runtime::ndk {
 
+/** Live pthread_mutex busy counts for the renderer status (no behaviour change). */
+std::uint64_t liveBusyMutexAttempts();
+std::uint32_t liveLastBusyMutex();
+
 /**
  * Bounded ARM32 callouts for the exact same-name NDK imports used by the
  * Angry Birds v1.0 fixture.
