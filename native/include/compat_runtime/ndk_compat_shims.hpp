@@ -58,6 +58,18 @@ class ShimAdapter {
     std::function<void(GuestAddressSpace &, GuestAddress)> endWorkerUnwindChain_;
     std::map<GuestAddressSpace *, std::vector<PthreadFrame>> pthreadFrames_;
     std::map<GuestAddressSpace *, std::vector<GuestAddress>> completedPthreads_;
+    // pthread_create records the worker here and returns to the creator at once.
+    // The worker runs when the creator yields (usleep, sched_yield, pthread_join),
+    // so a worker that waits on a mutex its creator holds cannot deadlock the CPU.
+    struct PendingPthread {
+        GuestAddress token = 0;
+        GuestAddress threadCell = 0;
+        GuestAddress start = 0;
+        GuestAddress argument = 0;
+    };
+    std::map<GuestAddressSpace *, std::vector<PendingPthread>> pendingPthreads_;
+    bool startPendingPthread(CpuRegisterState &registers, GuestAddressSpace &memory,
+                             GuestAddress &target, GuestAddress onlyToken);
     // Owner and recursion depth per held guest mutex. The owner is the current
     // worker's thread token, or 0 for the main thread.
     struct GuestMutexOwner {

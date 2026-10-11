@@ -537,11 +537,15 @@ void testGuestPthreadCreateTransfersAndJoins() {
     const auto continuation = registry.resolve("_radek_pthread_continuation");
     const auto exit = registry.resolve("_pthread_exit");
     const auto join = registry.resolve("_pthread_join");
-    CHECK(create.has_value() && create->invokeTransfer);
+    CHECK(create.has_value() && create->invoke);
+    const auto usleepShim = registry.resolve("_usleep");
+    CHECK(usleepShim.has_value() && usleepShim->invokeTransfer);
     CHECK(continuation.has_value() && continuation->invoke);
     CHECK(exit.has_value() && exit->invoke);
-    CHECK(join.has_value() && join->invoke);
+    CHECK(join.has_value() && (join->invoke || join->invokeTransfer));
 
+    // pthread_create is deferred: it records the worker and returns to the creator
+    // at once. The worker runs when the creator yields (usleep here).
     CpuRegisterState registers;
     registers.r[0] = 0x2000;
     registers.r[2] = 0x1000;
@@ -549,19 +553,26 @@ void testGuestPthreadCreateTransfersAndJoins() {
     registers.r[14] = 0x3456;
     std::string reason;
     CHECK(registry.invokeCallout(create->guestAddress, registers, memory, reason) ==
-          GuestCalloutResult::Transferred);
-    CHECK(registers.r[15] == 0x1000);
-    CHECK(registers.r[0] == 0x12345678);
-    CHECK(registers.r[14] == continuation->guestAddress);
+          GuestCalloutResult::Returned);
+    CHECK(registers.r[0] == 0);
+    CHECK(registers.r[14] == 0x3456);
     std::uint32_t token = 0;
     CHECK(memory.read(0x2000, &token, sizeof(token)));
     CHECK(token != 0);
     CHECK(ndkShims.guestThreadTransferCount() == 1);
+    CHECK(ndkShims.guestThreadCompletionCount() == 0);
 
+    // usleep runs the pending worker; the continuation returns to usleep's caller.
+    registers.r[14] = 0x5678;
+    CHECK(registry.invokeCallout(usleepShim->guestAddress, registers, memory, reason) ==
+          GuestCalloutResult::Transferred);
+    CHECK(registers.r[15] == 0x1000);
+    CHECK(registers.r[0] == 0x12345678);
+    CHECK(registers.r[14] == continuation->guestAddress);
     CHECK(registry.invokeCallout(continuation->guestAddress, registers, memory, reason) ==
           GuestCalloutResult::Returned);
     CHECK(registers.r[0] == 0);
-    CHECK(registers.r[14] == 0x3456);
+    CHECK(registers.r[14] == 0x5678);
     CHECK(ndkShims.guestThreadCompletionCount() == 1);
 
     // A worker that uses pthread_exit must take the same continuation path
@@ -572,17 +583,43 @@ void testGuestPthreadCreateTransfersAndJoins() {
     registers.r[3] = 0x87654321;
     registers.r[14] = 0x4567;
     CHECK(registry.invokeCallout(create->guestAddress, registers, memory, reason) ==
-          GuestCalloutResult::Transferred);
+          GuestCalloutResult::Returned);
     std::uint32_t exitToken = 0;
     CHECK(memory.read(0x2000, &exitToken, sizeof(exitToken)));
+    registers.r[14] = 0x4568;
+    CHECK(registry.invokeCallout(usleepShim->guestAddress, registers, memory, reason) ==
+          GuestCalloutResult::Transferred);
     CHECK(registry.invokeCallout(exit->guestAddress, registers, memory, reason) ==
           GuestCalloutResult::Returned);
     CHECK(registers.r[14] == continuation->guestAddress);
     CHECK(registry.invokeCallout(continuation->guestAddress, registers, memory, reason) ==
           GuestCalloutResult::Returned);
-    CHECK(registers.r[14] == 0x4567);
+    CHECK(registers.r[14] == 0x4568);
     CHECK(ndkShims.guestThreadCompletionCount() == 2);
 
+    // pthread_join on a worker that has not started yet runs it first, then
+    // returns to the joiner with success.
+    registers = CpuRegisterState{};
+    registers.r[0] = 0x2000;
+    registers.r[2] = 0x1000;
+    registers.r[3] = 0x11112222;
+    registers.r[14] = 0x4569;
+    CHECK(registry.invokeCallout(create->guestAddress, registers, memory, reason) ==
+          GuestCalloutResult::Returned);
+    std::uint32_t joinToken = 0;
+    CHECK(memory.read(0x2000, &joinToken, sizeof(joinToken)));
+    registers.r[0] = joinToken;
+    registers.r[14] = 0x456a;
+    CHECK(registry.invokeCallout(join->guestAddress, registers, memory, reason) ==
+          GuestCalloutResult::Transferred);
+    CHECK(registry.invokeCallout(continuation->guestAddress, registers, memory, reason) ==
+          GuestCalloutResult::Returned);
+    CHECK(registers.r[14] == 0x456a);
+    CHECK(registers.r[0] == 0);
+    CHECK(ndkShims.guestThreadCompletionCount() == 3);
+
+    // The earlier completed workers are still joinable.
+    registers = CpuRegisterState{};
     registers.r[0] = token;
     CHECK(registry.invokeCallout(join->guestAddress, registers, memory, reason) ==
           GuestCalloutResult::Returned);
