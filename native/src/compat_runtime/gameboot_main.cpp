@@ -17,6 +17,7 @@
 #include "compat_runtime/cpu.hpp"
 #include "compat_runtime/darwin_compat_shims.hpp"
 #include "compat_runtime/gles_shims.hpp"
+#include "compat_runtime/cxx_string_shims.hpp"
 #include "compat_runtime/libsystem_shims.hpp"
 #include "compat_runtime/objc_shims.hpp"
 #include "compat_runtime/runner.hpp"
@@ -110,6 +111,8 @@ int main(int argc, char **argv) {
         radek::compat_runtime::darwin_compat::ShimAdapter darwinShims(&objcShims);
         objcShims.registerBindings(shims);
         libsystemShims.registerBindings(shims);
+        radek::compat_runtime::cxx_string::ShimAdapter cxxStringShims(&libsystemShims);
+        cxxStringShims.registerBindings(shims);
         audioShims.registerBindings(shims);
         sjljUnwind.registerBindings(shims);
         ndkShims.attachWorkerUnwindChain(

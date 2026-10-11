@@ -83,6 +83,7 @@ if(RADEK_BUILD_COMPAT_RUNTIME)
         src/compat_runtime/sjlj_unwind.cpp
         src/compat_runtime/trap_shims.cpp
         src/compat_runtime/libsystem_shims.cpp
+        src/compat_runtime/cxx_string_shims.cpp
         src/compat_runtime/gles_shims.cpp
         src/compat_runtime/darwin_compat_shims.cpp
         src/compat_runtime/app_lifecycle.cpp
@@ -200,6 +201,12 @@ if(RADEK_BUILD_COMPAT_RUNTIME)
         target_compile_options(compat-runtime-darwin-compat-tests PRIVATE -Wall -Wextra -Werror)
         target_link_libraries(compat-runtime-darwin-compat-tests PRIVATE compat_runtime_core)
         add_test(NAME compat-runtime-darwin-compat COMMAND compat-runtime-darwin-compat-tests)
+
+        add_executable(compat-runtime-cxx-string-tests tests/cxx_string_shims.cpp)
+        target_include_directories(compat-runtime-cxx-string-tests PRIVATE include)
+        target_compile_options(compat-runtime-cxx-string-tests PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(compat-runtime-cxx-string-tests PRIVATE compat_runtime_core)
+        add_test(NAME compat-runtime-cxx-string COMMAND compat-runtime-cxx-string-tests)
 
         add_executable(compat-runtime-openal-tests tests/openal_backend.cpp)
         target_include_directories(compat-runtime-openal-tests PRIVATE include)

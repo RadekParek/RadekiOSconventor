@@ -394,6 +394,16 @@ bool ShimAdapter::ensureHeap(GuestAddressSpace &memory) {
     return true;
 }
 
+GuestAddress ShimAdapter::guestAllocate(GuestAddressSpace &memory, std::size_t size) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return allocate(memory, size);
+}
+
+void ShimAdapter::guestRelease(GuestAddressSpace &memory, GuestAddress address) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    release(memory, address);
+}
+
 GuestAddress ShimAdapter::allocate(GuestAddressSpace &memory, std::size_t size) {
     if (!ensureHeap(memory))
         return 0;
