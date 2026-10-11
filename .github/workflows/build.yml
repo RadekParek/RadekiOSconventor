@@ -269,7 +269,7 @@ jobs:
               ("fixture same-name NDK provider count is 181", providers.get("sameNameNdkProviderCount") == 181),
               ("0 outstanding guest adapters remain", providers.get("guestRuntimeAdapterCatalogCount") == 0),
               ("73 fixture imports resolve to verified adapter semantics", providers.get("verifiedGuestAdapterCount") == 73),
-              ("guest-adapter inventory is 105 names", providers.get("guestRuntimeAdapterCatalogInventoryCount") == 105),
+              ("guest-adapter inventory is 124 names", providers.get("guestRuntimeAdapterCatalogInventoryCount") == 124),
               ("reviewed NDK catalog remains 1,229 names", providers.get("fullNdkCandidateInventoryCount") == 1229),
               ("portable-C translation has functions and no failed functions",
                translation.get("status") == "GENERATED_PORTABLE_C"

@@ -82,7 +82,7 @@ void testSymbolSetIsPinned() {
     // four kEAGL keys, __DefaultRuneLocale, __CFConstantStringClassReference,
     // __gxx_personality_sj0 and the 19 OpenAL entry points it imports
     // (alSource3i is the one extra, bound for the general OpenAL subset).
-    CHECK(harness.shims.boundSymbolCount() == 34);
+    CHECK(harness.shims.boundSymbolCount() == 53);
     for (const auto *symbol : {
              "___tolower", "___toupper", "___maskrune", "___error", "___stdinp", "___stdoutp",
              "___stderrp", "_kEAGLColorFormatRGB565", "_kEAGLColorFormatRGBA8",
@@ -135,6 +135,39 @@ void testErrnoAndStandardStreamCells() {
         files.standardStream(VirtualFileSystem::StandardStream::Output);
     CHECK(files.write(stdoutHandle, "", 0, detail) == 0);
     CHECK(harness.shims.streamCellCount() == 3);
+}
+
+void testStringConstantsAreDistinctGuestObjects() {
+    Harness harness;
+    std::vector<GuestAddress> objects;
+    for (const auto *symbol : {
+             "_AVCaptureSessionDidStartRunningNotification",
+             "_AVCaptureSessionDidStopRunningNotification",
+             "_AVCaptureSessionErrorKey",
+             "_AVCaptureSessionInterruptionEndedNotification",
+             "_AVCaptureSessionPreset640x480",
+             "_AVCaptureSessionRuntimeErrorNotification",
+             "_AVCaptureSessionWasInterruptedNotification",
+             "_AVLayerVideoGravityResizeAspectFill",
+             "_AVMediaTypeVideo",
+             "_MPMoviePlayerLoadStateDidChangeNotification",
+             "_MPMoviePlayerPlaybackDidFinishNotification",
+             "_NSDefaultRunLoopMode",
+             "_NSInvalidArgumentException",
+             "_UIImagePickerControllerOriginalImage",
+             "_UIKeyboardDidShowNotification",
+             "_UIKeyboardWillShowNotification",
+             "_kCAFillModeForwards",
+             "_kCAMediaTimingFunctionLinear",
+             "_kCVPixelBufferPixelFormatTypeKey",
+         }) {
+        const auto object = harness.dataSymbol(symbol);
+        CHECK(object != 0);
+        objects.push_back(object);
+    }
+    for (std::size_t index = 0; index < objects.size(); ++index)
+        for (std::size_t other = index + 1; other < objects.size(); ++other)
+            CHECK(objects[index] != objects[other]);
 }
 
 void testEaglKeysRuneAndConstantStringToken() {
@@ -194,6 +227,7 @@ int main() {
     testCtypeSweepIsAsciiAndBounded();
     testErrnoAndStandardStreamCells();
     testEaglKeysRuneAndConstantStringToken();
+    testStringConstantsAreDistinctGuestObjects();
     testOpenAlIsStateOnly();
     testPersonalityIsAFailClosedBoundary();
     return 0;

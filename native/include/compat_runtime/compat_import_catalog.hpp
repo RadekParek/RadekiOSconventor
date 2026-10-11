@@ -24,7 +24,7 @@ struct Provider {
     bool verified;
 };
 
-inline constexpr std::array<Provider, 105> kDarwinOnlyProviders{{
+inline constexpr std::array<Provider, 124> kDarwinOnlyProviders{{
     {"_AudioSessionInitialize", "audio-session.initialize", true},
     {"_AudioSessionSetActive", "audio-session.set-active", true},
     {"_NSHomeDirectory", "foundation.home-directory", true},
@@ -101,6 +101,25 @@ inline constexpr std::array<Provider, 105> kDarwinOnlyProviders{{
     {"_objc_msgSend_stret", "objc.msgSend.stret", true},
     {"_objc_setProperty", "objc.setProperty", true},
     {"_OSAtomicAnd32OrigBarrier", "libsystem.osatomic-and32-orig-barrier", true},
+    {"_AVCaptureSessionDidStartRunningNotification", "darwin.constant-string.AVCaptureSessionDidStartRunningNotification", true},
+    {"_AVCaptureSessionDidStopRunningNotification", "darwin.constant-string.AVCaptureSessionDidStopRunningNotification", true},
+    {"_AVCaptureSessionErrorKey", "darwin.constant-string.AVCaptureSessionErrorKey", true},
+    {"_AVCaptureSessionInterruptionEndedNotification", "darwin.constant-string.AVCaptureSessionInterruptionEndedNotification", true},
+    {"_AVCaptureSessionPreset640x480", "darwin.constant-string.AVCaptureSessionPreset640x480", true},
+    {"_AVCaptureSessionRuntimeErrorNotification", "darwin.constant-string.AVCaptureSessionRuntimeErrorNotification", true},
+    {"_AVCaptureSessionWasInterruptedNotification", "darwin.constant-string.AVCaptureSessionWasInterruptedNotification", true},
+    {"_AVLayerVideoGravityResizeAspectFill", "darwin.constant-string.AVLayerVideoGravityResizeAspectFill", true},
+    {"_AVMediaTypeVideo", "darwin.constant-string.AVMediaTypeVideo", true},
+    {"_MPMoviePlayerLoadStateDidChangeNotification", "darwin.constant-string.MPMoviePlayerLoadStateDidChangeNotification", true},
+    {"_MPMoviePlayerPlaybackDidFinishNotification", "darwin.constant-string.MPMoviePlayerPlaybackDidFinishNotification", true},
+    {"_NSDefaultRunLoopMode", "darwin.constant-string.NSDefaultRunLoopMode", true},
+    {"_NSInvalidArgumentException", "darwin.constant-string.NSInvalidArgumentException", true},
+    {"_UIImagePickerControllerOriginalImage", "darwin.constant-string.UIImagePickerControllerOriginalImage", true},
+    {"_UIKeyboardDidShowNotification", "darwin.constant-string.UIKeyboardDidShowNotification", true},
+    {"_UIKeyboardWillShowNotification", "darwin.constant-string.UIKeyboardWillShowNotification", true},
+    {"_kCAFillModeForwards", "darwin.constant-string.kCAFillModeForwards", true},
+    {"_kCAMediaTimingFunctionLinear", "darwin.constant-string.kCAMediaTimingFunctionLinear", true},
+    {"_kCVPixelBufferPixelFormatTypeKey", "darwin.constant-string.kCVPixelBufferPixelFormatTypeKey", true},
     {"___fixsfsivfp", "compiler-runtime.fixsfsivfp", true},
     {"___fixunsdfsivfp", "compiler-runtime.fixunsdfsivfp", true},
     {"___floatsidfvfp", "compiler-runtime.floatsidfvfp", true},

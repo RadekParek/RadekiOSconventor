@@ -105,6 +105,25 @@ CONCRETE_DARWIN_COMPAT_PROVIDERS: dict[str, str] = {
     "___udivsi3": "compiler-runtime.udivsi3",
     "___umodsi3": "compiler-runtime.umodsi3",
     "_OSAtomicAnd32OrigBarrier": "libsystem.osatomic-and32-orig-barrier",
+    "_AVCaptureSessionDidStartRunningNotification": "darwin.constant-string.AVCaptureSessionDidStartRunningNotification",
+    "_AVCaptureSessionDidStopRunningNotification": "darwin.constant-string.AVCaptureSessionDidStopRunningNotification",
+    "_AVCaptureSessionErrorKey": "darwin.constant-string.AVCaptureSessionErrorKey",
+    "_AVCaptureSessionInterruptionEndedNotification": "darwin.constant-string.AVCaptureSessionInterruptionEndedNotification",
+    "_AVCaptureSessionPreset640x480": "darwin.constant-string.AVCaptureSessionPreset640x480",
+    "_AVCaptureSessionRuntimeErrorNotification": "darwin.constant-string.AVCaptureSessionRuntimeErrorNotification",
+    "_AVCaptureSessionWasInterruptedNotification": "darwin.constant-string.AVCaptureSessionWasInterruptedNotification",
+    "_AVLayerVideoGravityResizeAspectFill": "darwin.constant-string.AVLayerVideoGravityResizeAspectFill",
+    "_AVMediaTypeVideo": "darwin.constant-string.AVMediaTypeVideo",
+    "_MPMoviePlayerLoadStateDidChangeNotification": "darwin.constant-string.MPMoviePlayerLoadStateDidChangeNotification",
+    "_MPMoviePlayerPlaybackDidFinishNotification": "darwin.constant-string.MPMoviePlayerPlaybackDidFinishNotification",
+    "_NSDefaultRunLoopMode": "darwin.constant-string.NSDefaultRunLoopMode",
+    "_NSInvalidArgumentException": "darwin.constant-string.NSInvalidArgumentException",
+    "_UIImagePickerControllerOriginalImage": "darwin.constant-string.UIImagePickerControllerOriginalImage",
+    "_UIKeyboardDidShowNotification": "darwin.constant-string.UIKeyboardDidShowNotification",
+    "_UIKeyboardWillShowNotification": "darwin.constant-string.UIKeyboardWillShowNotification",
+    "_kCAFillModeForwards": "darwin.constant-string.kCAFillModeForwards",
+    "_kCAMediaTimingFunctionLinear": "darwin.constant-string.kCAMediaTimingFunctionLinear",
+    "_kCVPixelBufferPixelFormatTypeKey": "darwin.constant-string.kCVPixelBufferPixelFormatTypeKey",
     # Compiler-runtime and VFP soft-float helpers (native compiler_rt_shims.cpp).
     "___fixsfsivfp": "compiler-runtime.fixsfsivfp",
     "___fixunsdfsivfp": "compiler-runtime.fixunsdfsivfp",
@@ -139,9 +158,9 @@ CONCRETE_DARWIN_COMPAT_PROVIDERS: dict[str, str] = {
 
 CONCRETE_DARWIN_COMPAT_IMPORT_COUNT = len(CONCRETE_DARWIN_COMPAT_PROVIDERS)
 
-if CONCRETE_DARWIN_COMPAT_IMPORT_COUNT != 105:  # pragma: no cover - authoring guard
+if CONCRETE_DARWIN_COMPAT_IMPORT_COUNT != 124:  # pragma: no cover - authoring guard
     raise AssertionError(
-        "the non-NDK Darwin provider inventory must contain exactly 105 imports, "
+        "the non-NDK Darwin provider inventory must contain exactly 124 imports, "
         f"got {CONCRETE_DARWIN_COMPAT_IMPORT_COUNT}"
     )
 
@@ -159,6 +178,25 @@ def provider_for_symbol(symbol: str) -> str | None:
 # native/include/compat_runtime/compat_import_catalog.hpp and
 # app/src/main/java/dev/radek/conventor/CompatImportProviders.kt.
 VERIFIED_SEMANTICS_PROVIDERS: frozenset[str] = frozenset({
+    "darwin.constant-string.AVCaptureSessionDidStartRunningNotification",
+    "darwin.constant-string.AVCaptureSessionDidStopRunningNotification",
+    "darwin.constant-string.AVCaptureSessionErrorKey",
+    "darwin.constant-string.AVCaptureSessionInterruptionEndedNotification",
+    "darwin.constant-string.AVCaptureSessionPreset640x480",
+    "darwin.constant-string.AVCaptureSessionRuntimeErrorNotification",
+    "darwin.constant-string.AVCaptureSessionWasInterruptedNotification",
+    "darwin.constant-string.AVLayerVideoGravityResizeAspectFill",
+    "darwin.constant-string.AVMediaTypeVideo",
+    "darwin.constant-string.MPMoviePlayerLoadStateDidChangeNotification",
+    "darwin.constant-string.MPMoviePlayerPlaybackDidFinishNotification",
+    "darwin.constant-string.NSDefaultRunLoopMode",
+    "darwin.constant-string.NSInvalidArgumentException",
+    "darwin.constant-string.UIImagePickerControllerOriginalImage",
+    "darwin.constant-string.UIKeyboardDidShowNotification",
+    "darwin.constant-string.UIKeyboardWillShowNotification",
+    "darwin.constant-string.kCAFillModeForwards",
+    "darwin.constant-string.kCAMediaTimingFunctionLinear",
+    "darwin.constant-string.kCVPixelBufferPixelFormatTypeKey",
     "libsystem.osatomic-and32-orig-barrier",
     "compiler-runtime.fixsfsivfp",
     "compiler-runtime.fixunsdfsivfp",

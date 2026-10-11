@@ -260,6 +260,55 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
     registerData(registry, "_kEAGLDrawablePropertyRetainedBacking", "eagl-key-retained-backing",
                  eaglKey("kEAGLDrawablePropertyRetainedBacking",
                          "kEAGLDrawablePropertyRetainedBacking"));
+    // --- Foundation/AVFoundation/UIKit/Core Animation string constants --------
+    const auto stringConstant = [this](const std::string &symbol, const std::string &value) {
+        return [this, symbol, value](GuestAddressSpace &memory, GuestAddress &address,
+                                     std::string &reason) {
+            const auto object = constantString(memory, symbol, value, reason);
+            if (object == 0)
+                return false;
+            address = object;
+            return true;
+        };
+    };
+    registerData(registry, "_AVCaptureSessionDidStartRunningNotification", "darwin-constant-avcapturesessiondidstartrunningnotification",
+                 stringConstant("_AVCaptureSessionDidStartRunningNotification", "AVCaptureSessionDidStartRunningNotification"));
+    registerData(registry, "_AVCaptureSessionDidStopRunningNotification", "darwin-constant-avcapturesessiondidstoprunningnotification",
+                 stringConstant("_AVCaptureSessionDidStopRunningNotification", "AVCaptureSessionDidStopRunningNotification"));
+    registerData(registry, "_AVCaptureSessionErrorKey", "darwin-constant-avcapturesessionerrorkey",
+                 stringConstant("_AVCaptureSessionErrorKey", "AVCaptureSessionErrorKey"));
+    registerData(registry, "_AVCaptureSessionInterruptionEndedNotification", "darwin-constant-avcapturesessioninterruptionendednotification",
+                 stringConstant("_AVCaptureSessionInterruptionEndedNotification", "AVCaptureSessionInterruptionEndedNotification"));
+    registerData(registry, "_AVCaptureSessionPreset640x480", "darwin-constant-avcapturesessionpreset640x480",
+                 stringConstant("_AVCaptureSessionPreset640x480", "AVCaptureSessionPreset640x480"));
+    registerData(registry, "_AVCaptureSessionRuntimeErrorNotification", "darwin-constant-avcapturesessionruntimeerrornotification",
+                 stringConstant("_AVCaptureSessionRuntimeErrorNotification", "AVCaptureSessionRuntimeErrorNotification"));
+    registerData(registry, "_AVCaptureSessionWasInterruptedNotification", "darwin-constant-avcapturesessionwasinterruptednotification",
+                 stringConstant("_AVCaptureSessionWasInterruptedNotification", "AVCaptureSessionWasInterruptedNotification"));
+    registerData(registry, "_AVLayerVideoGravityResizeAspectFill", "darwin-constant-avlayervideogravityresizeaspectfill",
+                 stringConstant("_AVLayerVideoGravityResizeAspectFill", "AVLayerVideoGravityResizeAspectFill"));
+    registerData(registry, "_AVMediaTypeVideo", "darwin-constant-avmediatypevideo",
+                 stringConstant("_AVMediaTypeVideo", "vide"));
+    registerData(registry, "_MPMoviePlayerLoadStateDidChangeNotification", "darwin-constant-mpmovieplayerloadstatedidchangenotification",
+                 stringConstant("_MPMoviePlayerLoadStateDidChangeNotification", "MPMoviePlayerLoadStateDidChangeNotification"));
+    registerData(registry, "_MPMoviePlayerPlaybackDidFinishNotification", "darwin-constant-mpmovieplayerplaybackdidfinishnotification",
+                 stringConstant("_MPMoviePlayerPlaybackDidFinishNotification", "MPMoviePlayerPlaybackDidFinishNotification"));
+    registerData(registry, "_NSDefaultRunLoopMode", "darwin-constant-nsdefaultrunloopmode",
+                 stringConstant("_NSDefaultRunLoopMode", "kCFRunLoopDefaultMode"));
+    registerData(registry, "_NSInvalidArgumentException", "darwin-constant-nsinvalidargumentexception",
+                 stringConstant("_NSInvalidArgumentException", "NSInvalidArgumentException"));
+    registerData(registry, "_UIImagePickerControllerOriginalImage", "darwin-constant-uiimagepickercontrolleroriginalimage",
+                 stringConstant("_UIImagePickerControllerOriginalImage", "UIImagePickerControllerOriginalImage"));
+    registerData(registry, "_UIKeyboardDidShowNotification", "darwin-constant-uikeyboarddidshownotification",
+                 stringConstant("_UIKeyboardDidShowNotification", "UIKeyboardDidShowNotification"));
+    registerData(registry, "_UIKeyboardWillShowNotification", "darwin-constant-uikeyboardwillshownotification",
+                 stringConstant("_UIKeyboardWillShowNotification", "UIKeyboardWillShowNotification"));
+    registerData(registry, "_kCAFillModeForwards", "darwin-constant-kcafillmodeforwards",
+                 stringConstant("_kCAFillModeForwards", "forwards"));
+    registerData(registry, "_kCAMediaTimingFunctionLinear", "darwin-constant-kcamediatimingfunctionlinear",
+                 stringConstant("_kCAMediaTimingFunctionLinear", "linear"));
+    registerData(registry, "_kCVPixelBufferPixelFormatTypeKey", "darwin-constant-kcvpixelbufferpixelformattypekey",
+                 stringConstant("_kCVPixelBufferPixelFormatTypeKey", "PixelFormatType"));
 
     // --- rune table and CoreFoundation constant-string class ------------------
     registerData(registry, "__DefaultRuneLocale", "darwin-default-runelocale-page",
