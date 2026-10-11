@@ -121,6 +121,9 @@ class MainActivity : Activity() {
     private val pickerIpa = 100
     private val pickerApk = 101
     private val pickerTranslatedRuntimeInput = 102
+    private val createNdkNeedsText = 103
+    private var pendingNdkNeedsText: String? = null
+    private var pendingNdkNeedsName: String = "ndk-needs.txt"
     private val maxTranslatedRuntimeInputBytes = 1024L * 1024 * 1024
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
     private fun applyThemePalette() {
@@ -647,7 +650,12 @@ class MainActivity : Activity() {
             }
             if (total > 0) {
                 button("List this IPA's unimplemented / unresolved NDK needs", parent = mappingCard) {
-                    showText("Unimplemented / unresolved NDK needs", ApiNeedReport.format(mapping))
+                    val appInfo = report.optJSONObject("application") ?: JSONObject()
+                    val gameName = appInfo.optString("name")
+                    val bundleId = appInfo.optString("bundleId")
+                    val text = ndkNeedsHeader(gameName, bundleId, appInfo.optString("version")) + ApiNeedReport.format(mapping)
+                    val safeBundle = bundleId.ifBlank { "game" }.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                    showNeedsText("Unimplemented / unresolved NDK needs", text, "$safeBundle-ndk-needs.txt")
                 }
             }
             val generated = report.optJSONObject("hostConversion")?.optInt("generatedApiReplacements", 0) ?: 0
@@ -1119,6 +1127,42 @@ class MainActivity : Activity() {
         startActivity(Intent.createChooser(share, "Share APK result"))
     }
 
+    private fun ndkNeedsHeader(name: String, bundleId: String, version: String): String {
+        val stamp = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+        return "Game: ${name.ifBlank { "unknown" }}\nBundle ID: ${bundleId.ifBlank { "unknown" }}\n" +
+            "Version: ${version.ifBlank { "unknown" }}\nExported: $stamp\n\n"
+    }
+
+    private fun showNeedsText(title: String, value: String, fileName: String) {
+        pendingNdkNeedsText = value
+        pendingNdkNeedsName = fileName
+        val view = TextView(this).apply { text = value; setTextIsSelectable(true); textSize = 12f; typeface = Typeface.MONOSPACE; setPadding(dp(16), dp(16), dp(16), dp(16)) }
+        AlertDialog.Builder(this).setTitle(title).setView(ScrollView(this).apply { addView(view) })
+            .setNeutralButton("Download") { _, _ -> startNeedsDownload() }
+            .setPositiveButton("Close", null).show()
+    }
+
+    private fun startNeedsDownload() {
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TITLE, pendingNdkNeedsName)
+        }
+        startActivityForResult(intent, createNdkNeedsText)
+    }
+
+    private fun saveNeedsText(uri: Uri?) {
+        val text = pendingNdkNeedsText ?: return
+        if (uri == null) return
+        try {
+            contentResolver.openOutputStream(uri, "wt")?.use { it.write(text.toByteArray(Charsets.UTF_8)) }
+                ?: error("the chosen file could not be opened")
+            Toast.makeText(this, "Saved NDK needs list", Toast.LENGTH_LONG).show()
+        } catch (error: Exception) {
+            Toast.makeText(this, "Could not save: ${error.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun showText(title: String, value: String) {
         val view = TextView(this).apply { text = value; setTextIsSelectable(true); textSize = 12f; typeface = Typeface.MONOSPACE; setPadding(dp(16), dp(16), dp(16), dp(16)) }
         AlertDialog.Builder(this).setTitle(title).setView(ScrollView(this).apply { addView(view) }).setPositiveButton("Close", null).show()
@@ -1126,6 +1170,10 @@ class MainActivity : Activity() {
     @Deprecated("Framework result API retained to avoid third-party dependencies")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == createNdkNeedsText) {
+            if (resultCode == RESULT_OK) saveNeedsText(data?.data)
+            return
+        }
         if (resultCode != RESULT_OK || data?.data == null) return
         val uri = data.data!!
         if (Jobs.busy) return
