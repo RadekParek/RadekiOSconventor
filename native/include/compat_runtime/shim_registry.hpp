@@ -49,7 +49,9 @@ using GuestImageInitializer = std::function<bool(
 class ShimRegistry {
     mutable std::mutex mutex_;
     std::map<std::string, ShimBinding> bindings_;
-    std::map<GuestAddress, std::string> callouts_;
+    // Stable pointers into bindings_ (std::map nodes never move and nothing erases),
+    // so a callout dispatches without copying the binding or its callbacks.
+    std::map<GuestAddress, const ShimBinding *> callouts_;
     std::map<std::string, GuestImageInitializer> imageInitializers_;
 
   public:
