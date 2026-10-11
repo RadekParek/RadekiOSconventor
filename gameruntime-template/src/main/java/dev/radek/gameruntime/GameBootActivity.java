@@ -187,6 +187,10 @@ public final class GameBootActivity extends Activity {
                 long frames = progress.optLong("framesPresented", 0);
                 String counters = "GL calls " + guestCalls + " · driver calls " + forwardedCalls
                         + " · refused " + refusedCalls;
+                long imports = progress.optLong("guestImportCalls", 0);
+                String lastImport = progress.optString("lastGuestImport", "none");
+                String importSuffix = " · guest imports " + imports + " · last import "
+                        + (lastImport.isEmpty() ? "none" : lastImport);
                 String lastNote = progress.optString("lastNote", "none");
                 String noteSuffix = lastNote.equals("none") || lastNote.isEmpty()
                         ? "" : " · last note: " + lastNote;
@@ -196,9 +200,9 @@ public final class GameBootActivity extends Activity {
                             + " · no frame verified · " + counters;
                 } else if (!drawableReady) {
                     message = "Renderer waiting · EGL/GLES loaded, drawable not ready"
-                            + " · no frame verified · " + counters + noteSuffix;
+                            + " · no frame verified · " + counters + importSuffix + noteSuffix;
                 } else if (frames == 0) {
-                    message = "Renderer waiting · no successful EGL swap yet · " + counters + noteSuffix;
+                    message = "Renderer waiting · no successful EGL swap yet · " + counters + importSuffix + noteSuffix;
                 } else if (!windowSurface) {
                     message = "Renderer is offscreen · " + frames
                             + " EGL swap(s) to a pbuffer, not this screen · image/gameplay unverified";

@@ -186,6 +186,8 @@ Java_dev_radek_gameruntime_GameBootActivity_getRendererProgress(JNIEnv *env, jcl
     report["forwardedCalls"] = progress.forwardedCalls;
     report["refusedCalls"] = progress.refusedCalls;
     report["framesPresented"] = progress.framesPresented;
+    report["guestImportCalls"] = radek::compat_runtime::liveCalloutCount();
+    report["lastGuestImport"] = radek::compat_runtime::liveLastCalloutSymbol();
     report["lastNote"] = progress.lastNote.empty() ? std::string("none") : progress.lastNote;
     report["note"] = "A successful EGL swap records a presented frame, not verified image content or gameplay.";
     return jsonString(env, report);

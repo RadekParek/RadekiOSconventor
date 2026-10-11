@@ -1,8 +1,22 @@
 #include "compat_runtime/shim_registry.hpp"
 
+#include <atomic>
 #include <stdexcept>
 
 namespace radek::compat_runtime {
+
+namespace {
+std::atomic<std::uint64_t> gLiveCalloutCount{0};
+std::mutex gLiveCalloutMutex;
+std::string gLiveLastCallout;
+} // namespace
+
+std::uint64_t liveCalloutCount() { return gLiveCalloutCount.load(std::memory_order_relaxed); }
+
+std::string liveLastCalloutSymbol() {
+    std::lock_guard<std::mutex> lock(gLiveCalloutMutex);
+    return gLiveLastCallout;
+}
 
 void ShimRegistry::registerBinding(ShimBinding binding) {
     const bool dataBinding = static_cast<bool>(binding.resolveGuestAddress);
@@ -95,6 +109,11 @@ GuestCalloutResult ShimRegistry::invokeCallout(GuestAddress address,
             return GuestCalloutResult::Failed;
         }
         binding = found->second;
+    }
+    gLiveCalloutCount.fetch_add(1, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(gLiveCalloutMutex);
+        gLiveLastCallout = binding.darwinSymbol;
     }
     if (binding.invokeException) {
         if (!binding.invokeException(registers, memory, reason)) {

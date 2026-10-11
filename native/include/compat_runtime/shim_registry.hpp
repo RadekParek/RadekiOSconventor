@@ -3,6 +3,7 @@
 #include "compat_runtime/cpu.hpp"
 #include "compat_runtime/guest_memory.hpp"
 
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -11,6 +12,10 @@
 #include <vector>
 
 namespace radek::compat_runtime {
+
+/** Live count of guest imports entering the shim layer, and the last one called. */
+std::uint64_t liveCalloutCount();
+std::string liveLastCalloutSymbol();
 
 struct ShimBinding {
     std::string darwinSymbol;
