@@ -59,6 +59,10 @@ class ShimAdapter {
                               std::uint32_t value);
     GuestAddress constantString(GuestAddressSpace &memory, const std::string &symbol,
                                 const std::string &value, std::string &reason);
+    // Address of a guest cell holding the constant's NSString pointer. An `NSString *const`
+    // symbol is a variable: the import slot must point at the variable, not at the string.
+    GuestAddress constantStringCell(GuestAddressSpace &memory, const std::string &symbol,
+                                    const std::string &value, std::string &reason);
     GuestAddress errorCell(GuestAddressSpace &memory, std::string &reason);
     // Guest cell holding a constant's raw value (a CGFloat, or a CGRect/CGSize/CGAffineTransform).
     GuestAddress valueCell(GuestAddressSpace &memory, const std::string &symbol,

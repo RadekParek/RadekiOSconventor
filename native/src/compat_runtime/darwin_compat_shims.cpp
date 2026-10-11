@@ -179,6 +179,17 @@ GuestAddress ShimAdapter::valueCell(GuestAddressSpace &memory, const std::string
     return address;
 }
 
+GuestAddress ShimAdapter::constantStringCell(GuestAddressSpace &memory, const std::string &symbol,
+                                             const std::string &value, std::string &reason) {
+    const auto object = constantString(memory, symbol, value, reason);
+    if (object == 0)
+        return 0;
+    const std::vector<std::uint8_t> pointer{
+        static_cast<std::uint8_t>(object & 0xff), static_cast<std::uint8_t>((object >> 8) & 0xff),
+        static_cast<std::uint8_t>((object >> 16) & 0xff), static_cast<std::uint8_t>((object >> 24) & 0xff)};
+    return valueCell(memory, symbol + "#pointer", pointer, reason);
+}
+
 GuestAddress ShimAdapter::errorCell(GuestAddressSpace &memory, std::string &reason) {
     const auto found = errnoCells_.find(&memory);
     if (found != errnoCells_.end())
@@ -262,10 +273,10 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
     const auto eaglKey = [this](const std::string &symbol, const std::string &value) {
         return [this, symbol, value](GuestAddressSpace &memory, GuestAddress &address,
                                      std::string &reason) {
-            const auto object = constantString(memory, symbol, value, reason);
-            if (object == 0)
+            const auto cell = constantStringCell(memory, symbol, value, reason);
+            if (cell == 0)
                 return false;
-            address = object;
+            address = cell;
             return true;
         };
     };
@@ -282,10 +293,10 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
     const auto stringConstant = [this](const std::string &symbol, const std::string &value) {
         return [this, symbol, value](GuestAddressSpace &memory, GuestAddress &address,
                                      std::string &reason) {
-            const auto object = constantString(memory, symbol, value, reason);
-            if (object == 0)
+            const auto cell = constantStringCell(memory, symbol, value, reason);
+            if (cell == 0)
                 return false;
-            address = object;
+            address = cell;
             return true;
         };
     };

@@ -119,6 +119,18 @@ void testBioShockConstantValues() {
     CHECK(harness.dataSymbol("_NSFontAttributeName") != harness.dataSymbol("_NSForegroundColorAttributeName"));
 }
 
+void testStringConstantSymbolsAreVariables() {
+    // An `NSString *const` symbol is a variable: its address holds the NSString pointer,
+    // and the pointed-to object starts with a non-zero isa.
+    Harness harness;
+    for (const auto *symbol : {"_NSFontAttributeName", "_kEAGLColorFormatRGBA8", "_UIApplicationDidBecomeActiveNotification"}) {
+        const GuestAddress variable = harness.dataSymbol(symbol);
+        const GuestAddress object = harness.readWord(variable);
+        CHECK(object != 0 && object != variable);
+        CHECK(harness.readWord(object) != 0);
+    }
+}
+
 void testCtypeSweepIsAsciiAndBounded() {
     Harness harness;
     CHECK(harness.call("___tolower", 'A') == 'a');
@@ -252,6 +264,7 @@ int main() {
     testEaglKeysRuneAndConstantStringToken();
     testBioShockConstantValues();
     testStringConstantsAreDistinctGuestObjects();
+    testStringConstantSymbolsAreVariables();
     testOpenAlIsStateOnly();
     testPersonalityIsAFailClosedBoundary();
     return 0;
