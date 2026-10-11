@@ -468,7 +468,7 @@ void ShimAdapter::releaseGuestMutexesLocked(GuestAddress owner, GuestAddressSpac
 
 // Only a mutex initialised from a PTHREAD_MUTEX_RECURSIVE attribute nests for its
 // owner. Any other self-lock is busy, exactly as POSIX trylock reports it.
-bool ShimAdapter::lockGuestMutex(CpuRegisterState &r, GuestAddressSpace &memory) {
+bool ShimAdapter::lockGuestMutex(CpuRegisterState &r, GuestAddressSpace &memory, bool blocking) {
     std::uint32_t value = 0;
     if (!r.r[0] || !readValue(memory, r.r[0], value)) {
         r.r[0] = kErrnoInvalidArgument;
@@ -493,6 +493,11 @@ bool ShimAdapter::lockGuestMutex(CpuRegisterState &r, GuestAddressSpace &memory)
             r.r[0] = 0;
             return true;
         }
+        if (blocking && !recursive && entry.depth > 0 && entry.owner == self) {
+            ++entry.phantomLocks;
+            r.r[0] = 0;
+            return true;
+        }
     }
     noteWorkerMutexBusy(r, memory);
     r.r[0] = kErrnoBusy;
@@ -508,6 +513,12 @@ void ShimAdapter::unlockGuestMutex(CpuRegisterState &r, GuestAddressSpace &memor
     std::lock_guard<std::mutex> lock(mutex_);
     const auto self = currentGuestThreadLocked(memory);
     const auto found = guestMutexOwners_.find(address);
+    if (found != guestMutexOwners_.end() && found->second.owner == self &&
+        found->second.phantomLocks > 0) {
+        --found->second.phantomLocks;
+        r.r[0] = 0;
+        return;
+    }
     if (found != guestMutexOwners_.end() && found->second.owner == self &&
         found->second.depth > 1) {
         --found->second.depth;
@@ -1393,9 +1404,9 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
     registerFunction(registry, "_pthread_mutex_destroy", "ndk-pthread-mutex-destroy",
                      [this](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { std::lock_guard<std::mutex> lock(mutex_); guestMutexRecursive_.erase(r.r[0]); guestMutexOwners_.erase(r.r[0]); const std::uint32_t zero = 0; r.r[0] = r.r[0] && writeValue(memory, r.r[0], zero) ? 0U : kErrnoInvalidArgument; return true; });
     registerFunction(registry, "_pthread_mutex_lock", "ndk-pthread-mutex-lock",
-                     [this](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { return lockGuestMutex(r, memory); });
+                     [this](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { return lockGuestMutex(r, memory, true); });
     registerFunction(registry, "_pthread_mutex_trylock", "ndk-pthread-mutex-trylock",
-                     [this](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { return lockGuestMutex(r, memory); });
+                     [this](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { return lockGuestMutex(r, memory, false); });
     registerFunction(registry, "_pthread_mutex_unlock", "ndk-pthread-mutex-unlock",
                      [this](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { unlockGuestMutex(r, memory); return true; });
     registerFunction(registry, "_pthread_mutexattr_init", "ndk-pthread-mutexattr-init",

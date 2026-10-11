@@ -332,6 +332,36 @@ void testAllNdkProvidersAndMinimalEmulation() {
     CHECK(harness.call("_pthread_mutex_unlock", registers, reason) == GuestCalloutResult::Returned);
     CHECK(registers.r[0] == 0);
 
+    // A blocking self-lock of a normal mutex is granted as a phantom lock (HyperHLE
+    // behaviour) instead of spinning, and a matching unlock consumes it.
+    constexpr GuestAddress kPhantomMutex = kData + 0x880;
+    registers = {};
+    registers.r[0] = kPhantomMutex;
+    CHECK(harness.call("_pthread_mutex_init", registers, reason) == GuestCalloutResult::Returned);
+    for (int depth = 0; depth < 2; ++depth) {
+        registers = {};
+        registers.r[0] = kPhantomMutex;
+        CHECK(harness.call("_pthread_mutex_lock", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(registers.r[0] == 0);
+    }
+    registers = {};
+    registers.r[0] = kPhantomMutex;
+    CHECK(harness.call("_pthread_mutex_unlock", registers, reason) == GuestCalloutResult::Returned);
+    registers = {};
+    registers.r[0] = kPhantomMutex;
+    CHECK(harness.call("_pthread_mutex_trylock", registers, reason) == GuestCalloutResult::Returned);
+    CHECK(registers.r[0] == 16); // still held by the outer lock
+    registers = {};
+    registers.r[0] = kPhantomMutex;
+    CHECK(harness.call("_pthread_mutex_unlock", registers, reason) == GuestCalloutResult::Returned);
+    registers = {};
+    registers.r[0] = kPhantomMutex;
+    CHECK(harness.call("_pthread_mutex_trylock", registers, reason) == GuestCalloutResult::Returned);
+    CHECK(registers.r[0] == 0);
+    registers = {};
+    registers.r[0] = kPhantomMutex;
+    CHECK(harness.call("_pthread_mutex_unlock", registers, reason) == GuestCalloutResult::Returned);
+
     // A mutex initialised from a PTHREAD_MUTEX_RECURSIVE attribute nests for its owner.
     constexpr GuestAddress kRecursiveAttr = kData + 0x800;
     constexpr GuestAddress kRecursiveMutex = kData + 0x840;
