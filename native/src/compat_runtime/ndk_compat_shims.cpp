@@ -468,12 +468,19 @@ void ShimAdapter::releaseGuestMutexesLocked(GuestAddress owner, GuestAddressSpac
 
 // Only a mutex initialised from a PTHREAD_MUTEX_RECURSIVE attribute nests for its
 // owner. Any other self-lock is busy, exactly as POSIX trylock reports it.
-bool ShimAdapter::lockGuestMutex(CpuRegisterState &r, GuestAddressSpace &memory, bool blocking) {
+// Locks a guest mutex. A blocking lock that is busy inside a worker parks the worker
+// (its registers are kept and it is resumed later), so the worker's work is not
+// lost. A busy trylock returns EBUSY, as POSIX requires.
+bool ShimAdapter::lockGuestMutex(CpuRegisterState &r, GuestAddressSpace &memory, bool blocking,
+                                 GuestAddress &target) {
+    target = 0;
     std::uint32_t value = 0;
     if (!r.r[0] || !readValue(memory, r.r[0], value)) {
         r.r[0] = kErrnoInvalidArgument;
         return true;
     }
+    bool park = false;
+    PthreadFrame frame;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto self = currentGuestThreadLocked(memory);
@@ -498,9 +505,71 @@ bool ShimAdapter::lockGuestMutex(CpuRegisterState &r, GuestAddressSpace &memory,
             r.r[0] = 0;
             return true;
         }
+        const auto found = pthreadFrames_.find(&memory);
+        if (blocking && self != 0 && found != pthreadFrames_.end() && !found->second.empty()) {
+            frame = found->second.back();
+            found->second.pop_back();
+            if (found->second.empty())
+                pthreadFrames_.erase(found);
+            ParkedWorker parked;
+            parked.token = frame.threadToken;
+            parked.threadCell = frame.threadCell;
+            parked.registers = r;
+            parked.blocking = true;
+            parkedWorkers_[&memory].push_back(parked);
+            park = true;
+        }
     }
-    noteWorkerMutexBusy(r, memory);
+    if (park) {
+        if (endWorkerUnwindChain_)
+            endWorkerUnwindChain_(memory, frame.savedUnwindTop);
+        // Return to the creator's yield point with the creator's registers.
+        r = frame.creatorRegisters;
+        r.r[0] = 0;
+        target = frame.callerReturnAddress;
+        return true;
+    }
+    if (!blocking)
+        noteWorkerMutexBusy(r, memory);
     r.r[0] = kErrnoBusy;
+    return true;
+}
+
+// Resumes one parked worker from a creator yield point and retries its blocking lock.
+// If the lock is still busy the worker parks again, which returns to this yield point.
+bool ShimAdapter::resumeParkedWorker(CpuRegisterState &registers, GuestAddressSpace &memory,
+                                     GuestAddress &target) {
+    ParkedWorker parked;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = parkedWorkers_.find(&memory);
+        if (found == parkedWorkers_.end() || found->second.empty())
+            return false;
+        parked = found->second.front();
+        found->second.erase(found->second.begin());
+        if (found->second.empty())
+            parkedWorkers_.erase(found);
+    }
+    const GuestAddress savedUnwindTop =
+        beginWorkerUnwindChain_ ? beginWorkerUnwindChain_(memory) : 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pthreadFrames_[&memory].push_back(PthreadFrame{registers.r[14], parked.token,
+                                                       parked.threadCell, savedUnwindTop,
+                                                       registers});
+    }
+    CpuRegisterState worker = parked.registers;
+    GuestAddress lockTarget = 0;
+    lockGuestMutex(worker, memory, parked.blocking, lockTarget);
+    if (lockTarget != 0) {
+        // Parked again: lockGuestMutex already returned the worker's frame to the yield.
+        registers = worker;
+        target = lockTarget;
+        return true;
+    }
+    // Lock acquired: continue the worker where it blocked.
+    registers = worker;
+    target = worker.r[14];
     return true;
 }
 
@@ -989,7 +1058,7 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
         [this](CpuRegisterState &r, GuestAddressSpace &memory, GuestAddress &target, std::string &) {
             std::this_thread::yield();
             target = 0;
-            if (startPendingPthread(r, memory, target, 0))
+            if (resumeParkedWorker(r, memory, target) || startPendingPthread(r, memory, target, 0))
                 return true;
             r.r[0] = 0;
             return true;
@@ -998,7 +1067,7 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
         registry, "_usleep", "ndk-posix-usleep",
         [this](CpuRegisterState &r, GuestAddressSpace &memory, GuestAddress &target, std::string &) {
             target = 0;
-            if (startPendingPthread(r, memory, target, 0))
+            if (resumeParkedWorker(r, memory, target) || startPendingPthread(r, memory, target, 0))
                 return true;
             r.r[0] = 0;
             return true;
@@ -1453,10 +1522,10 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
                      [this](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { std::lock_guard<std::mutex> lock(mutex_); const auto attr = r.r[1]; const auto attrType = guestMutexAttrTypes_.find(attr); guestMutexRecursive_[r.r[0]] = attr != 0 && attrType != guestMutexAttrTypes_.end() && attrType->second == kDarwinRecursiveMutexType; guestMutexOwners_.erase(r.r[0]); const std::uint32_t zero = 0; r.r[0] = r.r[0] && writeValue(memory, r.r[0], zero) ? 0U : kErrnoInvalidArgument; return true; });
     registerFunction(registry, "_pthread_mutex_destroy", "ndk-pthread-mutex-destroy",
                      [this](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { std::lock_guard<std::mutex> lock(mutex_); guestMutexRecursive_.erase(r.r[0]); guestMutexOwners_.erase(r.r[0]); const std::uint32_t zero = 0; r.r[0] = r.r[0] && writeValue(memory, r.r[0], zero) ? 0U : kErrnoInvalidArgument; return true; });
-    registerFunction(registry, "_pthread_mutex_lock", "ndk-pthread-mutex-lock",
-                     [this](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { return lockGuestMutex(r, memory, true); });
-    registerFunction(registry, "_pthread_mutex_trylock", "ndk-pthread-mutex-trylock",
-                     [this](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { return lockGuestMutex(r, memory, false); });
+    registerTransferFunction(registry, "_pthread_mutex_lock", "ndk-pthread-mutex-lock",
+                             [this](CpuRegisterState &r, GuestAddressSpace &memory, GuestAddress &target, std::string &) { return lockGuestMutex(r, memory, true, target); });
+    registerTransferFunction(registry, "_pthread_mutex_trylock", "ndk-pthread-mutex-trylock",
+                             [this](CpuRegisterState &r, GuestAddressSpace &memory, GuestAddress &target, std::string &) { return lockGuestMutex(r, memory, false, target); });
     registerFunction(registry, "_pthread_mutex_unlock", "ndk-pthread-mutex-unlock",
                      [this](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { unlockGuestMutex(r, memory); return true; });
     registerFunction(registry, "_pthread_mutexattr_init", "ndk-pthread-mutexattr-init",
@@ -1471,7 +1540,7 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
                          target = 0;
                          // A worker that has not started yet is run now, and join returns
                          // to the caller once it has finished.
-                         if (startPendingPthread(r, memory, target, r.r[0]))
+                         if (resumeParkedWorker(r, memory, target) || startPendingPthread(r, memory, target, r.r[0]))
                              return true;
                          std::lock_guard<std::mutex> lock(mutex_);
                          auto found = completedPthreads_.find(&memory);

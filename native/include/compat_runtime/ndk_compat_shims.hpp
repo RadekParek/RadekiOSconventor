@@ -70,6 +70,17 @@ class ShimAdapter {
     std::map<GuestAddressSpace *, std::vector<PendingPthread>> pendingPthreads_;
     bool startPendingPthread(CpuRegisterState &registers, GuestAddressSpace &memory,
                              GuestAddress &target, GuestAddress onlyToken);
+    // A worker blocked on a mutex is parked with its full registers, control returns to
+    // its creator, and the lock is retried at the creator's next yield (no lost work).
+    struct ParkedWorker {
+        GuestAddress token = 0;
+        GuestAddress threadCell = 0;
+        CpuRegisterState registers{};
+        bool blocking = true;
+    };
+    std::map<GuestAddressSpace *, std::vector<ParkedWorker>> parkedWorkers_;
+    bool resumeParkedWorker(CpuRegisterState &registers, GuestAddressSpace &memory,
+                            GuestAddress &target);
     // Owner and recursion depth per held guest mutex. The owner is the current
     // worker's thread token, or 0 for the main thread.
     struct GuestMutexOwner {
@@ -87,7 +98,8 @@ class ShimAdapter {
     std::map<GuestAddress, std::uint32_t> guestMutexAttrTypes_;
     GuestAddress currentGuestThreadLocked(GuestAddressSpace &memory);
     void releaseGuestMutexesLocked(GuestAddress owner, GuestAddressSpace &memory);
-    bool lockGuestMutex(CpuRegisterState &r, GuestAddressSpace &memory, bool blocking);
+    bool lockGuestMutex(CpuRegisterState &r, GuestAddressSpace &memory, bool blocking,
+                        GuestAddress &target);
     void unlockGuestMutex(CpuRegisterState &r, GuestAddressSpace &memory);
     std::uint64_t guestThreadTransfers_ = 0;
     std::uint64_t guestThreadCompletions_ = 0;

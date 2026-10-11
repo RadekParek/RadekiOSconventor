@@ -628,6 +628,91 @@ void testGuestPthreadCreateTransfersAndJoins() {
     CHECK(registry.invokeCallout(join->guestAddress, registers, memory, reason) ==
           GuestCalloutResult::Returned);
     CHECK(registers.r[0] == 0);
+    // A worker that blocks on a mutex its creator holds is parked, not cancelled. It is
+    // resumed at the creator's yield, retries, parks again while still busy, and only
+    // finishes after the creator unlocks.
+    {
+        const auto mutexInit = registry.resolve("_pthread_mutex_init");
+        const auto mutexLock = registry.resolve("_pthread_mutex_lock");
+        const auto mutexUnlock = registry.resolve("_pthread_mutex_unlock");
+        CHECK(mutexInit.has_value() && mutexLock.has_value() && mutexUnlock.has_value());
+        // Return sites for the creator's yield points must be executable guest code.
+        memory.mapAt(0x5000, 0x2000, MemoryPermission::Read | MemoryPermission::Execute,
+                     "guest-park-return-sites");
+        constexpr GuestAddress kParkMutex = 0x2100;
+        CpuRegisterState regs;
+        regs.r[0] = kParkMutex;
+        regs.r[1] = 0;
+        CHECK(registry.invokeCallout(mutexInit->guestAddress, regs, memory, reason) ==
+              GuestCalloutResult::Returned);
+        regs = CpuRegisterState{};
+        regs.r[0] = kParkMutex;
+        regs.r[14] = 0x5000;
+        CHECK(registry.invokeCallout(mutexLock->guestAddress, regs, memory, reason) ==
+              GuestCalloutResult::Returned);
+        CHECK(regs.r[0] == 0);
+
+        // The creator starts a worker and yields (usleep) so the worker runs.
+        regs = CpuRegisterState{};
+        regs.r[0] = 0x2000;
+        regs.r[2] = 0x1000;
+        regs.r[3] = 0x0BADF00D;
+        regs.r[14] = 0x6000;
+        CHECK(registry.invokeCallout(create->guestAddress, regs, memory, reason) ==
+              GuestCalloutResult::Returned);
+        std::uint32_t parkToken = 0;
+        CHECK(memory.read(0x2000, &parkToken, sizeof(parkToken)));
+        const auto completionsBefore = ndkShims.guestThreadCompletionCount();
+
+        regs = CpuRegisterState{};
+        regs.r[14] = 0x6100;
+        CHECK(registry.invokeCallout(usleepShim->guestAddress, regs, memory, reason) ==
+              GuestCalloutResult::Transferred);
+        CHECK(regs.r[15] == 0x1000);
+
+        // The worker's blocking lock is busy (owner: creator), so the worker parks and
+        // control returns to the creator's usleep with r0 = 0.
+        regs.r[0] = kParkMutex;
+        regs.r[14] = 0x1100;
+        CHECK(registry.invokeCallout(mutexLock->guestAddress, regs, memory, reason) ==
+              GuestCalloutResult::Transferred);
+        CHECK(regs.r[15] == 0x6100);
+        CHECK(regs.r[0] == 0);
+
+        // Still busy at the next yield: the worker is resumed, retries, and parks again.
+        regs = CpuRegisterState{};
+        regs.r[14] = 0x6200;
+        CHECK(registry.invokeCallout(usleepShim->guestAddress, regs, memory, reason) ==
+              GuestCalloutResult::Transferred);
+        CHECK(regs.r[15] == 0x6200);
+        CHECK(ndkShims.guestThreadCompletionCount() == completionsBefore);
+
+        // The creator releases the mutex; the next yield resumes the worker, whose lock
+        // is acquired, and the worker continues where it blocked.
+        regs = CpuRegisterState{};
+        regs.r[0] = kParkMutex;
+        regs.r[14] = 0x6300;
+        CHECK(registry.invokeCallout(mutexUnlock->guestAddress, regs, memory, reason) ==
+              GuestCalloutResult::Returned);
+        regs = CpuRegisterState{};
+        regs.r[14] = 0x6400;
+        CHECK(registry.invokeCallout(usleepShim->guestAddress, regs, memory, reason) ==
+              GuestCalloutResult::Transferred);
+        CHECK(regs.r[15] == 0x1100);
+        CHECK(regs.r[0] == 0);
+
+        // The worker finishes; the continuation returns to the creator's usleep caller.
+        CHECK(registry.invokeCallout(continuation->guestAddress, regs, memory, reason) ==
+              GuestCalloutResult::Returned);
+        CHECK(regs.r[14] == 0x6400);
+        CHECK(ndkShims.guestThreadCompletionCount() == completionsBefore + 1);
+        // The worker ended while holding the mutex: the release-on-exit rule frees it.
+        std::uint32_t mutexWord = 1;
+        CHECK(memory.read(kParkMutex, &mutexWord, sizeof(mutexWord)));
+        CHECK(mutexWord == 0);
+        (void)parkToken;
+    }
+
 }
 
 void testObjectiveCShimsResolveThroughLoaderAndReturn() {
