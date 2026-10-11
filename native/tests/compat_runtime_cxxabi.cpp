@@ -332,6 +332,43 @@ void testAllNdkProvidersAndMinimalEmulation() {
     CHECK(harness.call("_pthread_mutex_unlock", registers, reason) == GuestCalloutResult::Returned);
     CHECK(registers.r[0] == 0);
 
+    // A mutex initialised from a PTHREAD_MUTEX_RECURSIVE attribute nests for its owner.
+    constexpr GuestAddress kRecursiveAttr = kData + 0x800;
+    constexpr GuestAddress kRecursiveMutex = kData + 0x840;
+    registers = {};
+    registers.r[0] = kRecursiveAttr;
+    CHECK(harness.call("_pthread_mutexattr_init", registers, reason) == GuestCalloutResult::Returned);
+    registers = {};
+    registers.r[0] = kRecursiveAttr;
+    registers.r[1] = 2; // PTHREAD_MUTEX_RECURSIVE (Darwin)
+    CHECK(harness.call("_pthread_mutexattr_settype", registers, reason) == GuestCalloutResult::Returned);
+    registers = {};
+    registers.r[0] = kRecursiveMutex;
+    registers.r[1] = kRecursiveAttr;
+    CHECK(harness.call("_pthread_mutex_init", registers, reason) == GuestCalloutResult::Returned);
+    for (int depth = 0; depth < 2; ++depth) {
+        registers = {};
+        registers.r[0] = kRecursiveMutex;
+        CHECK(harness.call("_pthread_mutex_lock", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(registers.r[0] == 0);
+    }
+    registers = {};
+    registers.r[0] = kRecursiveMutex;
+    CHECK(harness.call("_pthread_mutex_unlock", registers, reason) == GuestCalloutResult::Returned);
+    CHECK(registers.r[0] == 0);
+    registers = {};
+    registers.r[0] = kRecursiveMutex;
+    CHECK(harness.call("_pthread_mutex_unlock", registers, reason) == GuestCalloutResult::Returned);
+    CHECK(registers.r[0] == 0);
+    registers = {};
+    registers.r[0] = kRecursiveMutex;
+    CHECK(harness.call("_pthread_mutex_trylock", registers, reason) == GuestCalloutResult::Returned);
+    CHECK(registers.r[0] == 0);
+    registers = {};
+    registers.r[0] = kRecursiveMutex;
+    CHECK(harness.call("_pthread_mutex_unlock", registers, reason) == GuestCalloutResult::Returned);
+    CHECK(registers.r[0] == 0);
+
     registers = {};
     registers.r[0] = kData + 256;
     CHECK(harness.call("_setjmp", registers, reason) == GuestCalloutResult::Returned);

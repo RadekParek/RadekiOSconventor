@@ -58,6 +58,21 @@ class ShimAdapter {
     std::function<void(GuestAddressSpace &, GuestAddress)> endWorkerUnwindChain_;
     std::map<GuestAddressSpace *, std::vector<PthreadFrame>> pthreadFrames_;
     std::map<GuestAddressSpace *, std::vector<GuestAddress>> completedPthreads_;
+    // Owner and recursion depth per held guest mutex. The owner is the current
+    // worker's thread token, or 0 for the main thread.
+    struct GuestMutexOwner {
+        GuestAddress owner = 0;
+        std::uint32_t depth = 0;
+    };
+    std::map<GuestAddress, GuestMutexOwner> guestMutexOwners_;
+    // Mutex kind recorded at pthread_mutex_init from its attribute (Darwin values:
+    // PTHREAD_MUTEX_RECURSIVE = 2), and the type set by pthread_mutexattr_settype.
+    std::map<GuestAddress, bool> guestMutexRecursive_;
+    std::map<GuestAddress, std::uint32_t> guestMutexAttrTypes_;
+    GuestAddress currentGuestThreadLocked(GuestAddressSpace &memory);
+    void releaseGuestMutexesLocked(GuestAddress owner, GuestAddressSpace &memory);
+    bool lockGuestMutex(CpuRegisterState &r, GuestAddressSpace &memory);
+    void unlockGuestMutex(CpuRegisterState &r, GuestAddressSpace &memory);
     std::uint64_t guestThreadTransfers_ = 0;
     std::uint64_t guestThreadCompletions_ = 0;
     GuestAddress pthreadContinuationAddress_ = 0;
