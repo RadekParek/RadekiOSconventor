@@ -104,13 +104,43 @@ CONCRETE_DARWIN_COMPAT_PROVIDERS: dict[str, str] = {
     "___modsi3": "compiler-runtime.modsi3",
     "___udivsi3": "compiler-runtime.udivsi3",
     "___umodsi3": "compiler-runtime.umodsi3",
+    # Compiler-runtime and VFP soft-float helpers (native compiler_rt_shims.cpp).
+    "___fixsfsivfp": "compiler-runtime.fixsfsivfp",
+    "___fixunsdfsivfp": "compiler-runtime.fixunsdfsivfp",
+    "___floatsidfvfp": "compiler-runtime.floatsidfvfp",
+    "___floatsisfvfp": "compiler-runtime.floatsisfvfp",
+    "___floatundidf": "compiler-runtime.floatundidf",
+    "___floatunssidfvfp": "compiler-runtime.floatunssidfvfp",
+    "___floatunssisfvfp": "compiler-runtime.floatunssisfvfp",
+    "___muldi3": "compiler-runtime.muldi3",
+    "___udivdi3": "compiler-runtime.udivdi3",
+    "___umoddi3": "compiler-runtime.umoddi3",
+    "___adddf3vfp": "compiler-runtime.adddf3vfp",
+    "___addsf3vfp": "compiler-runtime.addsf3vfp",
+    "___divdf3vfp": "compiler-runtime.divdf3vfp",
+    "___divsf3vfp": "compiler-runtime.divsf3vfp",
+    "___eqsf2vfp": "compiler-runtime.eqsf2vfp",
+    "___extendsfdf2vfp": "compiler-runtime.extendsfdf2vfp",
+    "___gedf2vfp": "compiler-runtime.gedf2vfp",
+    "___gtdf2vfp": "compiler-runtime.gtdf2vfp",
+    "___gtsf2vfp": "compiler-runtime.gtsf2vfp",
+    "___lesf2vfp": "compiler-runtime.lesf2vfp",
+    "___ltsf2vfp": "compiler-runtime.ltsf2vfp",
+    "___muldf3vfp": "compiler-runtime.muldf3vfp",
+    "___mulsf3vfp": "compiler-runtime.mulsf3vfp",
+    "___nedf2vfp": "compiler-runtime.nedf2vfp",
+    "___nesf2vfp": "compiler-runtime.nesf2vfp",
+    "___subdf3vfp": "compiler-runtime.subdf3vfp",
+    "___subsf3vfp": "compiler-runtime.subsf3vfp",
+    "___truncdfsf2vfp": "compiler-runtime.truncdfsf2vfp",
+    "___unordsf2vfp": "compiler-runtime.unordsf2vfp",
 }
 
 CONCRETE_DARWIN_COMPAT_IMPORT_COUNT = len(CONCRETE_DARWIN_COMPAT_PROVIDERS)
 
-if CONCRETE_DARWIN_COMPAT_IMPORT_COUNT != 75:  # pragma: no cover - authoring guard
+if CONCRETE_DARWIN_COMPAT_IMPORT_COUNT != 104:  # pragma: no cover - authoring guard
     raise AssertionError(
-        "the non-NDK Darwin provider inventory must contain exactly 75 imports, "
+        "the non-NDK Darwin provider inventory must contain exactly 104 imports, "
         f"got {CONCRETE_DARWIN_COMPAT_IMPORT_COUNT}"
     )
 
@@ -128,6 +158,35 @@ def provider_for_symbol(symbol: str) -> str | None:
 # native/include/compat_runtime/compat_import_catalog.hpp and
 # app/src/main/java/dev/radek/conventor/CompatImportProviders.kt.
 VERIFIED_SEMANTICS_PROVIDERS: frozenset[str] = frozenset({
+    "compiler-runtime.fixsfsivfp",
+    "compiler-runtime.fixunsdfsivfp",
+    "compiler-runtime.floatsidfvfp",
+    "compiler-runtime.floatsisfvfp",
+    "compiler-runtime.floatundidf",
+    "compiler-runtime.floatunssidfvfp",
+    "compiler-runtime.floatunssisfvfp",
+    "compiler-runtime.muldi3",
+    "compiler-runtime.udivdi3",
+    "compiler-runtime.umoddi3",
+    "compiler-runtime.adddf3vfp",
+    "compiler-runtime.addsf3vfp",
+    "compiler-runtime.divdf3vfp",
+    "compiler-runtime.divsf3vfp",
+    "compiler-runtime.eqsf2vfp",
+    "compiler-runtime.extendsfdf2vfp",
+    "compiler-runtime.gedf2vfp",
+    "compiler-runtime.gtdf2vfp",
+    "compiler-runtime.gtsf2vfp",
+    "compiler-runtime.lesf2vfp",
+    "compiler-runtime.ltsf2vfp",
+    "compiler-runtime.muldf3vfp",
+    "compiler-runtime.mulsf3vfp",
+    "compiler-runtime.nedf2vfp",
+    "compiler-runtime.nesf2vfp",
+    "compiler-runtime.subdf3vfp",
+    "compiler-runtime.subsf3vfp",
+    "compiler-runtime.truncdfsf2vfp",
+    "compiler-runtime.unordsf2vfp",
     "compiler-runtime.divdi3", "compiler-runtime.divsi3", "compiler-runtime.moddi3",
     "compiler-runtime.modsi3", "compiler-runtime.udivsi3", "compiler-runtime.umodsi3",
     "compiler-runtime.fixdfdi", "compiler-runtime.floatdidf", "compiler-runtime.floatdisf",

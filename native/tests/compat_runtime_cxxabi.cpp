@@ -78,8 +78,8 @@ void testAllDarwinProvidersAreRegistered() {
     Harness harness;
     const auto missing = compat_import_catalog::missingProviders(harness.registry);
     CHECK(missing.empty());
-    CHECK(compat_import_catalog::kDarwinOnlyProviderCount == 75);
-    CHECK(compat_import_catalog::kGuestRuntimeAdapterProviderCount == 75);
+    CHECK(compat_import_catalog::kDarwinOnlyProviderCount == 104);
+    CHECK(compat_import_catalog::kGuestRuntimeAdapterProviderCount == 104);
     CHECK(harness.compiler.registeredSymbolCount() == 38);
     for (const char *symbol : {"___divsi3", "___modsi3", "___udivsi3", "___umodsi3",
                                "___divdi3", "___moddi3", "___floatdidf", "___floatdisf", "___fixdfdi",

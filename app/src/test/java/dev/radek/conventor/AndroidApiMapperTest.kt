@@ -371,7 +371,7 @@ class AndroidApiMapperTest {
         assertEquals(25, mapping.getInt("sameNameNdkProviderCoveragePercent"))
         assertEquals(3, mapping.getInt("guestRuntimeProviderCount"))
         assertEquals(3, mapping.getInt("guestRuntimeAdapterCataloguedCount"))
-        assertEquals(75, mapping.getInt("guestRuntimeAdapterCatalogInventoryCount"))
+        assertEquals(104, mapping.getInt("guestRuntimeAdapterCatalogInventoryCount"))
         assertEquals("libcompat_runtime_v1.so", mapping.getString("guestRuntimeProviderLibrary"))
         assertEquals("CATALOG_ONLY_NOT_RUNTIME_LINKED", mapping.getString("guestRuntimeProviderCatalogStatus"))
         assertEquals(2, mapping.getInt("compilerRuntimeCandidateCount"))

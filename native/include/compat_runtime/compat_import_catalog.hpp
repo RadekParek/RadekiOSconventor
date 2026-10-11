@@ -24,7 +24,7 @@ struct Provider {
     bool verified;
 };
 
-inline constexpr std::array<Provider, 75> kDarwinOnlyProviders{{
+inline constexpr std::array<Provider, 104> kDarwinOnlyProviders{{
     {"_AudioSessionInitialize", "audio-session.initialize", true},
     {"_AudioSessionSetActive", "audio-session.set-active", true},
     {"_NSHomeDirectory", "foundation.home-directory", true},
@@ -100,6 +100,35 @@ inline constexpr std::array<Provider, 75> kDarwinOnlyProviders{{
     {"_objc_msgSendSuper2", "objc.msgSendSuper2", true},
     {"_objc_msgSend_stret", "objc.msgSend.stret", true},
     {"_objc_setProperty", "objc.setProperty", true},
+    {"___fixsfsivfp", "compiler-runtime.fixsfsivfp", true},
+    {"___fixunsdfsivfp", "compiler-runtime.fixunsdfsivfp", true},
+    {"___floatsidfvfp", "compiler-runtime.floatsidfvfp", true},
+    {"___floatsisfvfp", "compiler-runtime.floatsisfvfp", true},
+    {"___floatundidf", "compiler-runtime.floatundidf", true},
+    {"___floatunssidfvfp", "compiler-runtime.floatunssidfvfp", true},
+    {"___floatunssisfvfp", "compiler-runtime.floatunssisfvfp", true},
+    {"___muldi3", "compiler-runtime.muldi3", true},
+    {"___udivdi3", "compiler-runtime.udivdi3", true},
+    {"___umoddi3", "compiler-runtime.umoddi3", true},
+    {"___adddf3vfp", "compiler-runtime.adddf3vfp", true},
+    {"___addsf3vfp", "compiler-runtime.addsf3vfp", true},
+    {"___divdf3vfp", "compiler-runtime.divdf3vfp", true},
+    {"___divsf3vfp", "compiler-runtime.divsf3vfp", true},
+    {"___eqsf2vfp", "compiler-runtime.eqsf2vfp", true},
+    {"___extendsfdf2vfp", "compiler-runtime.extendsfdf2vfp", true},
+    {"___gedf2vfp", "compiler-runtime.gedf2vfp", true},
+    {"___gtdf2vfp", "compiler-runtime.gtdf2vfp", true},
+    {"___gtsf2vfp", "compiler-runtime.gtsf2vfp", true},
+    {"___lesf2vfp", "compiler-runtime.lesf2vfp", true},
+    {"___ltsf2vfp", "compiler-runtime.ltsf2vfp", true},
+    {"___muldf3vfp", "compiler-runtime.muldf3vfp", true},
+    {"___mulsf3vfp", "compiler-runtime.mulsf3vfp", true},
+    {"___nedf2vfp", "compiler-runtime.nedf2vfp", true},
+    {"___nesf2vfp", "compiler-runtime.nesf2vfp", true},
+    {"___subdf3vfp", "compiler-runtime.subdf3vfp", true},
+    {"___subsf3vfp", "compiler-runtime.subsf3vfp", true},
+    {"___truncdfsf2vfp", "compiler-runtime.truncdfsf2vfp", true},
+    {"___unordsf2vfp", "compiler-runtime.unordsf2vfp", true},
 }};
 
 inline constexpr std::size_t kDarwinOnlyProviderCount = kDarwinOnlyProviders.size();

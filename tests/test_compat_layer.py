@@ -83,7 +83,7 @@ class CompatLayerTests(unittest.TestCase):
         self.assertEqual(report["concreteDarwinProviderCount"], 73)  # legacy alias: all catalog matches
         self.assertEqual(report["guestRuntimeAdapterCatalogCount"], 0)  # all catalog matches now verified
         self.assertEqual(report["verifiedGuestAdapterCount"], 73)  # verified-semantics promotion
-        self.assertEqual(report["guestRuntimeAdapterCatalogInventoryCount"], 75)
+        self.assertEqual(report["guestRuntimeAdapterCatalogInventoryCount"], 104)
         self.assertAlmostEqual(report["guestRuntimeAdapterCatalogCoveragePercent"], 28.7402)
         self.assertEqual(report["guestRuntimeAdapterCatalogStatus"], "CATALOG_ONLY_NOT_RUNTIME_LINKED")
         self.assertEqual(report["guestRuntimeSlotFixupsStatus"], "NOT_RUN")
