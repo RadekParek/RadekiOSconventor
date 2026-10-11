@@ -190,6 +190,13 @@ Java_dev_radek_gameruntime_GameBootActivity_getRendererProgress(JNIEnv *env, jcl
     report["framesPresented"] = progress.framesPresented;
     report["guestImportCalls"] = radek::compat_runtime::liveCalloutCount();
     report["lastGuestImport"] = radek::compat_runtime::liveLastCalloutSymbol();
+    // Timing for the on-device boot trace: how long the import window spans and the
+    // average cost per guest import inside it, so slow boots can be attributed.
+    const auto windowNanos = radek::compat_runtime::liveCalloutWindowNanos();
+    const auto importCalls = radek::compat_runtime::liveCalloutCount();
+    report["guestImportWindowMillis"] = static_cast<std::uint64_t>(windowNanos / 1000000);
+    report["guestImportAverageMicros"] = importCalls == 0 ? std::uint64_t{0}
+        : static_cast<std::uint64_t>(windowNanos / 1000 / static_cast<std::int64_t>(importCalls));
     report["busyMutexAttempts"] = radek::compat_runtime::ndk::liveBusyMutexAttempts();
     char busyMutex[16];
     std::snprintf(busyMutex, sizeof(busyMutex), "0x%08x", radek::compat_runtime::ndk::liveLastBusyMutex());

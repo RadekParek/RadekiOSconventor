@@ -16,6 +16,8 @@ namespace radek::compat_runtime {
 /** Live count of guest imports entering the shim layer, and the last one called. */
 std::uint64_t liveCalloutCount();
 std::string liveLastCalloutSymbol();
+// Steady-clock span from the first to the most recent guest import, in nanoseconds (0 when none).
+std::int64_t liveCalloutWindowNanos();
 
 struct ShimBinding {
     std::string darwinSymbol;
