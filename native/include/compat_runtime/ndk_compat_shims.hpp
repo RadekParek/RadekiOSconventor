@@ -111,6 +111,9 @@ class ShimAdapter {
     // Consecutive EBUSY answers given to a synchronously-run guest worker, and
     // how many workers were ended because of it (see noteWorkerMutexBusy).
     std::uint32_t workerMutexBusyStreak_ = 0;
+    // Consecutive busy trylocks by the main thread on one mutex with no successful lock.
+    GuestAddress mainBusyMutex_ = 0;
+    std::uint32_t mainBusyStreak_ = 0;
     std::uint64_t guestThreadBusyCancellations_ = 0;
 
     /**

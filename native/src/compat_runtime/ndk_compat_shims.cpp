@@ -4,6 +4,7 @@
 #include "compat_runtime/ndk_import_catalog.hpp"
 #include "compat_runtime/virtual_file_system.hpp"
 
+#include <sstream>
 #include <algorithm>
 #include <atomic>
 #include <array>
@@ -1527,10 +1528,17 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
                              [this](CpuRegisterState &r, GuestAddressSpace &memory, GuestAddress &target, std::string &) { return lockGuestMutex(r, memory, true, target); });
     registerTransferFunction(
         registry, "_pthread_mutex_trylock", "ndk-pthread-mutex-trylock",
-        [this](CpuRegisterState &r, GuestAddressSpace &memory, GuestAddress &target, std::string &) {
+        [this](CpuRegisterState &r, GuestAddressSpace &memory, GuestAddress &target, std::string &reason) {
+            const GuestAddress mutexAddress = r.r[0];
             lockGuestMutex(r, memory, false, target);
-            if (r.r[0] != static_cast<std::uint32_t>(kErrnoBusy))
+            if (r.r[0] != static_cast<std::uint32_t>(kErrnoBusy)) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (mainBusyMutex_ == mutexAddress) {
+                    mainBusyMutex_ = 0;
+                    mainBusyStreak_ = 0;
+                }
                 return true;
+            }
             // A busy trylock on the main thread is a scheduling point: a real thread
             // would keep running while the owner releases the lock. Run one parked or
             // pending worker now. The creator still receives EBUSY when it returns.
@@ -1545,6 +1553,38 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
             if (resumeParkedWorker(r, memory, target, static_cast<std::uint32_t>(kErrnoBusy)) ||
                 startPendingPthread(r, memory, target, 0, static_cast<std::uint32_t>(kErrnoBusy)))
                 return true;
+            // Bounded: a main thread that keeps losing the same mutex to a worker that
+            // never releases it stops the run with the owner's state, instead of
+            // spinning for the rest of the session with no frames.
+            constexpr std::uint32_t kMainThreadBusySpinLimit = 50000;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (mainBusyMutex_ == mutexAddress) {
+                    ++mainBusyStreak_;
+                } else {
+                    mainBusyMutex_ = mutexAddress;
+                    mainBusyStreak_ = 1;
+                }
+                if (mainBusyStreak_ >= kMainThreadBusySpinLimit) {
+                    std::ostringstream detail;
+                    detail << "main thread busy-spun " << mainBusyStreak_
+                           << " trylocks on mutex 0x" << std::hex << mutexAddress << std::dec;
+                    const auto owner = guestMutexOwners_.find(mutexAddress);
+                    if (owner != guestMutexOwners_.end())
+                        detail << " owned by guest thread token 0x" << std::hex << owner->second.owner
+                               << std::dec << " (depth " << owner->second.depth << ")";
+                    else
+                        detail << " with no recorded owner";
+                    const auto parked = parkedWorkers_.find(&memory);
+                    detail << "; parked workers " << (parked == parkedWorkers_.end() ? 0U : static_cast<unsigned>(parked->second.size()));
+                    const auto pending = pendingPthreads_.find(&memory);
+                    detail << ", pending workers " << (pending == pendingPthreads_.end() ? 0U : static_cast<unsigned>(pending->second.size()));
+                    reason = detail.str();
+                    mainBusyMutex_ = 0;
+                    mainBusyStreak_ = 0;
+                    return false;
+                }
+            }
             r.r[0] = static_cast<std::uint32_t>(kErrnoBusy);
             return true;
         });
