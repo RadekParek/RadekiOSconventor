@@ -208,6 +208,12 @@ if(RADEK_BUILD_COMPAT_RUNTIME)
         target_link_libraries(compat-runtime-cxx-string-tests PRIVATE compat_runtime_core)
         add_test(NAME compat-runtime-cxx-string COMMAND compat-runtime-cxx-string-tests)
 
+        add_executable(compat-runtime-compiler-rt-tests tests/compiler_rt_shims.cpp)
+        target_include_directories(compat-runtime-compiler-rt-tests PRIVATE include)
+        target_compile_options(compat-runtime-compiler-rt-tests PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(compat-runtime-compiler-rt-tests PRIVATE compat_runtime_core)
+        add_test(NAME compat-runtime-compiler-rt COMMAND compat-runtime-compiler-rt-tests)
+
         add_executable(compat-runtime-openal-tests tests/openal_backend.cpp)
         target_include_directories(compat-runtime-openal-tests PRIVATE include)
         target_compile_options(compat-runtime-openal-tests PRIVATE -Wall -Wextra -Werror)

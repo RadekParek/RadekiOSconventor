@@ -84,6 +84,24 @@ std::int64_t fixdfdi(double value) {
     return static_cast<std::int64_t>(value);
 }
 
+// Saturating conversions as in libgcc: NaN converts to 0, out-of-range values clamp.
+std::int64_t fixsfdi(float value) {
+    return fixdfdi(static_cast<double>(value));
+}
+
+std::uint64_t fixunsdfdi(double value) {
+    if (std::isnan(value) || value <= 0.0)
+        return 0;
+    constexpr double kTwoTo64 = 18446744073709551616.0; // 2^64
+    if (value >= kTwoTo64)
+        return std::numeric_limits<std::uint64_t>::max();
+    return static_cast<std::uint64_t>(value);
+}
+
+std::uint64_t fixunssfdi(float value) {
+    return fixunsdfdi(static_cast<double>(value));
+}
+
 std::uint64_t readRegisterPair(const CpuRegisterState &state, int lowRegister) {
     return static_cast<std::uint64_t>(state.r[static_cast<std::size_t>(lowRegister)]) |
            (static_cast<std::uint64_t>(state.r[static_cast<std::size_t>(lowRegister + 1)]) << 32);
@@ -265,6 +283,27 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
          [](CpuRegisterState &state) {
              writeRegisterPair(state, 0,
                                static_cast<std::uint64_t>(fixdfdi(doubleFromD0(state))));
+             return true;
+         });
+    bind("___fixsfdi", "compiler-runtime-fixsfdi",
+         [](CpuRegisterState &state) {
+             writeRegisterPair(state, 0,
+                               static_cast<std::uint64_t>(fixsfdi(floatFromSRegister(state, 0))));
+             return true;
+         });
+    bind("___fixunsdfdi", "compiler-runtime-fixunsdfdi",
+         [](CpuRegisterState &state) {
+             writeRegisterPair(state, 0, fixunsdfdi(doubleFromD0(state)));
+             return true;
+         });
+    bind("___fixunssfdi", "compiler-runtime-fixunssfdi",
+         [](CpuRegisterState &state) {
+             writeRegisterPair(state, 0, fixunssfdi(floatFromSRegister(state, 0)));
+             return true;
+         });
+    bind("___floatundisf", "compiler-runtime-floatundisf",
+         [](CpuRegisterState &state) {
+             writeS0(state, static_cast<float>(readRegisterPair(state, 0)));
              return true;
          });
     bind("___fixsfsivfp", "compiler-runtime-fixsfsivfp",

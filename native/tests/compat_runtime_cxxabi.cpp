@@ -80,7 +80,7 @@ void testAllDarwinProvidersAreRegistered() {
     CHECK(missing.empty());
     CHECK(compat_import_catalog::kDarwinOnlyProviderCount == 124);
     CHECK(compat_import_catalog::kGuestRuntimeAdapterProviderCount == 124);
-    CHECK(harness.compiler.registeredSymbolCount() == 38);
+    CHECK(harness.compiler.registeredSymbolCount() == 42);
     for (const char *symbol : {"___divsi3", "___modsi3", "___udivsi3", "___umodsi3",
                                "___divdi3", "___moddi3", "___floatdidf", "___floatdisf", "___fixdfdi",
                                "___fixsfsivfp", "___fixunsdfsivfp", "___floatsidfvfp",
