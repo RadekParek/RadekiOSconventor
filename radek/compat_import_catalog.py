@@ -104,6 +104,7 @@ CONCRETE_DARWIN_COMPAT_PROVIDERS: dict[str, str] = {
     "___modsi3": "compiler-runtime.modsi3",
     "___udivsi3": "compiler-runtime.udivsi3",
     "___umodsi3": "compiler-runtime.umodsi3",
+    "_OSAtomicAnd32OrigBarrier": "libsystem.osatomic-and32-orig-barrier",
     # Compiler-runtime and VFP soft-float helpers (native compiler_rt_shims.cpp).
     "___fixsfsivfp": "compiler-runtime.fixsfsivfp",
     "___fixunsdfsivfp": "compiler-runtime.fixunsdfsivfp",
@@ -138,9 +139,9 @@ CONCRETE_DARWIN_COMPAT_PROVIDERS: dict[str, str] = {
 
 CONCRETE_DARWIN_COMPAT_IMPORT_COUNT = len(CONCRETE_DARWIN_COMPAT_PROVIDERS)
 
-if CONCRETE_DARWIN_COMPAT_IMPORT_COUNT != 104:  # pragma: no cover - authoring guard
+if CONCRETE_DARWIN_COMPAT_IMPORT_COUNT != 105:  # pragma: no cover - authoring guard
     raise AssertionError(
-        "the non-NDK Darwin provider inventory must contain exactly 104 imports, "
+        "the non-NDK Darwin provider inventory must contain exactly 105 imports, "
         f"got {CONCRETE_DARWIN_COMPAT_IMPORT_COUNT}"
     )
 
@@ -158,6 +159,7 @@ def provider_for_symbol(symbol: str) -> str | None:
 # native/include/compat_runtime/compat_import_catalog.hpp and
 # app/src/main/java/dev/radek/conventor/CompatImportProviders.kt.
 VERIFIED_SEMANTICS_PROVIDERS: frozenset[str] = frozenset({
+    "libsystem.osatomic-and32-orig-barrier",
     "compiler-runtime.fixsfsivfp",
     "compiler-runtime.fixunsdfsivfp",
     "compiler-runtime.floatsidfvfp",

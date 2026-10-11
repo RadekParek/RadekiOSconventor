@@ -24,7 +24,7 @@ struct Provider {
     bool verified;
 };
 
-inline constexpr std::array<Provider, 104> kDarwinOnlyProviders{{
+inline constexpr std::array<Provider, 105> kDarwinOnlyProviders{{
     {"_AudioSessionInitialize", "audio-session.initialize", true},
     {"_AudioSessionSetActive", "audio-session.set-active", true},
     {"_NSHomeDirectory", "foundation.home-directory", true},
@@ -100,6 +100,7 @@ inline constexpr std::array<Provider, 104> kDarwinOnlyProviders{{
     {"_objc_msgSendSuper2", "objc.msgSendSuper2", true},
     {"_objc_msgSend_stret", "objc.msgSend.stret", true},
     {"_objc_setProperty", "objc.setProperty", true},
+    {"_OSAtomicAnd32OrigBarrier", "libsystem.osatomic-and32-orig-barrier", true},
     {"___fixsfsivfp", "compiler-runtime.fixsfsivfp", true},
     {"___fixunsdfsivfp", "compiler-runtime.fixunsdfsivfp", true},
     {"___floatsidfvfp", "compiler-runtime.floatsidfvfp", true},

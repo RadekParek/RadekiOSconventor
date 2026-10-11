@@ -473,6 +473,28 @@ void ShimAdapter::registerFunction(
 void ShimAdapter::registerBindings(ShimRegistry &registry) {
     if (registered_)
         throw std::runtime_error("libSystem shim adapter is already registered");
+    // OSAtomicAnd32OrigBarrier(mask, address): atomically stores (*address & mask) and
+    // returns the value *address held before the store. The barrier is trivially
+    // satisfied because the guest runs on one CPU thread at a time.
+    registerFunction(registry, "_OSAtomicAnd32OrigBarrier", "libsystem-osatomic-and32-orig-barrier",
+                     [](CpuRegisterState &registers, GuestAddressSpace &memory,
+                        std::string &reason) {
+                         const auto mask = static_cast<std::uint32_t>(registers.r[0]);
+                         const auto address = static_cast<GuestAddress>(registers.r[1]);
+                         std::uint32_t previous = 0;
+                         if (address == 0 || !memory.contains(address, sizeof(previous), MemoryPermission::Write) ||
+                             !readGuest(memory, address, reinterpret_cast<std::uint8_t *>(&previous), sizeof(previous))) {
+                             reason = "OSAtomicAnd32OrigBarrier received an unreadable or unwritable address";
+                             return false;
+                         }
+                         const std::uint32_t next = previous & mask;
+                         if (!writeGuest(memory, address, reinterpret_cast<const std::uint8_t *>(&next), sizeof(next))) {
+                             reason = "OSAtomicAnd32OrigBarrier could not store the result";
+                             return false;
+                         }
+                         registers.r[0] = previous;
+                         return true;
+                     });
     registerFunction(registry, "_memcpy", "libsystem-memcpy",
                      [](CpuRegisterState &registers, GuestAddressSpace &memory,
                         std::string &reason) { return memcpyAdapter(registers, memory, reason); });

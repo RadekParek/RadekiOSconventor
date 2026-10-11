@@ -7,7 +7,7 @@ package dev.radek.conventor
  * particular IPA image's import slot was fixed up or that the API is complete.
  */
 internal object CompatImportProviders {
-    const val EXPECTED_GUEST_RUNTIME_ADAPTER_COUNT = 104
+    const val EXPECTED_GUEST_RUNTIME_ADAPTER_COUNT = 105
     // Legacy identifier retained for report/schema compatibility.
     const val EXPECTED_DARWIN_ONLY_IMPORT_COUNT = EXPECTED_GUEST_RUNTIME_ADAPTER_COUNT
 
@@ -38,6 +38,7 @@ internal object CompatImportProviders {
         "__DefaultRuneLocale" to "darwin.rune-locale",
         "__Unwind_SjLj_Register" to "sjlj.register-context",
         "__Unwind_SjLj_Resume" to "sjlj.resume-boundary",
+        "_OSAtomicAnd32OrigBarrier" to "libsystem.osatomic-and32-orig-barrier",
         "___fixsfsivfp" to "compiler-runtime.fixsfsivfp",
         "___fixunsdfsivfp" to "compiler-runtime.fixunsdfsivfp",
         "___floatsidfvfp" to "compiler-runtime.floatsidfvfp",
@@ -201,6 +202,7 @@ internal object CompatImportProviders {
         "sjlj.resume-boundary",
         "sjlj.unregister-context",
         "uikit.application-main",
+        "libsystem.osatomic-and32-orig-barrier",
         "compiler-runtime.fixsfsivfp",
         "compiler-runtime.fixunsdfsivfp",
         "compiler-runtime.floatsidfvfp",
