@@ -102,6 +102,9 @@ void ShimAdapter::recordLifecycleEvent(LifecycleState &state, const std::string 
     constexpr std::size_t kMaximumLifecycleEvents = 64;
     if (state.events.size() < kMaximumLifecycleEvents)
         state.events.push_back(event);
+    // Also publish the latest event to the live renderer status, so a stall shows
+    // where the guest stopped without waiting for the run-end report.
+    gles::publishNote("lifecycle: " + event);
 }
 
 // Reads the delegate class name passed to UIApplicationMain. The classic
