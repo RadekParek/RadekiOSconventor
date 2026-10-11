@@ -53,6 +53,9 @@ class ShimAdapter {
         // early can leave SP and the callee-saved registers pointing into its
         // own frames, so the continuation restores them from here.
         CpuRegisterState creatorRegisters{};
+        // r0 the creator receives when this worker yields back or finishes: 0 for
+        // usleep/yield/join, EBUSY when a busy trylock triggered the resume.
+        std::uint32_t returnValue = 0;
     };
     std::function<GuestAddress(GuestAddressSpace &)> beginWorkerUnwindChain_;
     std::function<void(GuestAddressSpace &, GuestAddress)> endWorkerUnwindChain_;
@@ -69,7 +72,8 @@ class ShimAdapter {
     };
     std::map<GuestAddressSpace *, std::vector<PendingPthread>> pendingPthreads_;
     bool startPendingPthread(CpuRegisterState &registers, GuestAddressSpace &memory,
-                             GuestAddress &target, GuestAddress onlyToken);
+                             GuestAddress &target, GuestAddress onlyToken,
+                             std::uint32_t returnValue = 0);
     // A worker blocked on a mutex is parked with its full registers, control returns to
     // its creator, and the lock is retried at the creator's next yield (no lost work).
     struct ParkedWorker {
@@ -80,7 +84,7 @@ class ShimAdapter {
     };
     std::map<GuestAddressSpace *, std::vector<ParkedWorker>> parkedWorkers_;
     bool resumeParkedWorker(CpuRegisterState &registers, GuestAddressSpace &memory,
-                            GuestAddress &target);
+                            GuestAddress &target, std::uint32_t returnValue = 0);
     // Owner and recursion depth per held guest mutex. The owner is the current
     // worker's thread token, or 0 for the main thread.
     struct GuestMutexOwner {

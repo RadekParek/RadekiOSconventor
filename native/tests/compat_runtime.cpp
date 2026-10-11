@@ -713,6 +713,89 @@ void testGuestPthreadCreateTransfersAndJoins() {
         (void)parkToken;
     }
 
+    // A busy trylock on the main thread is a scheduling point. It runs the pending worker
+    // so that work progresses, and the creator still receives EBUSY, not success, when it
+    // returns. A worker that parks inside that trylock returns EBUSY to the creator.
+    {
+        const auto mutexInit = registry.resolve("_pthread_mutex_init");
+        const auto mutexLock = registry.resolve("_pthread_mutex_lock");
+        const auto mutexTryLock = registry.resolve("_pthread_mutex_trylock");
+        const auto mutexUnlock = registry.resolve("_pthread_mutex_unlock");
+        CHECK(mutexInit.has_value() && mutexLock.has_value() && mutexTryLock.has_value() &&
+              mutexUnlock.has_value());
+        constexpr GuestAddress kTryMutex = 0x2300;
+        constexpr std::uint32_t kBusy = 16;
+        CpuRegisterState regs;
+        regs.r[0] = kTryMutex;
+        CHECK(registry.invokeCallout(mutexInit->guestAddress, regs, memory, reason) ==
+              GuestCalloutResult::Returned);
+        regs = CpuRegisterState{};
+        regs.r[0] = kTryMutex;
+        regs.r[14] = 0x6500;
+        CHECK(registry.invokeCallout(mutexLock->guestAddress, regs, memory, reason) ==
+              GuestCalloutResult::Returned);
+        CHECK(regs.r[0] == 0);
+
+        // A worker is created but has not started; the main thread's trylock is busy.
+        regs = CpuRegisterState{};
+        regs.r[0] = 0x2000;
+        regs.r[2] = 0x1000;
+        regs.r[3] = 0x0C0FFEE0;
+        regs.r[14] = 0x6510;
+        CHECK(registry.invokeCallout(create->guestAddress, regs, memory, reason) ==
+              GuestCalloutResult::Returned);
+        const auto completionsBeforeTry = ndkShims.guestThreadCompletionCount();
+        regs = CpuRegisterState{};
+        regs.r[0] = kTryMutex;
+        regs.r[14] = 0x6520;
+        CHECK(registry.invokeCallout(mutexTryLock->guestAddress, regs, memory, reason) ==
+              GuestCalloutResult::Transferred);
+        CHECK(regs.r[15] == 0x1000); // the pending worker starts
+        CHECK(regs.r[0] == 0x0C0FFEE0);
+
+        // The worker tries to take the mutex with a blocking lock. Its creator still
+        // holds it, so the worker parks and the creator's trylock returns EBUSY.
+        regs.r[0] = kTryMutex;
+        regs.r[14] = 0x6530;
+        CHECK(registry.invokeCallout(mutexLock->guestAddress, regs, memory, reason) ==
+              GuestCalloutResult::Transferred);
+        CHECK(regs.r[15] == 0x6520);
+        CHECK(regs.r[0] == kBusy);
+        CHECK(ndkShims.guestThreadCompletionCount() == completionsBeforeTry);
+
+        // The worker is still parked. This busy trylock resumes it; it retries, parks
+        // again, and the creator's trylock returns EBUSY at the same call site.
+        regs = CpuRegisterState{};
+        regs.r[0] = kTryMutex;
+        regs.r[14] = 0x6540;
+        CHECK(registry.invokeCallout(mutexTryLock->guestAddress, regs, memory, reason) ==
+              GuestCalloutResult::Transferred);
+        CHECK(regs.r[15] == 0x6540);
+        CHECK(regs.r[0] == kBusy);
+        CHECK(ndkShims.guestThreadCompletionCount() == completionsBeforeTry);
+
+        // Release the mutex. The parked worker is resumed at the next yield, takes the
+        // lock, and finishes; the creator's usleep returns successfully.
+        regs = CpuRegisterState{};
+        regs.r[0] = kTryMutex;
+        regs.r[14] = 0x6550;
+        CHECK(registry.invokeCallout(mutexUnlock->guestAddress, regs, memory, reason) ==
+              GuestCalloutResult::Returned);
+        regs = CpuRegisterState{};
+        regs.r[14] = 0x6560;
+        CHECK(registry.invokeCallout(usleepShim->guestAddress, regs, memory, reason) ==
+              GuestCalloutResult::Transferred);
+        CHECK(regs.r[15] == 0x6530); // the worker resumes after its blocking lock
+        CHECK(registry.invokeCallout(continuation->guestAddress, regs, memory, reason) ==
+              GuestCalloutResult::Returned);
+        CHECK(regs.r[14] == 0x6560);
+        CHECK(regs.r[0] == 0);
+        CHECK(ndkShims.guestThreadCompletionCount() == completionsBeforeTry + 1);
+        std::uint32_t tryWord = 1;
+        CHECK(memory.read(kTryMutex, &tryWord, sizeof(tryWord)));
+        CHECK(tryWord == 0);
+    }
+
 }
 
 void testObjectiveCShimsResolveThroughLoaderAndReturn() {
