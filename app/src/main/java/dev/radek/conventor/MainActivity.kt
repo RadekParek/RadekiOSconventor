@@ -125,8 +125,6 @@ class MainActivity : Activity() {
     private val pickerIpa = 100
     private val pickerApk = 101
     private val pickerTranslatedRuntimeInput = 102
-    private var pendingNdkNeedsText: String? = null
-    private var pendingNdkNeedsName: String = "ndk-needs.txt"
     private val maxTranslatedRuntimeInputBytes = 1024L * 1024 * 1024
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
 
@@ -689,7 +687,7 @@ class MainActivity : Activity() {
                     val bundleId = appInfo.optString("bundleId")
                     val text = ndkNeedsHeader(gameName, bundleId, appInfo.optString("version")) + ApiNeedReport.format(mapping)
                     val safeBundle = bundleId.ifBlank { "game" }.replace(Regex("[^A-Za-z0-9._-]"), "_")
-                    showNeedsText("Unimplemented / unresolved NDK needs", text, "$safeBundle-ndk-needs.txt")
+                    saveNeedsText(text, "$safeBundle-ndk-needs.txt")
                 }
             }
             val generated = report.optJSONObject("hostConversion")?.optInt("generatedApiReplacements", 0) ?: 0
@@ -1167,25 +1165,17 @@ class MainActivity : Activity() {
             "Version: ${version.ifBlank { "unknown" }}\nExported: $stamp\n\n"
     }
 
-    private fun showNeedsText(title: String, value: String, fileName: String) {
-        pendingNdkNeedsText = value
-        pendingNdkNeedsName = fileName
-        val view = TextView(this).apply { text = value; setTextIsSelectable(true); textSize = 12f; typeface = Typeface.MONOSPACE; setPadding(dp(16), dp(16), dp(16), dp(16)) }
-        AlertDialog.Builder(this).setTitle(title).setView(ScrollView(this).apply { addView(view) })
-            .setNeutralButton("Download") { _, _ ->
-                try {
-                    Toast.makeText(this, "Saved NDK needs list to ${downloadNeedsText()}", Toast.LENGTH_LONG).show()
-                } catch (error: Exception) {
-                    Toast.makeText(this, "Could not save the NDK needs list: ${error.message}", Toast.LENGTH_LONG).show()
-                }
-            }
-            .setPositiveButton("Close", null).show()
+    /** Saves the NDK needs list to Downloads straight away: no dialog, no file picker. */
+    private fun saveNeedsText(text: String, name: String) {
+        try {
+            Toast.makeText(this, "Saved NDK needs list to ${downloadNeedsText(text, name)}", Toast.LENGTH_LONG).show()
+        } catch (error: Exception) {
+            Toast.makeText(this, "Could not save the NDK needs list: ${error.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
-    /** Saves the NDK needs list to Downloads without asking the user where to put it. */
-    private fun downloadNeedsText(): String {
-        val text = pendingNdkNeedsText ?: error("no NDK needs list is loaded")
-        val name = pendingNdkNeedsName
+    /** Writes the NDK needs list to Downloads and returns the path it was written to. */
+    private fun downloadNeedsText(text: String, name: String): String {
         val bytes = text.toByteArray(Charsets.UTF_8)
         if (Build.VERSION.SDK_INT >= 29) {
             val values = ContentValues().apply {
