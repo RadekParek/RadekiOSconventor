@@ -112,8 +112,8 @@ jobs:
       # radek.pipeline, which imports the optional game lifter at module load
       # time; installing it only after the sanitizer step makes CI fail before
       # the later host-test step can install it.
-      - name: Install optional host lifter dependency (capstone)
-        run: python3 -m pip install --disable-pip-version-check --no-cache-dir 'capstone==5.0.7'
+      - name: Install optional host lifter and native codegen test dependencies (capstone, unicorn)
+        run: python3 -m pip install --disable-pip-version-check --no-cache-dir 'capstone==5.0.7' 'unicorn==2.1.4'
       - name: Build native analyzer and run C++ runtime tests
         run: python3 tools/build_native.py
       - name: Configure and run CMake compat-runtime-v1 with pinned Dynarmic ARM32 host tests
@@ -607,8 +607,8 @@ jobs:
         uses: gradle/actions/setup-gradle@v5
       # The APK validation below runs the radek CLI, which imports the
       # optional game lifter at module load time.
-      - name: Install optional host lifter dependency (capstone)
-        run: python3 -m pip install --disable-pip-version-check --no-cache-dir 'capstone==5.0.7'
+      - name: Install optional host lifter and native codegen test dependencies (capstone, unicorn)
+        run: python3 -m pip install --disable-pip-version-check --no-cache-dir 'capstone==5.0.7' 'unicorn==2.1.4'
       - name: Android unit tests, converter APK, and compat-runtime-v1 Android library
         run: python3 tools/ci_run.py ./gradlew --no-daemon :app:testDebugUnitTest :gameruntime-template:testDebugUnitTest :app:lintDebug :app:assembleDebug :compat-runtime-v1:lintDebug :compat-runtime-v1:assembleDebug
       - name: Verify game-runtime shared libraries are packaged in the converter APK
