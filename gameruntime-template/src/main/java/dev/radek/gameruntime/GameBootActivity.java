@@ -1,6 +1,12 @@
 package dev.radek.gameruntime;
 
 import android.app.Activity;
+import android.content.ContentResolver;
+import android.content.ContentValues;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.content.pm.ActivityInfo;
 import android.content.res.AssetManager;
 import android.graphics.Bitmap;
@@ -522,8 +528,65 @@ public final class GameBootActivity extends Activity {
                 if (target.exists() && !target.delete()) return;
                 temporary.renameTo(target);
             }
+            long now = System.currentTimeMillis();
+            if (now - lastProgressMirrorMillis >= 2000) {
+                lastProgressMirrorMillis = now;
+                mirrorToDownloads("runtime-progress.json", snapshot.toString(2));
+            }
         } catch (Throwable error) {
             Log.w(LOG_TAG, "Could not persist the live runtime progress", error);
+        }
+    }
+
+    /** Folder inside Downloads where the diagnostics copies are kept. */
+    private static final String DOWNLOADS_SUBFOLDER = "RadekiDiagnostics";
+    private long lastProgressMirrorMillis = 0;
+
+    /**
+     * Copies a diagnostics file to Downloads/RadekiDiagnostics so it can be opened
+     * from the Files app without adb. Android 10+ uses MediaStore (no permission);
+     * Android 8-9 use the app's external Downloads folder. Replaces any earlier copy
+     * with the same name. Failures are logged, never thrown.
+     */
+    private void mirrorToDownloads(String name, String text) {
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                ContentResolver resolver = getContentResolver();
+                String relative = Environment.DIRECTORY_DOWNLOADS + "/" + DOWNLOADS_SUBFOLDER;
+                String selection = MediaStore.MediaColumns.DISPLAY_NAME + "=? AND "
+                        + MediaStore.MediaColumns.RELATIVE_PATH + "=?";
+                String[] args = {name, relative + "/"};
+                try (Cursor cursor = resolver.query(MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                        new String[] {MediaStore.MediaColumns._ID}, selection, args, null)) {
+                    while (cursor != null && cursor.moveToNext()) {
+                        Uri old = Uri.withAppendedPath(MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                                String.valueOf(cursor.getLong(0)));
+                        resolver.delete(old, null, null);
+                    }
+                }
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                values.put(MediaStore.MediaColumns.MIME_TYPE, "application/json");
+                values.put(MediaStore.MediaColumns.RELATIVE_PATH, relative + "/");
+                values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+                Uri uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                if (uri == null) return;
+                try (OutputStream output = resolver.openOutputStream(uri, "wt")) {
+                    if (output != null) output.write(bytes);
+                }
+                values.clear();
+                values.put(MediaStore.MediaColumns.IS_PENDING, 0);
+                resolver.update(uri, values, null, null);
+            } else {
+                File dir = new File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), DOWNLOADS_SUBFOLDER);
+                if (!dir.isDirectory() && !dir.mkdirs()) return;
+                try (FileOutputStream output = new FileOutputStream(new File(dir, name), false)) {
+                    output.write(bytes);
+                }
+            }
+        } catch (Throwable error) {
+            Log.w(LOG_TAG, "Could not copy " + name + " to Downloads", error);
         }
     }
 
@@ -537,6 +600,7 @@ public final class GameBootActivity extends Activity {
         try (FileOutputStream output = new FileOutputStream(target, false)) {
             output.write(reportText.getBytes(StandardCharsets.UTF_8));
             appendLine("Detailed runtime report saved: " + target.getAbsolutePath());
+            mirrorToDownloads("runtime-report.json", reportText);
         } catch (IOException error) {
             appendLine("Runtime report could not be saved: " + error);
         }
