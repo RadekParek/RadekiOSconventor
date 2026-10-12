@@ -83,8 +83,11 @@ class ShimAdapter {
         bool blocking = true;
     };
     std::map<GuestAddressSpace *, std::vector<ParkedWorker>> parkedWorkers_;
+    // Resumes the parked worker whose token is preferredToken (the mutex owner),
+    // or the first parked worker when preferredToken is 0 or not parked.
     bool resumeParkedWorker(CpuRegisterState &registers, GuestAddressSpace &memory,
-                            GuestAddress &target, std::uint32_t returnValue = 0);
+                            GuestAddress &target, std::uint32_t returnValue = 0,
+                            GuestAddress preferredToken = 0);
     // Owner and recursion depth per held guest mutex. The owner is the current
     // worker's thread token, or 0 for the main thread.
     struct GuestMutexOwner {

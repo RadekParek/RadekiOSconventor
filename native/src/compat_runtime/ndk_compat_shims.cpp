@@ -539,15 +539,25 @@ bool ShimAdapter::lockGuestMutex(CpuRegisterState &r, GuestAddressSpace &memory,
 // Resumes one parked worker from a creator yield point and retries its blocking lock.
 // If the lock is still busy the worker parks again, which returns to this yield point.
 bool ShimAdapter::resumeParkedWorker(CpuRegisterState &registers, GuestAddressSpace &memory,
-                                     GuestAddress &target, std::uint32_t returnValue) {
+                                     GuestAddress &target, std::uint32_t returnValue,
+                                     GuestAddress preferredToken) {
     ParkedWorker parked;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto found = parkedWorkers_.find(&memory);
         if (found == parkedWorkers_.end() || found->second.empty())
             return false;
-        parked = found->second.front();
-        found->second.erase(found->second.begin());
+        auto choice = found->second.begin();
+        if (preferredToken != 0) {
+            for (auto it = found->second.begin(); it != found->second.end(); ++it) {
+                if (it->token == preferredToken) {
+                    choice = it;
+                    break;
+                }
+            }
+        }
+        parked = *choice;
+        found->second.erase(choice);
         if (found->second.empty())
             parkedWorkers_.erase(found);
     }
@@ -1550,15 +1560,18 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
             if (!onMainThread)
                 return true;
             target = 0;
-            if (resumeParkedWorker(r, memory, target, static_cast<std::uint32_t>(kErrnoBusy)) ||
-                startPendingPthread(r, memory, target, 0, static_cast<std::uint32_t>(kErrnoBusy)))
-                return true;
-            // Bounded: a main thread that keeps losing the same mutex to a worker that
-            // never releases it stops the run with the owner's state, instead of
-            // spinning for the rest of the session with no frames.
+            // Count every busy attempt before scheduling. A worker that resumes and
+            // parks again on the same mutex is not progress, so it must still count
+            // toward the bound below.
+            // Bounded: a main thread that keeps losing the same mutex stops the run
+            // with the owner's state, instead of spinning with no frames.
             constexpr std::uint32_t kMainThreadBusySpinLimit = 50000;
+            GuestAddress ownerToken = 0;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
+                const auto owner = guestMutexOwners_.find(mutexAddress);
+                if (owner != guestMutexOwners_.end())
+                    ownerToken = owner->second.owner;
                 if (mainBusyMutex_ == mutexAddress) {
                     ++mainBusyStreak_;
                 } else {
@@ -1585,6 +1598,11 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
                     return false;
                 }
             }
+            // Give the owner the CPU first: it is the thread that can release the lock.
+            if (resumeParkedWorker(r, memory, target, static_cast<std::uint32_t>(kErrnoBusy),
+                                   ownerToken) ||
+                startPendingPthread(r, memory, target, 0, static_cast<std::uint32_t>(kErrnoBusy)))
+                return true;
             r.r[0] = static_cast<std::uint32_t>(kErrnoBusy);
             return true;
         });
