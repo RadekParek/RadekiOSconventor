@@ -688,9 +688,10 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
                           "mixer runs without device output");
             return true;
         });
-    registerFunction(registry, "_alcCloseDevice", "openal-close-device-state-only",
+    registerFunction(registry, "_alcCloseDevice", "openal-close-device-mixer",
         [this](CpuRegisterState &registers, GuestAddressSpace &, std::string &) {
             ++openalCalls_;
+            openal::engine().closeDevice();
             registers.r[0] = 1; // ALC_TRUE
             return true;
         });
