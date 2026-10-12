@@ -90,6 +90,14 @@ Java_dev_radek_compat_runtime_RuntimeBridge_runAuthorizedMainBinary(JNIEnv *env,
         libsystemShims.registerBindings(shims);
         audioShims.registerBindings(shims);
         sjljUnwind.registerBindings(shims);
+        ndkShims.attachWorkerUnwindChain(
+            [&sjljUnwind](radek::compat_runtime::GuestAddressSpace &memory) {
+                return sjljUnwind.beginThreadChain(memory);
+            },
+            [&sjljUnwind](radek::compat_runtime::GuestAddressSpace &memory,
+                               radek::compat_runtime::GuestAddress savedTop) {
+                sjljUnwind.endThreadChain(memory, savedTop);
+            });
         compilerRuntime.registerBindings(shims);
         cxxAbi.registerBindings(shims);
         glesForwarder.registerBindings(shims);
@@ -136,6 +144,7 @@ Java_dev_radek_compat_runtime_RuntimeBridge_runAuthorizedMainBinary(JNIEnv *env,
         report["importProviders"]["ndkFallbackCallsObserved"] = ndkShims.callCount();
         report["importProviders"]["guestPthreadTransfersObserved"] = ndkShims.guestThreadTransferCount();
         report["importProviders"]["guestPthreadCompletionsObserved"] = ndkShims.guestThreadCompletionCount();
+        report["importProviders"]["guestPthreadBusyCancellations"] = ndkShims.guestThreadBusyCancellationCount();
         report["importProviders"]["genericNdkCallsObserved"] = ndkShims.genericCallCount();
         report["importProviders"]["genericNdkProviderCount"] = static_cast<std::uint64_t>(
             ndkShims.genericProviderCount());

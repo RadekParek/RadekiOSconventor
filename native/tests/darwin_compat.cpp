@@ -82,7 +82,9 @@ void testSymbolSetIsPinned() {
     // four kEAGL keys, __DefaultRuneLocale, __CFConstantStringClassReference,
     // __gxx_personality_sj0 and the 19 OpenAL entry points it imports
     // (alSource3i is the one extra, bound for the general OpenAL subset).
-    CHECK(harness.shims.boundSymbolCount() == 34);
+    // 53 original symbols, plus 49 BioShock NDK-needs constants (44 NSString keys and
+    // 5 raw-value constants: the CGRect/CGSize/CGAffineTransform values and the window level).
+    CHECK(harness.shims.boundSymbolCount() == 102);
     for (const auto *symbol : {
              "___tolower", "___toupper", "___maskrune", "___error", "___stdinp", "___stdoutp",
              "___stderrp", "_kEAGLColorFormatRGB565", "_kEAGLColorFormatRGBA8",
@@ -94,6 +96,39 @@ void testSymbolSetIsPinned() {
              "_alBufferData", "_alcOpenDevice", "_alcCloseDevice", "_alcCreateContext",
              "_alcDestroyContext", "_alcMakeContextCurrent"})
         CHECK(harness.registry.resolve(symbol).has_value());
+}
+
+void testBioShockConstantValues() {
+    // IEEE-754 single-precision bit patterns of the values the SDK headers define.
+    constexpr std::uint32_t kInfinity = 0x7f800000U;
+    constexpr std::uint32_t kOne = 0x3f800000U;
+    constexpr std::uint32_t kWindowLevelAlert = 0x44fa0000U; // 2000.0f
+    Harness harness;
+    const GuestAddress nullRect = harness.dataSymbol("_CGRectNull");
+    CHECK(harness.readWord(nullRect) == kInfinity);
+    CHECK(harness.readWord(nullRect + 4) == kInfinity);
+    CHECK(harness.readWord(nullRect + 8) == 0);
+    CHECK(harness.readWord(nullRect + 12) == 0);
+    const GuestAddress identity = harness.dataSymbol("_CGAffineTransformIdentity");
+    CHECK(harness.readWord(identity) == kOne);
+    CHECK(harness.readWord(identity + 4) == 0);
+    CHECK(harness.readWord(identity + 12) == kOne);
+    CHECK(harness.readWord(harness.dataSymbol("_UIWindowLevelAlert")) == kWindowLevelAlert);
+    CHECK(harness.readWord(harness.dataSymbol("_CGSizeZero")) == 0);
+    // Same-name keys resolve to distinct NSString objects.
+    CHECK(harness.dataSymbol("_NSFontAttributeName") != harness.dataSymbol("_NSForegroundColorAttributeName"));
+}
+
+void testStringConstantSymbolsAreVariables() {
+    // An `NSString *const` symbol is a variable: its address holds the NSString pointer,
+    // and the pointed-to object starts with a non-zero isa.
+    Harness harness;
+    for (const auto *symbol : {"_NSFontAttributeName", "_kEAGLColorFormatRGBA8", "_UIApplicationDidBecomeActiveNotification"}) {
+        const GuestAddress variable = harness.dataSymbol(symbol);
+        const GuestAddress object = harness.readWord(variable);
+        CHECK(object != 0 && object != variable);
+        CHECK(harness.readWord(object) != 0);
+    }
 }
 
 void testCtypeSweepIsAsciiAndBounded() {
@@ -135,6 +170,39 @@ void testErrnoAndStandardStreamCells() {
         files.standardStream(VirtualFileSystem::StandardStream::Output);
     CHECK(files.write(stdoutHandle, "", 0, detail) == 0);
     CHECK(harness.shims.streamCellCount() == 3);
+}
+
+void testStringConstantsAreDistinctGuestObjects() {
+    Harness harness;
+    std::vector<GuestAddress> objects;
+    for (const auto *symbol : {
+             "_AVCaptureSessionDidStartRunningNotification",
+             "_AVCaptureSessionDidStopRunningNotification",
+             "_AVCaptureSessionErrorKey",
+             "_AVCaptureSessionInterruptionEndedNotification",
+             "_AVCaptureSessionPreset640x480",
+             "_AVCaptureSessionRuntimeErrorNotification",
+             "_AVCaptureSessionWasInterruptedNotification",
+             "_AVLayerVideoGravityResizeAspectFill",
+             "_AVMediaTypeVideo",
+             "_MPMoviePlayerLoadStateDidChangeNotification",
+             "_MPMoviePlayerPlaybackDidFinishNotification",
+             "_NSDefaultRunLoopMode",
+             "_NSInvalidArgumentException",
+             "_UIImagePickerControllerOriginalImage",
+             "_UIKeyboardDidShowNotification",
+             "_UIKeyboardWillShowNotification",
+             "_kCAFillModeForwards",
+             "_kCAMediaTimingFunctionLinear",
+             "_kCVPixelBufferPixelFormatTypeKey",
+         }) {
+        const auto object = harness.dataSymbol(symbol);
+        CHECK(object != 0);
+        objects.push_back(object);
+    }
+    for (std::size_t index = 0; index < objects.size(); ++index)
+        for (std::size_t other = index + 1; other < objects.size(); ++other)
+            CHECK(objects[index] != objects[other]);
 }
 
 void testEaglKeysRuneAndConstantStringToken() {
@@ -194,6 +262,9 @@ int main() {
     testCtypeSweepIsAsciiAndBounded();
     testErrnoAndStandardStreamCells();
     testEaglKeysRuneAndConstantStringToken();
+    testBioShockConstantValues();
+    testStringConstantsAreDistinctGuestObjects();
+    testStringConstantSymbolsAreVariables();
     testOpenAlIsStateOnly();
     testPersonalityIsAFailClosedBoundary();
     return 0;

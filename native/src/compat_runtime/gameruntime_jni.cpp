@@ -18,6 +18,7 @@
 #include "compat_runtime/gles_shims.hpp"
 #include "compat_runtime/virtual_file_system.hpp"
 #include "compat_runtime/cpu.hpp"
+#include "compat_runtime/cxx_string_shims.hpp"
 #include "compat_runtime/libsystem_shims.hpp"
 #include "compat_runtime/objc_shims.hpp"
 #include "compat_runtime/runner.hpp"
@@ -29,6 +30,8 @@
 #include "json.hpp"
 
 #include <jni.h>
+
+#include <cstdio>
 
 #include <android/native_window_jni.h>
 #include <android/native_window.h>
@@ -186,6 +189,20 @@ Java_dev_radek_gameruntime_GameBootActivity_getRendererProgress(JNIEnv *env, jcl
     report["forwardedCalls"] = progress.forwardedCalls;
     report["refusedCalls"] = progress.refusedCalls;
     report["framesPresented"] = progress.framesPresented;
+    report["guestImportCalls"] = radek::compat_runtime::liveCalloutCount();
+    report["lastGuestImport"] = radek::compat_runtime::liveLastCalloutSymbol();
+    // Timing for the on-device boot trace: how long the import window spans and the
+    // average cost per guest import inside it, so slow boots can be attributed.
+    const auto windowNanos = radek::compat_runtime::liveCalloutWindowNanos();
+    const auto importCalls = radek::compat_runtime::liveCalloutCount();
+    report["guestImportWindowMillis"] = static_cast<std::uint64_t>(windowNanos / 1000000);
+    report["guestImportAverageMicros"] = importCalls == 0 ? std::uint64_t{0}
+        : static_cast<std::uint64_t>(windowNanos / 1000 / static_cast<std::int64_t>(importCalls));
+    report["busyMutexAttempts"] = radek::compat_runtime::ndk::liveBusyMutexAttempts();
+    char busyMutex[16];
+    std::snprintf(busyMutex, sizeof(busyMutex), "0x%08x", radek::compat_runtime::ndk::liveLastBusyMutex());
+    report["lastBusyMutex"] = std::string(busyMutex);
+    report["lastNote"] = progress.lastNote.empty() ? std::string("none") : progress.lastNote;
     report["note"] = "A successful EGL swap records a presented frame, not verified image content or gameplay.";
     return jsonString(env, report);
 }
@@ -223,8 +240,18 @@ Java_dev_radek_gameruntime_GameBootActivity_runGameBootAttempt(JNIEnv *env, jobj
         radek::compat_runtime::darwin_compat::ShimAdapter darwinShims(&objcShims);
         objcShims.registerBindings(shims);
         libsystemShims.registerBindings(shims);
+        radek::compat_runtime::cxx_string::ShimAdapter cxxStringShims(&libsystemShims);
+        cxxStringShims.registerBindings(shims);
         audioShims.registerBindings(shims);
         sjljUnwind.registerBindings(shims);
+        ndkShims.attachWorkerUnwindChain(
+            [&sjljUnwind](radek::compat_runtime::GuestAddressSpace &memory) {
+                return sjljUnwind.beginThreadChain(memory);
+            },
+            [&sjljUnwind](radek::compat_runtime::GuestAddressSpace &memory,
+                               radek::compat_runtime::GuestAddress savedTop) {
+                sjljUnwind.endThreadChain(memory, savedTop);
+            });
         compilerRuntime.registerBindings(shims);
         cxxAbi.registerBindings(shims);
         // Guest OpenGL ES 1.1 calls go to the platform's EGL/GLES driver through
@@ -399,6 +426,7 @@ Java_dev_radek_gameruntime_GameBootActivity_runGameBootAttempt(JNIEnv *env, jobj
             providers["ndkFallbackCallsObserved"] = ndkShims.callCount();
             providers["guestPthreadTransfersObserved"] = ndkShims.guestThreadTransferCount();
             providers["guestPthreadCompletionsObserved"] = ndkShims.guestThreadCompletionCount();
+            providers["guestPthreadBusyCancellations"] = ndkShims.guestThreadBusyCancellationCount();
             providers["genericNdkCallsObserved"] = ndkShims.genericCallCount();
             providers["genericNdkProviderCount"] = static_cast<std::uint64_t>(
                 ndkShims.genericProviderCount());

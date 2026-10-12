@@ -45,6 +45,15 @@ class SjLjUnwindAdapter {
   public:
     /** Register the libgcc SjLj context imports and explicit resume stop boundary. */
     void registerBindings(ShimRegistry &registry);
+
+    /**
+     * Per-thread chains: a guest worker runs with its own, initially empty,
+     * SjLj chain. beginThreadChain returns the creator's chain top to be
+     * restored later by endThreadChain, which also unlinks any contexts the
+     * worker left registered (for example when the worker is ended early).
+     */
+    GuestAddress beginThreadChain(GuestAddressSpace &memory);
+    void endThreadChain(GuestAddressSpace &memory, GuestAddress savedTop);
 };
 
 } // namespace radek::compat_runtime

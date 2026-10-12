@@ -1073,12 +1073,20 @@ void ShimAdapter::synchronizeObject(GuestAddressSpace &memory, Object *object,
                                     GuestAddress address) {
     if (object->ivars.size() > (kGuestPageSize - sizeof(std::uint32_t)) / sizeof(std::uint32_t))
         throw std::length_error("Objective-C instance has too many guest ivars");
+    // Three-way merge per slot. The guest may have written a slot directly since
+    // the last publish, and a shim may have changed the host copy since then.
+    // Only a slot whose guest word differs from the last published value came
+    // from the guest; every other slot keeps the host value, so a shim's update
+    // is never overwritten by the stale guest word.
     for (std::size_t index = 0; index < object->ivars.size(); ++index) {
         const auto slotAddress = address + static_cast<GuestAddress>(sizeof(std::uint32_t) * (index + 1));
         std::uint32_t value = 0;
         if (!memory.read(slotAddress, &value, sizeof(value)))
             throw std::runtime_error("Objective-C instance ivar is outside guest memory");
-        object->ivars[index] = value;
+        const bool publishedBefore = index < object->guestImage.size();
+        if (!publishedBefore || value != static_cast<std::uint32_t>(object->guestImage[index]))
+            if (publishedBefore)
+                object->ivars[index] = value;
     }
     writeWord(memory, address, ensureClassAddress(memory, object->isa));
     for (std::size_t index = 0; index < object->ivars.size(); ++index) {
@@ -1086,6 +1094,7 @@ void ShimAdapter::synchronizeObject(GuestAddressSpace &memory, Object *object,
         const auto value = static_cast<std::uint32_t>(object->ivars[index]);
         writeWord(memory, slotAddress, value);
     }
+    object->guestImage.assign(object->ivars.begin(), object->ivars.end());
 }
 
 void ShimAdapter::releaseObject(GuestAddressSpace &memory, Object *object) {

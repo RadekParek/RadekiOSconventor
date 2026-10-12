@@ -227,8 +227,13 @@ namespace {
 aaudio_data_callback_result_t aaudioDataCallback(AAudioStream *, void *userData, void *audioData,
                                                  int32_t numFrames) {
     auto *engine = static_cast<Engine *>(userData);
-    // Mix in float, then convert to the 16-bit stream format.
-    std::vector<float> mix(static_cast<std::size_t>(numFrames) * Engine::kOutputChannels);
+    // Mix in float, then convert to the 16-bit stream format. The scratch buffer
+    // is per audio thread and only grows, so the callback does not allocate in
+    // steady state.
+    thread_local std::vector<float> mix;
+    const std::size_t samples = static_cast<std::size_t>(numFrames) * Engine::kOutputChannels;
+    if (mix.size() < samples)
+        mix.resize(samples);
     engine->render(mix.data(), static_cast<std::uint64_t>(numFrames));
     auto *out = static_cast<std::int16_t *>(audioData);
     for (std::size_t index = 0; index < mix.size(); ++index) {
@@ -241,9 +246,13 @@ aaudio_data_callback_result_t aaudioDataCallback(AAudioStream *, void *userData,
 } // namespace
 
 bool Engine::openDevice() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (deviceOpen_)
-        return true;
+    // Never hold mutex_ across AAudio calls: the data callback takes mutex_ in
+    // render(), and stream start/stop may run it.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (deviceOpen_)
+            return true;
+    }
     AAudioStreamBuilder *builder = nullptr;
     if (AAudio_createStreamBuilder(&builder) != AAUDIO_OK || builder == nullptr)
         return false;
@@ -262,20 +271,32 @@ bool Engine::openDevice() {
         AAudioStream_close(stream);
         return false;
     }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (deviceOpen_) {
+        // Another thread opened the device while we were opening ours.
+        AAudioStream_requestStop(stream);
+        AAudioStream_close(stream);
+        return true;
+    }
     stream_ = stream;
     deviceOpen_ = true;
     return true;
 }
 
 void Engine::closeDevice() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (stream_ != nullptr) {
-        auto *stream = static_cast<AAudioStream *>(stream_);
-        AAudioStream_requestStop(stream);
-        AAudioStream_close(stream);
+    void *stream = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stream = stream_;
         stream_ = nullptr;
+        deviceOpen_ = false;
     }
-    deviceOpen_ = false;
+    if (stream != nullptr) {
+        // Stop and close outside the lock so a running callback can finish.
+        auto *aaudio = static_cast<AAudioStream *>(stream);
+        AAudioStream_requestStop(aaudio);
+        AAudioStream_close(aaudio);
+    }
 }
 
 bool Engine::deviceOpen() const noexcept { return deviceOpen_; }

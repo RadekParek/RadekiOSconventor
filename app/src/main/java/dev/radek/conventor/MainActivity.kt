@@ -7,6 +7,10 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.content.ContentValues
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -123,20 +127,31 @@ class MainActivity : Activity() {
     private val pickerTranslatedRuntimeInput = 102
     private val maxTranslatedRuntimeInputBytes = 1024L * 1024 * 1024
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
+
+    /** Accent presets for the converter UI; each has a dark-theme and a light-theme tone. */
+    private data class AccentScheme(val id: String, val label: String, val dark: Int, val light: Int)
+    private val accentSchemes = listOf(
+        AccentScheme("teal", "Teal (default)", Color.rgb(92, 227, 181), Color.rgb(0, 125, 112)),
+        AccentScheme("blue", "Blue", Color.rgb(125, 180, 255), Color.rgb(29, 78, 216)),
+        AccentScheme("amber", "Amber", Color.rgb(251, 191, 36), Color.rgb(180, 83, 9)),
+        AccentScheme("violet", "Violet", Color.rgb(196, 167, 255), Color.rgb(109, 40, 217)),
+    )
+
     private fun applyThemePalette() {
         lightMode = preferences.getBoolean("light_theme", false)
+        val scheme = accentSchemes.firstOrNull { it.id == preferences.getString("accent_scheme", "teal") } ?: accentSchemes[0]
         if (lightMode) {
             bgColor = Color.rgb(245, 247, 250)
             panel = Color.WHITE
             muted = Color.rgb(92, 104, 119)
-            accent = Color.rgb(0, 125, 112)
+            accent = scheme.light
             textColor = Color.rgb(22, 32, 46)
             outlineColor = Color.rgb(220, 226, 234)
         } else {
             bgColor = Color.rgb(11, 16, 29)
             panel = Color.rgb(20, 29, 47)
             muted = Color.rgb(160, 178, 199)
-            accent = Color.rgb(92, 227, 181)
+            accent = scheme.dark
             textColor = Color.WHITE
             outlineColor = Color.rgb(45, 59, 79)
         }
@@ -492,6 +507,25 @@ class MainActivity : Activity() {
             settingsScreen()
         }
 
+        val accentCard = card()
+        text("Accent color", 17f, textColor, true, accentCard)
+        val currentScheme = preferences.getString("accent_scheme", "teal")
+        val currentLabel = accentSchemes.firstOrNull { it.id == currentScheme }?.label ?: accentSchemes[0].label
+        button("Accent · $currentLabel", parent = accentCard) {
+            val labels = accentSchemes.map { it.label }.toTypedArray()
+            val selectedIndex = accentSchemes.indexOfFirst { it.id == currentScheme }.coerceAtLeast(0)
+            AlertDialog.Builder(this)
+                .setTitle("Accent color")
+                .setSingleChoiceItems(labels, selectedIndex) { dialog, which ->
+                    preferences.edit().putString("accent_scheme", accentSchemes[which].id).apply()
+                    dialog.dismiss()
+                    applyThemePalette()
+                    settingsScreen()
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+
         val host = card()
         text("Host analysis target ABI", 17f, textColor, true, host)
         val preferredAbi = preferences.getString("target_abi", "auto") ?: "auto"
@@ -527,6 +561,7 @@ class MainActivity : Activity() {
         button("Restore defaults") {
             preferences.edit()
                 .putBoolean("light_theme", false)
+                .putString("accent_scheme", "teal")
                 .putString("target_abi", "auto")
                 .apply()
             applyThemePalette()
@@ -647,7 +682,12 @@ class MainActivity : Activity() {
             }
             if (total > 0) {
                 button("List this IPA's unimplemented / unresolved NDK needs", parent = mappingCard) {
-                    showText("Unimplemented / unresolved NDK needs", ApiNeedReport.format(mapping))
+                    val appInfo = report.optJSONObject("application") ?: JSONObject()
+                    val gameName = appInfo.optString("name")
+                    val bundleId = appInfo.optString("bundleId")
+                    val text = ndkNeedsHeader(gameName, bundleId, appInfo.optString("version")) + ApiNeedReport.format(mapping)
+                    val safeBundle = bundleId.ifBlank { "game" }.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                    saveNeedsText(text, "$safeBundle-ndk-needs.txt")
                 }
             }
             val generated = report.optJSONObject("hostConversion")?.optInt("generatedApiReplacements", 0) ?: 0
@@ -1117,6 +1157,53 @@ class MainActivity : Activity() {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         startActivity(Intent.createChooser(share, "Share APK result"))
+    }
+
+    private fun ndkNeedsHeader(name: String, bundleId: String, version: String): String {
+        val stamp = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+        return "Game: ${name.ifBlank { "unknown" }}\nBundle ID: ${bundleId.ifBlank { "unknown" }}\n" +
+            "Version: ${version.ifBlank { "unknown" }}\nExported: $stamp\n\n"
+    }
+
+    /** Saves the NDK needs list to Downloads straight away: no dialog, no file picker. */
+    private fun saveNeedsText(text: String, name: String) {
+        try {
+            Toast.makeText(this, "Saved NDK needs list to ${downloadNeedsText(text, name)}", Toast.LENGTH_LONG).show()
+        } catch (error: Exception) {
+            Toast.makeText(this, "Could not save the NDK needs list: ${error.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /** Writes the NDK needs list to Downloads and returns the path it was written to. */
+    private fun downloadNeedsText(text: String, name: String): String {
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        if (Build.VERSION.SDK_INT >= 29) {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, name)
+                put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+                put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: error("MediaStore refused to create the download")
+            contentResolver.openOutputStream(uri, "wt")?.use { it.write(bytes) }
+                ?: error("the download could not be opened for writing")
+            values.clear()
+            values.put(MediaStore.Downloads.IS_PENDING, 0)
+            contentResolver.update(uri, values, null, null)
+            return "Downloads/$name"
+        }
+        // Android 8-9: the public Downloads folder needs WRITE_EXTERNAL_STORAGE, which
+        // would mean a permission prompt. Fall back to the app's own Downloads folder
+        // (no permission needed) when the public write is refused.
+        return try {
+            val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            dir.mkdirs()
+            File(dir, name).also { it.writeBytes(bytes) }.absolutePath
+        } catch (error: SecurityException) {
+            val dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: filesDir
+            File(dir, name).also { it.writeBytes(bytes) }.absolutePath
+        }
     }
 
     private fun showText(title: String, value: String) {

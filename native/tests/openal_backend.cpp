@@ -192,7 +192,20 @@ void testMissingBufferIsSkippedNotWedged() {
 }
 } // namespace
 
+// Device lifecycle is safe to call in any order, even without a backend. On
+// Android the same calls drive AAudio; the lock ordering there is covered by
+// keeping mutex_ out of every AAudio call in openDevice/closeDevice.
+void testDeviceLifecycleIsSafeWithoutBackend() {
+    Engine engine;
+    CHECK(!engine.deviceOpen());
+    CHECK(!engine.openDevice());   // no backend on this build
+    engine.closeDevice();          // closing a closed device is a no-op
+    engine.closeDevice();
+    CHECK(!engine.deviceOpen());
+}
+
 int main() {
+    testDeviceLifecycleIsSafeWithoutBackend();
     testMono16ProducesStereoSamples();
     testGainZeroIsSilent();
     testStopSilencesSource();

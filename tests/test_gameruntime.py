@@ -282,7 +282,9 @@ class AngryBirdsBootTests(unittest.TestCase):
             self.assertGreater(probe["instructions"], 0)
             # The Darwin-only translation layer is registered and reports its
             # real process-stream cells; none of these names is an Android export.
-            self.assertEqual(34, probe["darwinCompatBoundSymbols"])
+            # Count of Darwin-only symbols the layer binds; it grew when the
+            # BioShock Apple constants were added. Matches native/tests/darwin_compat.cpp.
+            self.assertEqual(102, probe["darwinCompatBoundSymbols"])
             self.assertEqual(3, probe["darwinCompatStreamCells"])
             # The host probe opts into a finite diagnostic window. The device
             # policy is still unlimited; a real host run may stop at an import,

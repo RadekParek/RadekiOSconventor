@@ -78,11 +78,20 @@ void testAllDarwinProvidersAreRegistered() {
     Harness harness;
     const auto missing = compat_import_catalog::missingProviders(harness.registry);
     CHECK(missing.empty());
-    CHECK(compat_import_catalog::kDarwinOnlyProviderCount == 75);
-    CHECK(compat_import_catalog::kGuestRuntimeAdapterProviderCount == 75);
-    CHECK(harness.compiler.registeredSymbolCount() == 9);
+    CHECK(compat_import_catalog::kDarwinOnlyProviderCount == 124);
+    CHECK(compat_import_catalog::kGuestRuntimeAdapterProviderCount == 124);
+    CHECK(harness.compiler.registeredSymbolCount() == 42);
     for (const char *symbol : {"___divsi3", "___modsi3", "___udivsi3", "___umodsi3",
-                               "___divdi3", "___moddi3", "___floatdidf", "___floatdisf", "___fixdfdi"}) {
+                               "___divdi3", "___moddi3", "___floatdidf", "___floatdisf", "___fixdfdi",
+                               "___fixsfsivfp", "___fixunsdfsivfp", "___floatsidfvfp",
+                               "___floatsisfvfp", "___floatunssidfvfp", "___floatunssisfvfp",
+                               "___floatundidf", "___muldi3", "___udivdi3", "___umoddi3",
+                               "___addsf3vfp", "___subsf3vfp", "___mulsf3vfp",
+                               "___divsf3vfp", "___adddf3vfp", "___subdf3vfp", "___muldf3vfp",
+                               "___divdf3vfp", "___extendsfdf2vfp", "___truncdfsf2vfp",
+                               "___eqsf2vfp", "___nesf2vfp", "___gtsf2vfp", "___gedf2vfp",
+                               "___gtdf2vfp", "___lesf2vfp", "___ltsf2vfp", "___nedf2vfp",
+                               "___unordsf2vfp"}) {
         CHECK(harness.registry.resolve(symbol).has_value());
     }
     CHECK(ndk_import_catalog::kProviderCount == 181);
@@ -93,6 +102,226 @@ void testAllDarwinProvidersAreRegistered() {
         CHECK(binding->library.size() > 0);
         for (const auto &ndkProvider : ndk_import_catalog::kProviders)
             CHECK(std::string(provider.symbol) != ndkProvider.symbol);
+    }
+}
+
+namespace {
+
+std::uint32_t sBits(float value) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+void setS(CpuRegisterState &registers, int index, float value) {
+    const int shift = (index % 2) * 32;
+    auto &word = registers.d[static_cast<std::size_t>(index / 2)];
+    word = (word & ~(std::uint64_t{0xFFFFFFFFu} << shift)) |
+           (std::uint64_t{sBits(value)} << shift);
+}
+
+void setD(CpuRegisterState &registers, int index, double value) {
+    std::memcpy(&registers.d[static_cast<std::size_t>(index)], &value, sizeof(value));
+}
+
+double readD(const CpuRegisterState &registers, int index) {
+    double value = 0.0;
+    std::memcpy(&value, &registers.d[static_cast<std::size_t>(index)], sizeof(value));
+    return value;
+}
+
+float readS(const CpuRegisterState &registers, int index) {
+    const auto bits = static_cast<std::uint32_t>(
+        registers.d[static_cast<std::size_t>(index / 2)] >> ((index % 2) * 32));
+    float value = 0.0f;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+} // namespace
+
+void testCompilerRuntimeVfpAndIntegerHelpers() {
+    Harness harness;
+    std::string reason;
+    const float nan = std::nanf("");
+    const double dnan = std::nan("");
+
+    auto callS = [&](const char *symbol, float a, float b) {
+        CpuRegisterState registers{};
+        setS(registers, 0, a);
+        setS(registers, 1, b);
+        CHECK(harness.call(symbol, registers, reason) == GuestCalloutResult::Returned);
+        return registers;
+    };
+    auto callD = [&](const char *symbol, double a, double b) {
+        CpuRegisterState registers{};
+        setD(registers, 0, a);
+        setD(registers, 1, b);
+        CHECK(harness.call(symbol, registers, reason) == GuestCalloutResult::Returned);
+        return registers;
+    };
+
+    // Float arithmetic: s0 = s0 op s1; double arithmetic: d0 = d0 op d1.
+    CHECK(readS(callS("___addsf3vfp", 1.5f, 2.25f), 0) == 3.75f);
+    CHECK(readS(callS("___subsf3vfp", 1.5f, 2.25f), 0) == -0.75f);
+    CHECK(readS(callS("___mulsf3vfp", 1.5f, 2.0f), 0) == 3.0f);
+    CHECK(readS(callS("___divsf3vfp", 3.0f, 2.0f), 0) == 1.5f);
+    CHECK(readD(callD("___adddf3vfp", 1.5, 2.25), 0) == 3.75);
+    CHECK(readD(callD("___subdf3vfp", 1.5, 2.25), 0) == -0.75);
+    CHECK(readD(callD("___muldf3vfp", 1.5, 2.0), 0) == 3.0);
+    CHECK(readD(callD("___divdf3vfp", 3.0, 2.0), 0) == 1.5);
+
+    // The single-precision result must not clobber the upper half of d0.
+    {
+        CpuRegisterState registers{};
+        setS(registers, 0, 2.0f);
+        setS(registers, 1, 4.0f);
+        CHECK(harness.call("___divsf3vfp", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(readS(registers, 0) == 0.5f);
+        CHECK(readS(registers, 1) == 4.0f);
+    }
+
+    // Conversions between single and double precision.
+    {
+        CpuRegisterState registers{};
+        setS(registers, 0, 0.25f);
+        CHECK(harness.call("___extendsfdf2vfp", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(readD(registers, 0) == 0.25);
+    }
+    {
+        CpuRegisterState registers{};
+        setD(registers, 0, 0.125);
+        CHECK(harness.call("___truncdfsf2vfp", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(readS(registers, 0) == 0.125f);
+    }
+
+    // Comparisons follow libgcc's unordered conventions.
+    CHECK(callS("___eqsf2vfp", 1.0f, 1.0f).r[0] == 0u);
+    CHECK(callS("___eqsf2vfp", 1.0f, 2.0f).r[0] == 1u);
+    CHECK(callS("___eqsf2vfp", nan, nan).r[0] == 1u);
+    CHECK(callS("___nesf2vfp", 1.0f, 1.0f).r[0] == 0u);
+    CHECK(callS("___nesf2vfp", nan, 1.0f).r[0] == 1u);
+    CHECK(callS("___gtsf2vfp", 2.0f, 1.0f).r[0] == 1u);
+    CHECK(callS("___gtsf2vfp", 1.0f, 1.0f).r[0] == 0u);
+    CHECK(callS("___gtsf2vfp", 1.0f, 2.0f).r[0] == static_cast<std::uint32_t>(-1));
+    CHECK(callS("___gtsf2vfp", nan, 1.0f).r[0] == static_cast<std::uint32_t>(-1));
+    CHECK(callS("___lesf2vfp", 1.0f, 1.0f).r[0] == 0u);
+    CHECK(callS("___lesf2vfp", 2.0f, 1.0f).r[0] == 1u);
+    CHECK(callS("___lesf2vfp", nan, 1.0f).r[0] == 1u);
+    CHECK(callS("___ltsf2vfp", 1.0f, 2.0f).r[0] == static_cast<std::uint32_t>(-1));
+    CHECK(callS("___ltsf2vfp", 1.0f, nan).r[0] == 1u);
+    CHECK(callS("___unordsf2vfp", nan, 1.0f).r[0] == 1u);
+    CHECK(callS("___unordsf2vfp", 1.0f, 2.0f).r[0] == 0u);
+
+    CHECK(callD("___nedf2vfp", 1.0, 1.0).r[0] == 0u);
+    CHECK(callD("___nedf2vfp", dnan, dnan).r[0] == 1u);
+    CHECK(callD("___gedf2vfp", 1.0, 1.0).r[0] == 0u);
+    CHECK(callD("___gedf2vfp", 1.0, 2.0).r[0] == static_cast<std::uint32_t>(-1));
+    CHECK(callD("___gedf2vfp", dnan, 1.0).r[0] == static_cast<std::uint32_t>(-1));
+    CHECK(callD("___gtdf2vfp", 2.0, 1.0).r[0] == 1u);
+    CHECK(callD("___gtdf2vfp", dnan, 1.0).r[0] == static_cast<std::uint32_t>(-1));
+
+    // Integer -> float conversions. Inputs are in r0 (and r0:r1 for 64-bit).
+    {
+        CpuRegisterState registers{};
+        registers.r[0] = static_cast<std::uint32_t>(-5);
+        CHECK(harness.call("___floatsidfvfp", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(readD(registers, 0) == -5.0);
+    }
+    {
+        CpuRegisterState registers{};
+        registers.r[0] = static_cast<std::uint32_t>(-5);
+        CHECK(harness.call("___floatsisfvfp", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(readS(registers, 0) == -5.0f);
+    }
+    {
+        CpuRegisterState registers{};
+        registers.r[0] = 0xFFFFFFFFu;
+        CHECK(harness.call("___floatunssidfvfp", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(readD(registers, 0) == 4294967295.0);
+    }
+    {
+        CpuRegisterState registers{};
+        registers.r[0] = 0xFFFFFFFFu;
+        CHECK(harness.call("___floatunssisfvfp", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(readS(registers, 0) == 4294967296.0f);
+    }
+    {
+        CpuRegisterState registers{};
+        registers.r[0] = 0u;
+        registers.r[1] = 0x1u; // 2^32
+        CHECK(harness.call("___floatundidf", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(readD(registers, 0) == 4294967296.0);
+    }
+
+    // Float -> integer conversions saturate; NaN maps to zero.
+    {
+        CpuRegisterState registers{};
+        setS(registers, 0, -7.9f);
+        CHECK(harness.call("___fixsfsivfp", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(static_cast<std::int32_t>(registers.r[0]) == -7);
+    }
+    {
+        CpuRegisterState registers{};
+        setS(registers, 0, 1.0e20f);
+        CHECK(harness.call("___fixsfsivfp", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(static_cast<std::int32_t>(registers.r[0]) == 2147483647);
+    }
+    {
+        CpuRegisterState registers{};
+        setS(registers, 0, nan);
+        CHECK(harness.call("___fixsfsivfp", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(registers.r[0] == 0u);
+    }
+    {
+        CpuRegisterState registers{};
+        setD(registers, 0, 4000000000.75);
+        CHECK(harness.call("___fixunsdfsivfp", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(registers.r[0] == 4000000000u);
+    }
+    {
+        CpuRegisterState registers{};
+        setD(registers, 0, -3.0);
+        CHECK(harness.call("___fixunsdfsivfp", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(registers.r[0] == 0u);
+    }
+
+    // 64-bit integer helpers: r0:r1 and r2:r3 pairs; division by zero yields zero.
+    auto pair = [](CpuRegisterState &registers, int low, std::uint64_t value) {
+        registers.r[static_cast<std::size_t>(low)] = static_cast<std::uint32_t>(value);
+        registers.r[static_cast<std::size_t>(low + 1)] = static_cast<std::uint32_t>(value >> 32);
+    };
+    auto result64 = [](const CpuRegisterState &registers) {
+        return static_cast<std::uint64_t>(registers.r[0]) |
+               (static_cast<std::uint64_t>(registers.r[1]) << 32);
+    };
+    {
+        CpuRegisterState registers{};
+        pair(registers, 0, 0x100000001ULL);
+        pair(registers, 2, 0x10ULL);
+        CHECK(harness.call("___muldi3", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(result64(registers) == 0x1000000010ULL);
+    }
+    {
+        CpuRegisterState registers{};
+        pair(registers, 0, 0xFFFFFFFFFFFFFFFFULL);
+        pair(registers, 2, 16ULL);
+        CHECK(harness.call("___udivdi3", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(result64(registers) == 0x0FFFFFFFFFFFFFFFULL);
+    }
+    {
+        CpuRegisterState registers{};
+        pair(registers, 0, 100ULL);
+        pair(registers, 2, 0ULL);
+        CHECK(harness.call("___udivdi3", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(result64(registers) == 0ULL);
+    }
+    {
+        CpuRegisterState registers{};
+        pair(registers, 0, 0x100000007ULL);
+        pair(registers, 2, 0x10ULL);
+        CHECK(harness.call("___umoddi3", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(result64(registers) == 7ULL);
     }
 }
 
@@ -332,6 +561,73 @@ void testAllNdkProvidersAndMinimalEmulation() {
     CHECK(harness.call("_pthread_mutex_unlock", registers, reason) == GuestCalloutResult::Returned);
     CHECK(registers.r[0] == 0);
 
+    // A blocking self-lock of a normal mutex is granted as a phantom lock (HyperHLE
+    // behaviour) instead of spinning, and a matching unlock consumes it.
+    constexpr GuestAddress kPhantomMutex = kData + 0x880;
+    registers = {};
+    registers.r[0] = kPhantomMutex;
+    CHECK(harness.call("_pthread_mutex_init", registers, reason) == GuestCalloutResult::Returned);
+    for (int depth = 0; depth < 2; ++depth) {
+        registers = {};
+        registers.r[0] = kPhantomMutex;
+        CHECK(harness.call("_pthread_mutex_lock", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(registers.r[0] == 0);
+    }
+    registers = {};
+    registers.r[0] = kPhantomMutex;
+    CHECK(harness.call("_pthread_mutex_unlock", registers, reason) == GuestCalloutResult::Returned);
+    registers = {};
+    registers.r[0] = kPhantomMutex;
+    CHECK(harness.call("_pthread_mutex_trylock", registers, reason) == GuestCalloutResult::Returned);
+    CHECK(registers.r[0] == 16); // still held by the outer lock
+    registers = {};
+    registers.r[0] = kPhantomMutex;
+    CHECK(harness.call("_pthread_mutex_unlock", registers, reason) == GuestCalloutResult::Returned);
+    registers = {};
+    registers.r[0] = kPhantomMutex;
+    CHECK(harness.call("_pthread_mutex_trylock", registers, reason) == GuestCalloutResult::Returned);
+    CHECK(registers.r[0] == 0);
+    registers = {};
+    registers.r[0] = kPhantomMutex;
+    CHECK(harness.call("_pthread_mutex_unlock", registers, reason) == GuestCalloutResult::Returned);
+
+    // A mutex initialised from a PTHREAD_MUTEX_RECURSIVE attribute nests for its owner.
+    constexpr GuestAddress kRecursiveAttr = kData + 0x800;
+    constexpr GuestAddress kRecursiveMutex = kData + 0x840;
+    registers = {};
+    registers.r[0] = kRecursiveAttr;
+    CHECK(harness.call("_pthread_mutexattr_init", registers, reason) == GuestCalloutResult::Returned);
+    registers = {};
+    registers.r[0] = kRecursiveAttr;
+    registers.r[1] = 2; // PTHREAD_MUTEX_RECURSIVE (Darwin)
+    CHECK(harness.call("_pthread_mutexattr_settype", registers, reason) == GuestCalloutResult::Returned);
+    registers = {};
+    registers.r[0] = kRecursiveMutex;
+    registers.r[1] = kRecursiveAttr;
+    CHECK(harness.call("_pthread_mutex_init", registers, reason) == GuestCalloutResult::Returned);
+    for (int depth = 0; depth < 2; ++depth) {
+        registers = {};
+        registers.r[0] = kRecursiveMutex;
+        CHECK(harness.call("_pthread_mutex_lock", registers, reason) == GuestCalloutResult::Returned);
+        CHECK(registers.r[0] == 0);
+    }
+    registers = {};
+    registers.r[0] = kRecursiveMutex;
+    CHECK(harness.call("_pthread_mutex_unlock", registers, reason) == GuestCalloutResult::Returned);
+    CHECK(registers.r[0] == 0);
+    registers = {};
+    registers.r[0] = kRecursiveMutex;
+    CHECK(harness.call("_pthread_mutex_unlock", registers, reason) == GuestCalloutResult::Returned);
+    CHECK(registers.r[0] == 0);
+    registers = {};
+    registers.r[0] = kRecursiveMutex;
+    CHECK(harness.call("_pthread_mutex_trylock", registers, reason) == GuestCalloutResult::Returned);
+    CHECK(registers.r[0] == 0);
+    registers = {};
+    registers.r[0] = kRecursiveMutex;
+    CHECK(harness.call("_pthread_mutex_unlock", registers, reason) == GuestCalloutResult::Returned);
+    CHECK(registers.r[0] == 0);
+
     registers = {};
     registers.r[0] = kData + 256;
     CHECK(harness.call("_setjmp", registers, reason) == GuestCalloutResult::Returned);
@@ -341,6 +637,7 @@ void testAllNdkProvidersAndMinimalEmulation() {
 } // namespace
 
 int main() {
+    testCompilerRuntimeVfpAndIntegerHelpers();
     testLiveGlesSnapshotIsThreadSafeAndResettable();
     testAllDarwinProvidersAreRegistered();
     testExceptionAllocationAndGuards();

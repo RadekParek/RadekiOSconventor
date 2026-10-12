@@ -70,6 +70,32 @@ bool SjLjUnwindAdapter::registerContext(CpuRegisterState &registers,
     return true;
 }
 
+GuestAddress SjLjUnwindAdapter::beginThreadChain(GuestAddressSpace &memory) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto &state = states_[&memory];
+    const GuestAddress saved = state.top;
+    state.top = 0;
+    return saved;
+}
+
+void SjLjUnwindAdapter::endThreadChain(GuestAddressSpace &memory, GuestAddress savedTop) {
+    // Bounded: a chain longer than this is corrupt, and walking it further
+    // would not reflect any real registration order.
+    constexpr std::size_t kMaxWorkerChainWalk = 1U << 16;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto &state = states_[&memory];
+    GuestAddress cursor = state.top;
+    for (std::size_t steps = 0; cursor != 0 && cursor != savedTop && steps < kMaxWorkerChainWalk;
+         ++steps) {
+        GuestAddress previous = 0;
+        if (!memory.read(cursor, &previous, sizeof(previous)))
+            break;
+        state.activeContexts.erase(cursor);
+        cursor = previous;
+    }
+    state.top = savedTop;
+}
+
 bool SjLjUnwindAdapter::unregisterContext(CpuRegisterState &registers,
                                          GuestAddressSpace &memory,
                                          std::string &reason) {

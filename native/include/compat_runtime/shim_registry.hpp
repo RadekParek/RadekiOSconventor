@@ -3,6 +3,7 @@
 #include "compat_runtime/cpu.hpp"
 #include "compat_runtime/guest_memory.hpp"
 
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -11,6 +12,12 @@
 #include <vector>
 
 namespace radek::compat_runtime {
+
+/** Live count of guest imports entering the shim layer, and the last one called. */
+std::uint64_t liveCalloutCount();
+std::string liveLastCalloutSymbol();
+// Steady-clock span from the first to the most recent guest import, in nanoseconds (0 when none).
+std::int64_t liveCalloutWindowNanos();
 
 struct ShimBinding {
     std::string darwinSymbol;
@@ -44,7 +51,9 @@ using GuestImageInitializer = std::function<bool(
 class ShimRegistry {
     mutable std::mutex mutex_;
     std::map<std::string, ShimBinding> bindings_;
-    std::map<GuestAddress, std::string> callouts_;
+    // Stable pointers into bindings_ (std::map nodes never move and nothing erases),
+    // so a callout dispatches without copying the binding or its callbacks.
+    std::map<GuestAddress, const ShimBinding *> callouts_;
     std::map<std::string, GuestImageInitializer> imageInitializers_;
 
   public:

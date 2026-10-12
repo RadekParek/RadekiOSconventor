@@ -41,6 +41,10 @@
 namespace radek::compat_runtime::objc {
 namespace {
 
+// Virtual screen reported by `-[UIScreen bounds]` when the host gives no size.
+constexpr std::uint32_t kVirtualScreenWidth = 320;
+constexpr std::uint32_t kVirtualScreenHeight = 480;
+
 constexpr std::uint32_t kFrameDidFinishLaunching = 1;
 constexpr std::uint32_t kFramePerformSelector = 2;
 // A source serviced by CFRunLoop (timer, delayed selector, touch). The frame
@@ -98,6 +102,9 @@ void ShimAdapter::recordLifecycleEvent(LifecycleState &state, const std::string 
     constexpr std::size_t kMaximumLifecycleEvents = 64;
     if (state.events.size() < kMaximumLifecycleEvents)
         state.events.push_back(event);
+    // Also publish the latest event to the live renderer status, so a stall shows
+    // where the guest stopped without waiting for the run-end report.
+    gles::publishNote("lifecycle: " + event);
 }
 
 // Reads the delegate class name passed to UIApplicationMain. The classic
@@ -174,6 +181,9 @@ bool ShimAdapter::prepareQueuedMainThreadEntry(GuestAddressSpace &memory,
         registers.r[2] = lifecycle.queuedMainThreadArgument;
         registers.r[3] = 0;
         entryPoint = entry;
+        // The entry is consumed once it is handed to the CPU: a second prepare or
+        // a later run-loop exit must not run the same thread body again.
+        lifecycle.queuedMainThreadEntry = false;
         std::lock_guard<std::mutex> lock(mutex_);
         recordLifecycleEvent(lifecycle, "background thread entry queued: -" +
                                             selectorNames_.at(lifecycle.queuedMainThreadSelector));
@@ -182,6 +192,21 @@ bool ShimAdapter::prepareQueuedMainThreadEntry(GuestAddressSpace &memory,
         reason = error.what();
         return false;
     }
+}
+
+bool ShimAdapter::enterQueuedThreadAtLoopExit(GuestAddressSpace &memory,
+                                              CpuRegisterState &registers,
+                                              GuestAddress &guestTarget, std::string &reason) {
+    guestTarget = 0;
+    auto &lifecycle = guestState(memory).lifecycle;
+    if (!lifecycle.queuedMainThreadEntry)
+        return false;
+    GuestAddress entry = 0;
+    if (!prepareQueuedMainThreadEntry(memory, registers, entry, reason))
+        return false;
+    recordLifecycleEvent(lifecycle, "run loop exhausted: queued background thread runs now");
+    guestTarget = entry;
+    return true;
 }
 
 LifecycleOutcome ShimAdapter::lifecycleOutcome(GuestAddressSpace &memory) const {
@@ -276,11 +301,64 @@ bool ShimAdapter::lifecycleContinuation(CpuRegisterState &registers, GuestAddres
         lifecycle.frames.pop_back();
         registers.r[14] = frame.callerReturnAddress;
         switch (frame.kind) {
-        case kFrameDidFinishLaunching:
-            lifecycle.applicationMainReturned = true;
+        case kFrameDidFinishLaunching: {
+            // UIApplicationMain does not return after the startup callback on a
+            // device: it enters the main run loop, which is what fires the
+            // game's timers and frames. Enter it here with UIApplicationMain's
+            // own caller as the loop's return, so the return happens only when
+            // the loop has no sources left.
             recordLifecycleEvent(lifecycle, "applicationDidFinishLaunching: returned");
             registers.r[0] = 0;
+            lifecycle.runLoopRunning = true;
+            lifecycle.runLoopEntered = true;
+            lifecycle.runLoopStopped = false;
+            lifecycle.runLoopCallerReturn = frame.callerReturnAddress;
+            // Startup order UIKit uses: the window is laid out as it becomes
+            // visible, then the delegate hears that the app became active.
+            if (lifecycle.keyWindow != 0)
+                queueLayoutPass(memory, lifecycle.keyWindow);
+            if (auto *delegateObject = objectForGuest(memory, frame.receiver);
+                delegateObject != nullptr) {
+                const auto becomeActive = runtime_.selector("applicationDidBecomeActive:");
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    selectorNames_[becomeActive] = "applicationDidBecomeActive:";
+                    selectorIds_["applicationDidBecomeActive:"] = becomeActive;
+                }
+                if (guestImplements(delegateObject, becomeActive)) {
+                    LifecycleState::RunLoopSource source;
+                    source.kind = LifecycleState::RunLoopSource::Kind::DelayedSelector;
+                    source.target = frame.receiver;
+                    source.selector = becomeActive;
+                    source.argument = lifecycle.application;
+                    source.nextFireSeconds = lifecycle.runLoopClockSeconds;
+                    source.repeats = false;
+                    lifecycle.runLoopSources.push_back(source);
+                    recordLifecycleEvent(lifecycle, "applicationDidBecomeActive: queued");
+                }
+            }
+            recordLifecycleEvent(lifecycle, "UIApplicationMain entered the main run loop");
+            GuestAddress next = 0;
+            if (!serviceRunLoop(registers, memory, next, reason))
+                return false;
+            if (next != 0) {
+                if (guestTarget)
+                    *guestTarget = next;
+                return true;
+            }
+            lifecycle.runLoopRunning = false;
+            lifecycle.applicationMainReturned = true;
+            registers.r[14] = frame.callerReturnAddress;
+            recordLifecycleEvent(lifecycle, "CFRunLoop exited: no scheduled sources");
+            if (enterQueuedThreadAtLoopExit(memory, registers, next, reason)) {
+                if (guestTarget)
+                    *guestTarget = next;
+                return true;
+            }
+            if (!reason.empty())
+                return false;
             break;
+        }
         case kFramePerformSelector:
             ++lifecycle.mainThreadFramesServiced;
             registers.r[0] = 0;
@@ -301,6 +379,13 @@ bool ShimAdapter::lifecycleContinuation(CpuRegisterState &registers, GuestAddres
             lifecycle.runLoopRunning = false;
             registers.r[14] = frame.callerReturnAddress;
             recordLifecycleEvent(lifecycle, "CFRunLoop exited: no sources remain");
+            if (enterQueuedThreadAtLoopExit(memory, registers, next, reason)) {
+                if (guestTarget)
+                    *guestTarget = next;
+                return true;
+            }
+            if (!reason.empty())
+                return false;
             break;
         }
         default:
@@ -606,6 +691,16 @@ bool ShimAdapter::serviceRunLoop(CpuRegisterState &registers, GuestAddressSpace 
         return true;
     }
 
+    {
+        std::string name = "selector#" + std::to_string(source.selector);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto known = selectorNames_.find(source.selector);
+            if (known != selectorNames_.end())
+                name = known->second;
+        }
+        recordLifecycleEvent(lifecycle, "run-loop source delivered: " + name);
+    }
     // Keep the run loop's own caller as the frame's return address. On a
     // continuation `r14` holds the continuation callout itself, so using it
     // would nest every source one level deeper instead of staying in the loop.
@@ -616,6 +711,60 @@ bool ShimAdapter::serviceRunLoop(CpuRegisterState &registers, GuestAddressSpace 
         return false;
     guestTarget = target;
     return true;
+}
+
+bool ShimAdapter::guestImplements(const Object *receiver, Selector selector) const {
+    if (receiver == nullptr)
+        return false;
+    for (auto *current = receiver->isa; current; current = current->superclass) {
+        if (guestImplementations_.find({current, selector}) != guestImplementations_.end())
+            return true;
+    }
+    return false;
+}
+
+void ShimAdapter::queueLayoutPass(GuestAddressSpace &memory, GuestAddress view) {
+    auto &lifecycle = guestState(memory).lifecycle;
+    const auto layoutSelector = runtime_.selector("layoutSubviews");
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        selectorNames_[layoutSelector] = "layoutSubviews";
+        selectorIds_["layoutSubviews"] = layoutSelector;
+    }
+    const auto alreadyQueued = [&lifecycle, layoutSelector](GuestAddress target) {
+        return std::any_of(lifecycle.runLoopSources.begin(), lifecycle.runLoopSources.end(),
+                           [target, layoutSelector](const LifecycleState::RunLoopSource &source) {
+                               return source.kind == LifecycleState::RunLoopSource::Kind::DelayedSelector &&
+                                      source.target == target && source.selector == layoutSelector;
+                           });
+    };
+    // Depth-first with a stack; children are pushed in reverse so they are
+    // visited in insertion order after their parent, as UIKit lays them out.
+    std::vector<GuestAddress> pending{view};
+    std::size_t visited = 0;
+    constexpr std::size_t kMaxLayoutVisits = 1U << 16;
+    while (!pending.empty() && visited++ < kMaxLayoutVisits) {
+        const auto node = pending.back();
+        pending.pop_back();
+        auto *object = objectForGuest(memory, node);
+        if (object == nullptr)
+            continue;
+        if (guestImplements(object, layoutSelector) && !alreadyQueued(node)) {
+            LifecycleState::RunLoopSource source;
+            source.kind = LifecycleState::RunLoopSource::Kind::DelayedSelector;
+            source.target = node;
+            source.selector = layoutSelector;
+            source.argument = 0;
+            source.nextFireSeconds = lifecycle.runLoopClockSeconds;
+            source.repeats = false;
+            lifecycle.runLoopSources.push_back(source);
+        }
+        const auto children = lifecycle.subviews.find(node);
+        if (children != lifecycle.subviews.end()) {
+            for (auto child = children->second.rbegin(); child != children->second.rend(); ++child)
+                pending.push_back(*child);
+        }
+    }
 }
 
 bool ShimAdapter::runLoopRun(CpuRegisterState &registers, GuestAddressSpace &memory,
@@ -640,7 +789,11 @@ bool ShimAdapter::runLoopRun(CpuRegisterState &registers, GuestAddressSpace &mem
     registers.r[14] = lifecycle.runLoopCallerReturn;
     registers.r[0] = 0;
     recordLifecycleEvent(lifecycle, "CFRunLoop exited: no scheduled sources");
-    return true;
+    if (enterQueuedThreadAtLoopExit(memory, registers, target, reason)) {
+        guestTarget = target;
+        return true;
+    }
+    return !reason.empty() ? false : true;
 }
 
 void configureActiveGuestViewport(std::uint32_t width, std::uint32_t height) {
@@ -900,6 +1053,9 @@ bool ShimAdapter::lifecycleViewMessage(CpuRegisterState &registers, GuestAddress
                     childObject->ivars[3] = receiverObject->ivars[3];
                     synchronizeObject(memory, childObject, child);
                 }
+                // Once the window is on screen, UIKit lays out what is added to it.
+                if (lifecycle.keyWindow != 0)
+                    queueLayoutPass(memory, child);
             }
             return finish(0);
         }
@@ -908,6 +1064,7 @@ bool ShimAdapter::lifecycleViewMessage(CpuRegisterState &registers, GuestAddress
         if (selectorName == "makeKeyAndVisible") {
             lifecycle.keyWindow = receiverAddress;
             recordLifecycleEvent(lifecycle, "-[UIWindow makeKeyAndVisible]");
+            queueLayoutPass(memory, receiverAddress);
             return finish(0);
         }
         if (selectorName == "window")
@@ -994,7 +1151,9 @@ bool ShimAdapter::lifecycleThreadMessage(CpuRegisterState &registers, GuestAddre
         ivars.resize(5, 0);
     if (selectorName == "initWithTarget:selector:object:") {
         ivars[0] = registers.r[2];
-        ivars[1] = registers.r[3];
+        // The selector argument is a SEL (a guest string address); keep the
+        // runtime's selector value so `start` can deliver it.
+        ivars[1] = registers.r[3] != 0 ? selectorForGuest(memory, registers.r[3]) : 0;
         std::uint32_t argument = 0;
         if (registers.r[13] != 0)
             (void)memory.read(registers.r[13], &argument, sizeof(argument));
@@ -1004,8 +1163,14 @@ bool ShimAdapter::lifecycleThreadMessage(CpuRegisterState &registers, GuestAddre
         return finish(receiverAddress);
     }
     if (selectorName == "start") {
-        if (ivars[0] == 0 || ivars[1] == 0)
-            throw std::runtime_error("-[NSThread start] was called on a thread without a target");
+        if (ivars[0] == 0) {
+            // Messages to nil are no-ops in Objective-C, so a thread whose target
+            // is nil runs nothing and the app keeps going.
+            recordLifecycleEvent(lifecycle, "background thread started with a nil target (no-op)");
+            return finish(0);
+        }
+        if (ivars[1] == 0)
+            throw std::runtime_error("-[NSThread start] was called with a nil selector");
         lifecycle.queuedMainThreadEntry = true;
         lifecycle.queuedMainThreadTarget = ivars[0];
         lifecycle.queuedMainThreadSelector = ivars[1];
@@ -1450,8 +1615,11 @@ bool ShimAdapter::lifecycleSelector(CpuRegisterState &registers, GuestAddressSpa
                 if (selectorName == "currentContext")
                     return finish(lifecycle.currentContext);
                 if (selectorName == "setCurrentContext:") {
+                    // `+[EAGLContext setCurrentContext:]` returns BOOL, YES on
+                    // success. Apple's own GL view templates test it, so a NO
+                    // makes `initWithFrame:` return nil and the view never exists.
                     lifecycle.currentContext = registers.r[2];
-                    return finish(0);
+                    return finish(1);
                 }
             }
             if (selectorName == "layerClass" &&
@@ -1662,21 +1830,35 @@ bool ShimAdapter::lifecycleSelector(CpuRegisterState &registers, GuestAddressSpa
                             "-[EAGLContext renderbufferStorage:fromDrawable:] -> drawable frame "
                             "unavailable; using host viewport " +
                                 std::to_string(width) + "x" + std::to_string(height));
+                    } else {
+                        // No host surface and no materialized frame: the same
+                        // virtual screen `-[UIScreen bounds]` reports.
+                        width = kVirtualScreenWidth;
+                        height = kVirtualScreenHeight;
+                        recordLifecycleEvent(
+                            lifecycle,
+                            "-[EAGLContext renderbufferStorage:fromDrawable:] -> drawable frame "
+                            "unavailable; using the virtual screen " +
+                                std::to_string(width) + "x" + std::to_string(height));
                     }
                 }
                 if (width == 0 || height == 0) {
-                    recordLifecycleEvent(lifecycle,
-                                         "-[EAGLContext renderbufferStorage:fromDrawable:] -> "
-                                         "drawable size unavailable; no EGL surface was created");
+                    const std::string note =
+                        "-[EAGLContext renderbufferStorage:fromDrawable:] -> "
+                        "drawable size unavailable; no EGL surface was created";
+                    recordLifecycleEvent(lifecycle, note);
+                    gles::publishNote(note);
                     return finish(0);
                 }
                 const bool attached = gles::forwarderFor(memory).attachDrawable(memory, width, height);
                 if (!attached) {
-                    recordLifecycleEvent(lifecycle,
-                                         "-[EAGLContext renderbufferStorage:fromDrawable:] -> "
-                                         "EGL surface creation failed for " +
-                                             std::to_string(width) + "x" +
-                                             std::to_string(height));
+                    const std::string note =
+                        "-[EAGLContext renderbufferStorage:fromDrawable:] -> "
+                        "EGL surface creation failed for " +
+                        std::to_string(width) + "x" + std::to_string(height) +
+                        "; see the EGL note above";
+                    recordLifecycleEvent(lifecycle, note);
+                    gles::publishNote(note);
                     return finish(0);
                 }
                 recordLifecycleEvent(lifecycle,
@@ -1687,7 +1869,7 @@ bool ShimAdapter::lifecycleSelector(CpuRegisterState &registers, GuestAddressSpa
             }
             if (selectorName == "setCurrentContext:") {
                 lifecycle.currentContext = registers.r[2];
-                return finish(0);
+                return finish(1);
             }
             if (selectorName == "isMultiThreaded")
                 return finish(1);

@@ -28,11 +28,18 @@ struct ProgressSnapshot {
     std::uint64_t forwardedCalls = 0;
     std::uint64_t refusedCalls = 0;
     std::uint64_t framesPresented = 0;
+    std::string lastNote;      // latest drawable/EGL/lifecycle failure, with the EGL error code
 };
 
 /** Reset/live-read counters without stopping or limiting guest execution. */
 void resetProgress();
 ProgressSnapshot progressSnapshot();
+
+/**
+ * Publishes the latest human-readable drawable or EGL note to the live progress
+ * snapshot, so a stall on the device names its cause without waiting for run end.
+ */
+void publishNote(const std::string &note);
 
 /**
  * OpenGL ES 1.1 forwarding layer for the compat runtime.

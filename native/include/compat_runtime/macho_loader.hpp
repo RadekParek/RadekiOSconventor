@@ -22,6 +22,9 @@ struct MachOLoadReport {
     std::string entryPointSource;
     bool thumb = false;
     CpuRegisterState initialRegisters;
+    // Guest addresses from every __mod_init_func entry (C++ static constructors).
+    // Real dyld runs them before main; the runner must do the same.
+    std::vector<GuestAddress> initializers;
     std::uint32_t segmentCount = 0;
     std::uint32_t rebasesApplied = 0;
     std::vector<radek::Json> resolvedSymbols;

@@ -6,6 +6,8 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -161,6 +163,33 @@ GuestAddress ShimAdapter::constantString(GuestAddressSpace &memory, const std::s
     return address;
 }
 
+GuestAddress ShimAdapter::valueCell(GuestAddressSpace &memory, const std::string &symbol,
+                                    const std::vector<std::uint8_t> &bytes, std::string &reason) {
+    auto &cache = valueCells_[&memory];
+    const auto found = cache.find(symbol);
+    if (found != cache.end())
+        return found->second;
+    const auto address = memory.mapAny(bytes.size(), MemoryPermission::Read | MemoryPermission::Write,
+                                       "darwin-constant-" + symbol, 16);
+    if (address == 0 || !memory.write(address, bytes.data(), bytes.size())) {
+        reason = symbol + " could not be materialized in guest memory";
+        return 0;
+    }
+    cache.emplace(symbol, address);
+    return address;
+}
+
+GuestAddress ShimAdapter::constantStringCell(GuestAddressSpace &memory, const std::string &symbol,
+                                             const std::string &value, std::string &reason) {
+    const auto object = constantString(memory, symbol, value, reason);
+    if (object == 0)
+        return 0;
+    const std::vector<std::uint8_t> pointer{
+        static_cast<std::uint8_t>(object & 0xff), static_cast<std::uint8_t>((object >> 8) & 0xff),
+        static_cast<std::uint8_t>((object >> 16) & 0xff), static_cast<std::uint8_t>((object >> 24) & 0xff)};
+    return valueCell(memory, symbol + "#pointer", pointer, reason);
+}
+
 GuestAddress ShimAdapter::errorCell(GuestAddressSpace &memory, std::string &reason) {
     const auto found = errnoCells_.find(&memory);
     if (found != errnoCells_.end())
@@ -244,10 +273,10 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
     const auto eaglKey = [this](const std::string &symbol, const std::string &value) {
         return [this, symbol, value](GuestAddressSpace &memory, GuestAddress &address,
                                      std::string &reason) {
-            const auto object = constantString(memory, symbol, value, reason);
-            if (object == 0)
+            const auto cell = constantStringCell(memory, symbol, value, reason);
+            if (cell == 0)
                 return false;
-            address = object;
+            address = cell;
             return true;
         };
     };
@@ -260,6 +289,133 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
     registerData(registry, "_kEAGLDrawablePropertyRetainedBacking", "eagl-key-retained-backing",
                  eaglKey("kEAGLDrawablePropertyRetainedBacking",
                          "kEAGLDrawablePropertyRetainedBacking"));
+    // --- Foundation/AVFoundation/UIKit/Core Animation string constants --------
+    const auto stringConstant = [this](const std::string &symbol, const std::string &value) {
+        return [this, symbol, value](GuestAddressSpace &memory, GuestAddress &address,
+                                     std::string &reason) {
+            const auto cell = constantStringCell(memory, symbol, value, reason);
+            if (cell == 0)
+                return false;
+            address = cell;
+            return true;
+        };
+    };
+    registerData(registry, "_AVCaptureSessionDidStartRunningNotification", "darwin-constant-avcapturesessiondidstartrunningnotification",
+                 stringConstant("_AVCaptureSessionDidStartRunningNotification", "AVCaptureSessionDidStartRunningNotification"));
+    registerData(registry, "_AVCaptureSessionDidStopRunningNotification", "darwin-constant-avcapturesessiondidstoprunningnotification",
+                 stringConstant("_AVCaptureSessionDidStopRunningNotification", "AVCaptureSessionDidStopRunningNotification"));
+    registerData(registry, "_AVCaptureSessionErrorKey", "darwin-constant-avcapturesessionerrorkey",
+                 stringConstant("_AVCaptureSessionErrorKey", "AVCaptureSessionErrorKey"));
+    registerData(registry, "_AVCaptureSessionInterruptionEndedNotification", "darwin-constant-avcapturesessioninterruptionendednotification",
+                 stringConstant("_AVCaptureSessionInterruptionEndedNotification", "AVCaptureSessionInterruptionEndedNotification"));
+    registerData(registry, "_AVCaptureSessionPreset640x480", "darwin-constant-avcapturesessionpreset640x480",
+                 stringConstant("_AVCaptureSessionPreset640x480", "AVCaptureSessionPreset640x480"));
+    registerData(registry, "_AVCaptureSessionRuntimeErrorNotification", "darwin-constant-avcapturesessionruntimeerrornotification",
+                 stringConstant("_AVCaptureSessionRuntimeErrorNotification", "AVCaptureSessionRuntimeErrorNotification"));
+    registerData(registry, "_AVCaptureSessionWasInterruptedNotification", "darwin-constant-avcapturesessionwasinterruptednotification",
+                 stringConstant("_AVCaptureSessionWasInterruptedNotification", "AVCaptureSessionWasInterruptedNotification"));
+    registerData(registry, "_AVLayerVideoGravityResizeAspectFill", "darwin-constant-avlayervideogravityresizeaspectfill",
+                 stringConstant("_AVLayerVideoGravityResizeAspectFill", "AVLayerVideoGravityResizeAspectFill"));
+    registerData(registry, "_AVMediaTypeVideo", "darwin-constant-avmediatypevideo",
+                 stringConstant("_AVMediaTypeVideo", "vide"));
+    registerData(registry, "_MPMoviePlayerLoadStateDidChangeNotification", "darwin-constant-mpmovieplayerloadstatedidchangenotification",
+                 stringConstant("_MPMoviePlayerLoadStateDidChangeNotification", "MPMoviePlayerLoadStateDidChangeNotification"));
+    registerData(registry, "_MPMoviePlayerPlaybackDidFinishNotification", "darwin-constant-mpmovieplayerplaybackdidfinishnotification",
+                 stringConstant("_MPMoviePlayerPlaybackDidFinishNotification", "MPMoviePlayerPlaybackDidFinishNotification"));
+    // --- Same-name and documented Foundation/UIKit/CoreGraphics constants -------
+    // Each value is the NSString the SDK header defines for the symbol. Keys that
+    // belong to services this runtime does not provide (iCloud, Spotlight, iAd,
+    // GameKit, MediaPlayer) still resolve to their real key strings; the services
+    // themselves stay unbound and fail closed when called.
+    const std::map<std::string, std::string> sameNameStrings = {
+        {"_UIApplicationDidBecomeActiveNotification", "UIApplicationDidBecomeActiveNotification"},
+        {"_UIApplicationDidEnterBackgroundNotification", "UIApplicationDidEnterBackgroundNotification"},
+        {"_UIApplicationDidReceiveMemoryWarningNotification", "UIApplicationDidReceiveMemoryWarningNotification"},
+        {"_UIApplicationWillEnterForegroundNotification", "UIApplicationWillEnterForegroundNotification"},
+        {"_UIApplicationWillTerminateNotification", "UIApplicationWillTerminateNotification"},
+        {"_UIDeviceOrientationDidChangeNotification", "UIDeviceOrientationDidChangeNotification"},
+        {"_UIKeyboardFrameEndUserInfoKey", "UIKeyboardFrameEndUserInfoKey"},
+        {"_UIKeyboardWillHideNotification", "UIKeyboardWillHideNotification"},
+        {"_UIScreenDidConnectNotification", "UIScreenDidConnectNotification"},
+        {"_UIScreenDidDisconnectNotification", "UIScreenDidDisconnectNotification"},
+        {"_NSFileModificationDate", "NSFileModificationDate"},
+        {"_NSFileSystemFreeSize", "NSFileSystemFreeSize"},
+        {"_NSFileSystemSize", "NSFileSystemSize"},
+        {"_NSURLIsExcludedFromBackupKey", "NSURLIsExcludedFromBackupKey"},
+        {"_NSURLIsUbiquitousItemKey", "NSURLIsUbiquitousItemKey"},
+        {"_NSURLUbiquitousItemDownloadingStatusCurrent", "NSURLUbiquitousItemDownloadingStatusCurrent"},
+        {"_NSURLUbiquitousItemDownloadingStatusKey", "NSURLUbiquitousItemDownloadingStatusKey"},
+        {"_NSURLUbiquitousItemHasUnresolvedConflictsKey", "NSURLUbiquitousItemHasUnresolvedConflictsKey"},
+        {"_NSMetadataQueryDidFinishGatheringNotification", "NSMetadataQueryDidFinishGatheringNotification"},
+        {"_NSMetadataQueryDidUpdateNotification", "NSMetadataQueryDidUpdateNotification"},
+        {"_NSMetadataQueryUbiquitousDocumentsScope", "NSMetadataQueryUbiquitousDocumentsScope"},
+        {"_NSMetadataUbiquitousItemDownloadingStatusKey", "NSMetadataUbiquitousItemDownloadingStatusKey"},
+        {"_NSMetadataUbiquitousItemHasUnresolvedConflictsKey", "NSMetadataUbiquitousItemHasUnresolvedConflictsKey"},
+        {"_NSMetadataUbiquitousItemIsDownloadingKey", "NSMetadataUbiquitousItemIsDownloadingKey"},
+        {"_NSMetadataUbiquitousItemIsUploadedKey", "NSMetadataUbiquitousItemIsUploadedKey"},
+        {"_NSMetadataUbiquitousItemIsUploadingKey", "NSMetadataUbiquitousItemIsUploadingKey"},
+        {"_NSMetadataUbiquitousItemPercentDownloadedKey", "NSMetadataUbiquitousItemPercentDownloadedKey"},
+        {"_NSMetadataUbiquitousItemPercentUploadedKey", "NSMetadataUbiquitousItemPercentUploadedKey"},
+        {"_NSLocalizedDescriptionKey", "NSLocalizedDescription"},
+        {"_NSUnderlyingErrorKey", "NSUnderlyingError"},
+        {"_NSFontAttributeName", "NSFont"},
+        {"_NSForegroundColorAttributeName", "NSColor"},
+        {"_NSGregorianCalendar", "gregorian"},
+        {"_NSMetadataItemFSNameKey", "kMDItemFSName"},
+        {"_NSMetadataItemURLKey", "kMDItemURL"},
+        {"_NSMetadataItemFSContentChangeDateKey", "kMDItemFSContentChangeDate"},
+        {"_AVAudioSessionInterruptionTypeKey", "AVAudioSessionInterruptionTypeKey"},
+        {"_AVAudioSessionRouteChangeReasonKey", "AVAudioSessionRouteChangeReasonKey"},
+        {"_GCControllerDidConnectNotification", "GCControllerDidConnectNotification"},
+        {"_GCControllerDidDisconnectNotification", "GCControllerDidDisconnectNotification"},
+        {"_GKPlayerAuthenticationDidChangeNotificationName", "GKPlayerAuthenticationDidChangeNotificationName"},
+        {"_MPMoviePlayerPlaybackDidFinishReasonUserInfoKey", "MPMoviePlayerPlaybackDidFinishReasonUserInfoKey"},
+        {"_ADBannerContentSizeIdentifierLandscape", "ADBannerContentSizeIdentifierLandscape"},
+        {"_ADBannerContentSizeIdentifierPortrait", "ADBannerContentSizeIdentifierPortrait"},
+    };
+    for (const auto &[symbol, value] : sameNameStrings)
+        registerData(registry, symbol, "darwin-constant-" + symbol.substr(1), stringConstant(symbol, value));
+
+    // Raw-value constants. Packed little-endian; the guest is 32-bit ARM, where CGFloat is 4 bytes.
+    const auto floatsCell = [this](const std::string &symbol, std::vector<float> values) {
+        std::vector<std::uint8_t> bytes(values.size() * sizeof(float));
+        std::memcpy(bytes.data(), values.data(), bytes.size());
+        return [this, symbol, bytes](GuestAddressSpace &memory, GuestAddress &address,
+                                     std::string &reason) {
+            address = valueCell(memory, symbol, bytes, reason);
+            return address != 0;
+        };
+    };
+    const float inf = std::numeric_limits<float>::infinity();
+    registerData(registry, "_UIWindowLevelAlert", "darwin-constant-uiwindowlevelalert",
+                 floatsCell("_UIWindowLevelAlert", {2000.0f}));
+    // CGRect is {{x, y}, {width, height}}; CGRectNull is the empty rect at infinity.
+    registerData(registry, "_CGRectZero", "darwin-constant-cgrectzero",
+                 floatsCell("_CGRectZero", {0, 0, 0, 0}));
+    registerData(registry, "_CGRectNull", "darwin-constant-cgrectnull",
+                 floatsCell("_CGRectNull", {inf, inf, 0, 0}));
+    registerData(registry, "_CGSizeZero", "darwin-constant-cgsizezero",
+                 floatsCell("_CGSizeZero", {0, 0}));
+    // CGAffineTransform is {a, b, c, d, tx, ty}; the identity has a = d = 1.
+    registerData(registry, "_CGAffineTransformIdentity", "darwin-constant-cgaffinetransformidentity",
+                 floatsCell("_CGAffineTransformIdentity", {1, 0, 0, 1, 0, 0}));
+
+    registerData(registry, "_NSDefaultRunLoopMode", "darwin-constant-nsdefaultrunloopmode",
+                 stringConstant("_NSDefaultRunLoopMode", "kCFRunLoopDefaultMode"));
+    registerData(registry, "_NSInvalidArgumentException", "darwin-constant-nsinvalidargumentexception",
+                 stringConstant("_NSInvalidArgumentException", "NSInvalidArgumentException"));
+    registerData(registry, "_UIImagePickerControllerOriginalImage", "darwin-constant-uiimagepickercontrolleroriginalimage",
+                 stringConstant("_UIImagePickerControllerOriginalImage", "UIImagePickerControllerOriginalImage"));
+    registerData(registry, "_UIKeyboardDidShowNotification", "darwin-constant-uikeyboarddidshownotification",
+                 stringConstant("_UIKeyboardDidShowNotification", "UIKeyboardDidShowNotification"));
+    registerData(registry, "_UIKeyboardWillShowNotification", "darwin-constant-uikeyboardwillshownotification",
+                 stringConstant("_UIKeyboardWillShowNotification", "UIKeyboardWillShowNotification"));
+    registerData(registry, "_kCAFillModeForwards", "darwin-constant-kcafillmodeforwards",
+                 stringConstant("_kCAFillModeForwards", "forwards"));
+    registerData(registry, "_kCAMediaTimingFunctionLinear", "darwin-constant-kcamediatimingfunctionlinear",
+                 stringConstant("_kCAMediaTimingFunctionLinear", "linear"));
+    registerData(registry, "_kCVPixelBufferPixelFormatTypeKey", "darwin-constant-kcvpixelbufferpixelformattypekey",
+                 stringConstant("_kCVPixelBufferPixelFormatTypeKey", "PixelFormatType"));
 
     // --- rune table and CoreFoundation constant-string class ------------------
     registerData(registry, "__DefaultRuneLocale", "darwin-default-runelocale-page",
@@ -532,9 +688,10 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
                           "mixer runs without device output");
             return true;
         });
-    registerFunction(registry, "_alcCloseDevice", "openal-close-device-state-only",
+    registerFunction(registry, "_alcCloseDevice", "openal-close-device-mixer",
         [this](CpuRegisterState &registers, GuestAddressSpace &, std::string &) {
             ++openalCalls_;
+            openal::engine().closeDevice();
             registers.r[0] = 1; // ALC_TRUE
             return true;
         });

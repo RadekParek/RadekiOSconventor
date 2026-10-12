@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import struct
 import subprocess
 import zipfile
@@ -59,19 +60,70 @@ def _host_tags() -> tuple[str, ...]:
     return ()
 
 
+def _version_key(path: Path) -> tuple[int, ...]:
+    """Sort NDK directories by numeric version (r27 / 27.0.12077973 / 9.0)."""
+    numbers = re.findall(r"\d+", path.name)
+    return tuple(int(part) for part in numbers) or (0,)
+
+
+def _local_properties_roots() -> list[Path]:
+    """NDK/SDK locations from Android Studio's ``local.properties`` files."""
+    found: list[Path] = []
+    candidates = (
+        Path.cwd() / "local.properties",
+        Path(__file__).resolve().parents[2] / "local.properties",
+    )
+    for candidate in candidates:
+        try:
+            lines = candidate.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            key, sep, value = line.partition("=")
+            if not sep:
+                continue
+            key, value = key.strip(), value.strip().replace("\\:", ":").replace("\\\\", "\\")
+            if key == "ndk.dir" and value:
+                found.append(Path(value).expanduser())
+            elif key == "sdk.dir" and value:
+                found.extend(sorted((Path(value).expanduser() / "ndk").glob("*"),
+                                    key=_version_key, reverse=True))
+    return found
+
+
+def _default_sdk_roots() -> list[Path]:
+    home = Path.home()
+    return [
+        home / "Android" / "Sdk",
+        home / "Library" / "Android" / "sdk",
+        Path("/opt/android-sdk"),
+        Path("/usr/lib/android-sdk"),
+    ]
+
+
 def _ndk_roots(environ: dict[str, str] | None = None) -> list[Path]:
+    """Candidate NDK roots, most specific first.
+
+    Explicit NDK variables win, then SDK variables, ``local.properties``, and the
+    default SDK install locations. The last two are consulted only for the real
+    process environment so callers passing ``environ`` get a hermetic search.
+    """
     env = os.environ if environ is None else environ
     roots: list[Path] = []
     for key in ("ANDROID_NDK_HOME", "ANDROID_NDK_ROOT", "NDK_HOME"):
         value = env.get(key)
         if value:
             roots.append(Path(value).expanduser())
+    sdk_roots: list[Path] = []
     for key in ("ANDROID_SDK_ROOT", "ANDROID_HOME"):
         value = env.get(key)
-        if not value:
-            continue
-        sdk = Path(value).expanduser()
-        roots.extend(sorted((sdk / "ndk").glob("*"), reverse=True))
+        if value:
+            sdk_roots.append(Path(value).expanduser())
+    if environ is None:
+        roots.extend(_local_properties_roots())
+        sdk_roots.extend(_default_sdk_roots())
+    for sdk in sdk_roots:
+        roots.extend(sorted((sdk / "ndk").glob("*"), key=_version_key, reverse=True))
         roots.append(sdk / "ndk-bundle")
     unique: list[Path] = []
     seen: set[str] = set()
@@ -96,7 +148,36 @@ def find_android_clang(environ: dict[str, str] | None = None) -> tuple[Path | No
     roots = _ndk_roots(environ)
     if roots:
         return None, None, "Android NDK was configured but its LLVM clang/sysroot was not found"
-    return None, None, "no Android NDK was found (set ANDROID_NDK_HOME or ANDROID_SDK_ROOT)"
+    return None, None, (
+        "no Android NDK was found. Set ANDROID_NDK_HOME, put ndk.dir=<path> in local.properties, "
+        "or install an NDK under <SDK>/ndk/<version> (searched ANDROID_SDK_ROOT/ANDROID_HOME and "
+        "the default SDK locations)"
+    )
+
+
+def _sha_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _fingerprint_files(paths: list[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(path.name.encode("utf-8") + b"\0" + _file_sha256(path).encode("ascii") + b"\0")
+    return digest.hexdigest()
+
+
+def _load_link_cache(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_link_cache(path: Path, cache: dict) -> None:
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
+    temporary.replace(path)
 
 
 def _link_failure(status: str, target_abi: str, reason: str) -> dict:
@@ -366,8 +447,7 @@ def link_generated_translation(
     temporary_artifact = link_dir / "libtranslated_game.so.tmp"
     if temporary_artifact.exists():
         temporary_artifact.unlink()
-    command = [
-        str(clang),
+    flags = [
         f"--target={target}",
         f"--sysroot={sysroot}",
         "-std=c11",
@@ -375,21 +455,98 @@ def link_generated_translation(
         "-fPIC",
         "-fno-strict-aliasing",
         "-fvisibility=default",
+    ]
+    env_arg = None if environ is None else {**os.environ, **environ}
+    include_dirs = [destination, runtime_source.parent]
+    units = [
+        destination / "game_all.c",
+        destination / "rt_gen.c",
+        runtime_source,
+        filesystem_source,
+        entry_source,
+        android_jni_source,
+    ]
+    # Incremental relink: each translation unit is compiled to its own object and
+    # reused while its source, the headers, the toolchain, and the flags are
+    # unchanged. The shared object is then relinked from the object set.
+    cache_path = link_dir / "link-cache.json"
+    cache = _load_link_cache(cache_path)
+    headers_fingerprint = _fingerprint_files(
+        sorted({*destination.glob("*.h"), *runtime_root.glob("*.h")}, key=lambda p: p.name)
+    )
+    toolchain_fingerprint = _sha_text(
+        f"{clang}|{clang.stat().st_size}|{int(clang.stat().st_mtime)}|{target}"
+    )
+    object_dir = link_dir / "objects"
+    object_dir.mkdir(parents=True, exist_ok=True)
+    objects: list[Path] = []
+    compiled_units: list[str] = []
+    reused_units: list[str] = []
+    for unit in units:
+        obj = object_dir / f"{unit.stem}.o"
+        key = _sha_text("\0".join(
+            [_file_sha256(unit), headers_fingerprint, toolchain_fingerprint, " ".join(flags)]
+        ))
+        entry = cache.get(obj.name) if isinstance(cache.get(obj.name), dict) else {}
+        if (
+            entry.get("key") == key
+            and obj.is_file()
+            and entry.get("objectSha256") == _file_sha256(obj)
+        ):
+            reused_units.append(obj.name)
+            objects.append(obj)
+            continue
+        cache.pop(obj.name, None)
+        if obj.exists():
+            obj.unlink()
+        compile_command = [
+            str(clang), *flags, *[f"-I{d}" for d in include_dirs], "-c", str(unit), "-o", str(obj),
+        ]
+        try:
+            compiled = subprocess.run(
+                compile_command,
+                cwd=destination,
+                env=env_arg,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            if obj.exists():
+                obj.unlink()
+            return _link_failure(
+                "BLOCKED_ANDROID_LINK_FAILED",
+                target_abi,
+                f"Android NDK clang could not compile {unit.name}: {exc}",
+            )
+        if compiled.returncode != 0 or not obj.is_file():
+            if obj.exists():
+                obj.unlink()
+            failure = _link_failure(
+                "BLOCKED_ANDROID_LINK_FAILED",
+                target_abi,
+                f"Android NDK clang failed to compile {unit.name}",
+            )
+            failure["linkerExitCode"] = compiled.returncode
+            failure["linkerOutputTail"] = (compiled.stdout or "")[-12000:]
+            _save_link_cache(cache_path, cache)
+            return failure
+        cache[obj.name] = {"key": key, "objectSha256": _file_sha256(obj)}
+        compiled_units.append(obj.name)
+        objects.append(obj)
+    _save_link_cache(cache_path, cache)
+
+    command = [
+        str(clang),
+        *flags,
         "-shared",
         "-Wl,--no-undefined",
         "-Wl,--build-id=none",
         "-Wl,-z,max-page-size=16384",
         "-Wl,-soname,libtranslated_game.so",
-        "-I",
-        str(destination),
-        "-I",
-        str(runtime_source.parent),
-        str(destination / "game_all.c"),
-        str(destination / "rt_gen.c"),
-        str(runtime_source),
-        str(filesystem_source),
-        str(entry_source),
-        str(android_jni_source),
+        *[str(obj) for obj in objects],
         "-lm",
         "-o",
         str(temporary_artifact),
@@ -398,7 +555,7 @@ def link_generated_translation(
         completed = subprocess.run(
             command,
             cwd=destination,
-            env=None if environ is None else {**os.environ, **environ},
+            env=env_arg,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -452,6 +609,11 @@ def link_generated_translation(
     verified["commandTarget"] = target
     verified["linker"] = str(clang)
     verified["ndkLinkVerified"] = True
+    verified["incremental"] = {
+        "compiledUnits": compiled_units,
+        "reusedUnits": reused_units,
+        "objectDirectory": str(object_dir.relative_to(destination)),
+    }
     verified["linkerOutputTail"] = (completed.stdout or "")[-4000:]
     return verified
 

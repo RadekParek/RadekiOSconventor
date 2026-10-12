@@ -23,8 +23,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -104,6 +106,14 @@ struct AtomicProgress {
 };
 
 AtomicProgress gProgress;
+
+std::mutex gNoteMutex;
+std::string gLastNote;
+
+void publishNoteLocked(const std::string &note) {
+    std::lock_guard<std::mutex> lock(gNoteMutex);
+    gLastNote = note;
+}
 
 void recordDriver(const DriverReport &report) {
     gProgress.driverGlesLoaded.store(report.glesLoaded, std::memory_order_relaxed);
@@ -221,6 +231,7 @@ struct EglState {
     EGLSurface surface = nullptr;
     bool windowSurface = false;
     bool current = false;
+    void *boundWindow = nullptr;  // Android window behind `surface`, if any
     int width = 0;
     int height = 0;
 
@@ -262,8 +273,14 @@ ProgressSnapshot progressSnapshot() {
     snapshot.forwardedCalls = gProgress.forwardedCalls.load(std::memory_order_relaxed);
     snapshot.refusedCalls = gProgress.refusedCalls.load(std::memory_order_relaxed);
     snapshot.framesPresented = gProgress.framesPresented.load(std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(gNoteMutex);
+        snapshot.lastNote = gLastNote;
+    }
     return snapshot;
 }
+
+void publishNote(const std::string &note) { publishNoteLocked(note); }
 
 // ---------------------------------------------------------------------------
 struct Forwarder::Impl {
@@ -272,7 +289,9 @@ struct Forwarder::Impl {
     Driver driver;
     DriverReport report;
     EglState egl;
-    void *nativeWindow = nullptr;
+    // Written from the JNI thread (surface changes), read on the guest thread.
+    std::atomic<void *> nativeWindow{nullptr};
+    void *failedWindowBind = nullptr;  // window whose bind already failed; not retried per frame
 
     std::set<int> drawableRenderbuffers;  // EAGL-backed renderbuffer names
     std::set<int> drawableFramebuffers;   // guest FBOs whose color attachment is EAGL
@@ -311,6 +330,7 @@ struct Forwarder::Impl {
     }
 
     void note(const std::string &message) {
+        publishNoteLocked(message);
         if (diagnostics.size() >= kMaxDiagnostics)
             return;
         if (std::find(diagnostics.begin(), diagnostics.end(), message) != diagnostics.end())
@@ -441,6 +461,19 @@ struct Forwarder::Impl {
     // ------------------------------------------------------------------
     // EGL drawable
     // ------------------------------------------------------------------
+    /** " (EGL error 0x...)" for the last EGL call on this thread, or empty if none. */
+    std::string eglErrorSuffix() {
+        auto eglGetError = symbol<EGLint (*)()>("eglGetError");
+        if (!eglGetError)
+            return {};
+        const EGLint code = eglGetError();
+        if (code == 0x3000) // EGL_SUCCESS
+            return {};
+        char text[32];
+        std::snprintf(text, sizeof(text), " (EGL error 0x%04x)", static_cast<unsigned>(code));
+        return text;
+    }
+
     bool createEglSurface(int width, int height, std::string &why) {
         auto eglGetDisplay = symbol<EGLDisplay (*)(EGLNativeDisplayType)>("eglGetDisplay");
         auto eglInitialize = symbol<EGLBoolean (*)(EGLDisplay, EGLint *, EGLint *)>("eglInitialize");
@@ -454,22 +487,22 @@ struct Forwarder::Impl {
             symbol<EGLBoolean (*)(EGLDisplay, EGLSurface, EGLSurface, EGLContext)>("eglMakeCurrent");
         if (!eglGetDisplay || !eglInitialize || !eglChooseConfig || !eglCreateContext ||
             !eglMakeCurrent) {
-            why = "the EGL entry points are missing from the loaded libraries";
+            why = "the EGL entry points are missing from the loaded libraries" + eglErrorSuffix();
             return false;
         }
         egl.display = eglGetDisplay(reinterpret_cast<EGLNativeDisplayType>(
             static_cast<std::uintptr_t>(EGL_DEFAULT_DISPLAY_VALUE)));
         if (!egl.display) {
-            why = "eglGetDisplay returned no display";
+            why = "eglGetDisplay returned no display" + eglErrorSuffix();
             return false;
         }
         EGLint major = 0;
         EGLint minor = 0;
         if (eglInitialize(egl.display, &major, &minor) != EGL_TRUE_VALUE) {
-            why = "eglInitialize failed";
+            why = "eglInitialize failed" + eglErrorSuffix();
             return false;
         }
-        const bool wantWindow = nativeWindow != nullptr;
+        const bool wantWindow = nativeWindow.load() != nullptr;
         auto choose = [&](EGLint renderable) {
             const EGLint attributes[] = {
                 EGL_SURFACE_TYPE, wantWindow ? EGL_WINDOW_BIT : EGL_PBUFFER_BIT,
@@ -484,7 +517,7 @@ struct Forwarder::Impl {
         EGLint contextAttributeValue = 1;
         if (!choose(EGL_OPENGL_ES_BIT)) {
             if (!choose(EGL_OPENGL_ES2_BIT)) {
-                why = "no EGL config supports an OpenGL ES surface on this device";
+                why = "no EGL config supports an OpenGL ES surface on this device" + eglErrorSuffix();
                 return false;
             }
             contextAttributeValue = 2;
@@ -494,7 +527,7 @@ struct Forwarder::Impl {
         egl.context = eglCreateContext(egl.display, egl.config, nullptr,
                                        contextAttributeValue == 1 ? nullptr : contextAttributes);
         if (!egl.context) {
-            why = "eglCreateContext failed for an OpenGL ES context";
+            why = "eglCreateContext failed for an OpenGL ES context" + eglErrorSuffix();
             return false;
         }
         if (wantWindow) {
@@ -502,15 +535,17 @@ struct Forwarder::Impl {
                 symbol<EGLSurface (*)(EGLDisplay, EGLConfig, EGLNativeWindowType, const EGLint *)>(
                     "eglCreateWindowSurface");
             if (!eglCreateWindowSurface) {
-                why = "eglCreateWindowSurface is missing from the loaded libraries";
+                why = "eglCreateWindowSurface is missing from the loaded libraries" + eglErrorSuffix();
                 return false;
             }
             egl.surface = eglCreateWindowSurface(
-                egl.display, egl.config, reinterpret_cast<EGLNativeWindowType>(nativeWindow),
+                egl.display, egl.config,
+                reinterpret_cast<EGLNativeWindowType>(nativeWindow.load()),
                 nullptr);
             egl.windowSurface = egl.surface != nullptr;
+            egl.boundWindow = egl.windowSurface ? nativeWindow.load() : nullptr;
             if (!egl.surface) {
-                why = "eglCreateWindowSurface failed for the Android surface";
+                why = "eglCreateWindowSurface failed for the Android surface" + eglErrorSuffix();
                 return false;
             }
         } else {
@@ -518,7 +553,7 @@ struct Forwarder::Impl {
                 symbol<EGLSurface (*)(EGLDisplay, EGLConfig, const EGLint *)>(
                     "eglCreatePbufferSurface");
             if (!eglCreatePbufferSurface) {
-                why = "eglCreatePbufferSurface is missing from the loaded libraries";
+                why = "eglCreatePbufferSurface is missing from the loaded libraries" + eglErrorSuffix();
                 return false;
             }
             const EGLint attributes[] = {EGL_WIDTH, std::max(width, 1), EGL_HEIGHT,
@@ -526,19 +561,63 @@ struct Forwarder::Impl {
             egl.surface =
                 eglCreatePbufferSurface(egl.display, egl.config, attributes);
             egl.windowSurface = false;
+            egl.boundWindow = nullptr;
             if (!egl.surface) {
-                why = "eglCreatePbufferSurface failed";
+                why = "eglCreatePbufferSurface failed" + eglErrorSuffix();
                 return false;
             }
         }
         if (eglMakeCurrent(egl.display, egl.surface, egl.surface, egl.context) !=
             EGL_TRUE_VALUE) {
-            why = "eglMakeCurrent failed";
+            why = "eglMakeCurrent failed" + eglErrorSuffix();
             return false;
         }
         egl.current = true;
         egl.width = width;
         egl.height = height;
+        return true;
+    }
+
+    /// Moves the drawable onto the Android window surface without losing it: the new
+    /// window surface is created and made current first, and the old surface is
+    /// destroyed only after that succeeds, so a failed bind keeps the offscreen drawable.
+    bool rebindWindowSurface(std::string &why) {
+        void *window = nativeWindow.load();
+        if (window == nullptr) {
+            why = "no Android window surface is available";
+            return false;
+        }
+        if (!egl.display || !egl.context || !egl.current) {
+            why = "no current EGL context to rebind";
+            return false;
+        }
+        auto eglCreateWindowSurface =
+            symbol<EGLSurface (*)(EGLDisplay, EGLConfig, EGLNativeWindowType, const EGLint *)>(
+                "eglCreateWindowSurface");
+        auto eglMakeCurrent =
+            symbol<EGLBoolean (*)(EGLDisplay, EGLSurface, EGLSurface, EGLContext)>("eglMakeCurrent");
+        auto eglDestroySurface = symbol<EGLBoolean (*)(EGLDisplay, EGLSurface)>("eglDestroySurface");
+        if (!eglCreateWindowSurface || !eglMakeCurrent || !eglDestroySurface) {
+            why = "EGL window-surface entry points are missing from the loaded libraries";
+            return false;
+        }
+        EGLSurface surface = eglCreateWindowSurface(
+            egl.display, egl.config, reinterpret_cast<EGLNativeWindowType>(window), nullptr);
+        if (!surface) {
+            why = "eglCreateWindowSurface failed for the Android surface";
+            return false;
+        }
+        if (eglMakeCurrent(egl.display, surface, surface, egl.context) != EGL_TRUE_VALUE) {
+            eglDestroySurface(egl.display, surface);
+            why = "eglMakeCurrent failed for the Android window surface";
+            return false;
+        }
+        if (egl.surface)
+            eglDestroySurface(egl.display, egl.surface);
+        egl.surface = surface;
+        egl.windowSurface = true;
+        egl.boundWindow = window;
+        egl.current = true;
         return true;
     }
 
@@ -558,7 +637,8 @@ struct Forwarder::Impl {
             // The Android surface may arrive after the first (offscreen) attach:
             // recreate the drawable so the frames reach the screen instead of a
             // pbuffer nobody can see.
-            if (nativeWindow != nullptr && !egl.windowSurface) {
+            if (nativeWindow.load() != nullptr &&
+                (!egl.windowSurface || egl.boundWindow != nativeWindow.load())) {
                 destroyEgl();
                 std::string why;
                 if (createEglSurface(static_cast<int>(width), static_cast<int>(height), why)) {
@@ -596,6 +676,22 @@ struct Forwarder::Impl {
     }
 
     bool presentDrawable() {
+        // The Android surface can arrive after the guest's drawable was attached to an
+        // offscreen pbuffer. Bind it here so frames reach the screen, not the pbuffer.
+        void *window = nativeWindow.load();
+        if (egl.current && window != nullptr && window != failedWindowBind &&
+            (!egl.windowSurface || egl.boundWindow != window)) {
+            std::string why;
+            if (rebindWindowSurface(why)) {
+                recordDrawable(true, true, static_cast<std::uint32_t>(egl.width),
+                               static_cast<std::uint32_t>(egl.height));
+                note("EAGL drawable bound to the Android window surface before presenting");
+            } else {
+                failedWindowBind = window;
+                note("could not bind the Android window surface (" + why +
+                     "); frames stay on the offscreen surface");
+            }
+        }
         if (!egl.current || !egl.surface) {
             refuse("eglSwapBuffers", "the EAGL drawable has no current EGL surface");
             return false;

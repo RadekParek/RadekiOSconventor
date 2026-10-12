@@ -221,6 +221,43 @@ radek::Json GuestRunner::runMainBinary(const std::vector<std::uint8_t> &mainBina
     report["functionOrigin"] = functionOrigin;
     report["execution"]["functionOrigin"] = functionOrigin;
 
+    radek::Json staticInitializers = radek::Json::object();
+    staticInitializers["count"] = static_cast<std::uint64_t>(load.initializers.size());
+    staticInitializers["status"] = "NONE";
+    std::uint64_t initializersRan = 0;
+    for (const auto initializer : load.initializers) {
+        GuestFunction initFunction;
+        initFunction.entryPoint = initializer & ~GuestAddress{1};
+        initFunction.thumb = (initializer & 1U) != 0;
+        initFunction.origin = "static-initializer";
+        PreparedGuestFunction preparedInit;
+        std::string initError;
+        if (!cpu_.prepareGuestFunction(initFunction, memory, preparedInit, initError)) {
+            staticInitializers["status"] = "PREPARATION_FAILED";
+            staticInitializers["message"] = initError;
+            break;
+        }
+        CpuRegisterState initRegisters = registers;
+        initRegisters.r[15] = initFunction.entryPoint;
+        constexpr std::uint32_t thumbStateBit = 1U << 5;
+        if (initFunction.thumb)
+            initRegisters.cpsr |= thumbStateBit;
+        else
+            initRegisters.cpsr &= ~thumbStateBit;
+        const auto initResult = cpu_.executeGuestFunction(preparedInit, memory, initRegisters);
+        if (initResult.status != CpuExecutionStatus::Returned) {
+            staticInitializers["status"] = std::string("FAILED_") + executionStatusName(initResult.status);
+            staticInitializers["message"] = initResult.message;
+            staticInitializers["failedAt"] = static_cast<std::uint64_t>(initFunction.entryPoint);
+            break;
+        }
+        ++initializersRan;
+    }
+    staticInitializers["ran"] = initializersRan;
+    if (initializersRan == load.initializers.size())
+        staticInitializers["status"] = "COMPLETE";
+    report["staticInitializers"] = staticInitializers;
+
     const auto result = cpu_.executeGuestFunction(prepared, memory, registers);
     functionOrigin["executionAttempted"] = result.started;
     functionOrigin["executionStatus"] = executionStatusName(result.status);
@@ -409,6 +446,45 @@ radek::Json BootAttemptRunner::run(const std::vector<std::uint8_t> &mainBinary,
     constexpr std::uint32_t kBootMainThreadFrames = 0;
     if (lifecycle_.setMainThreadServiceLimit)
         lifecycle_.setMainThreadServiceLimit(addressSpace, kBootMainThreadFrames);
+    radek::Json staticInitializers = radek::Json::object();
+    staticInitializers["count"] = static_cast<std::uint64_t>(load.initializers.size());
+    staticInitializers["status"] = "NONE";
+    std::uint64_t initializersRan = 0;
+    for (const auto initializer : load.initializers) {
+        GuestFunction initFunction;
+        initFunction.entryPoint = initializer & ~GuestAddress{1};
+        initFunction.thumb = (initializer & 1U) != 0;
+        initFunction.instructionLimit = entryInstructionBudget_;
+        initFunction.timeLimitMicros = entryTimeLimitMicros_;
+        initFunction.origin = "static-initializer";
+        PreparedGuestFunction preparedInit;
+        std::string initError;
+        if (!cpu_.prepareGuestFunction(initFunction, memory, preparedInit, initError)) {
+            staticInitializers["status"] = "PREPARATION_FAILED";
+            staticInitializers["message"] = initError;
+            break;
+        }
+        CpuRegisterState initRegisters = registers;
+        initRegisters.r[15] = initFunction.entryPoint;
+        constexpr std::uint32_t thumbStateBit = 1U << 5;
+        if (initFunction.thumb)
+            initRegisters.cpsr |= thumbStateBit;
+        else
+            initRegisters.cpsr &= ~thumbStateBit;
+        const auto initResult = cpu_.executeGuestFunction(preparedInit, memory, initRegisters);
+        if (initResult.status != CpuExecutionStatus::Returned) {
+            staticInitializers["status"] = std::string("FAILED_") + executionStatusName(initResult.status);
+            staticInitializers["message"] = initResult.message;
+            staticInitializers["failedAt"] = static_cast<std::uint64_t>(initFunction.entryPoint);
+            break;
+        }
+        ++initializersRan;
+    }
+    staticInitializers["ran"] = initializersRan;
+    if (initializersRan == load.initializers.size())
+        staticInitializers["status"] = "COMPLETE";
+    report["staticInitializers"] = staticInitializers;
+
     auto result = cpu_.executeGuestFunction(prepared, memory, registers);
     std::uint64_t totalInstructions = result.instructions;
     bool mainThreadEntryAttempted = false;

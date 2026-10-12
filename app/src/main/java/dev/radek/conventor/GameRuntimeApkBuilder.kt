@@ -556,6 +556,7 @@ internal class GameRuntimeApkBuilder(private val context: Context) {
                 })
             }
             report.put("gameRuntimeConversion", conversion)
+            TranslatedAndroidLink.record(report, translatedRuntime)
             reportContext.save(dir, report)
             finalized = true
             backupFile.delete()

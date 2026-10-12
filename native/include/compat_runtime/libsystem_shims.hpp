@@ -59,6 +59,11 @@ class ShimAdapter {
 
     void registerBindings(ShimRegistry &registry);
 
+    /** Guest-heap allocation shared with malloc and operator new. Takes the heap lock; 0 on failure. */
+    GuestAddress guestAllocate(GuestAddressSpace &memory, std::size_t size);
+    /** Guest-heap release shared with free and operator delete. Takes the heap lock. */
+    void guestRelease(GuestAddressSpace &memory, GuestAddress address);
+
     /** Observability used by tests and the boot report; never gameplay evidence. */
     std::size_t allocationCount() const;
     std::size_t freeCount() const;

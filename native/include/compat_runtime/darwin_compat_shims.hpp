@@ -59,7 +59,14 @@ class ShimAdapter {
                               std::uint32_t value);
     GuestAddress constantString(GuestAddressSpace &memory, const std::string &symbol,
                                 const std::string &value, std::string &reason);
+    // Address of a guest cell holding the constant's NSString pointer. An `NSString *const`
+    // symbol is a variable: the import slot must point at the variable, not at the string.
+    GuestAddress constantStringCell(GuestAddressSpace &memory, const std::string &symbol,
+                                    const std::string &value, std::string &reason);
     GuestAddress errorCell(GuestAddressSpace &memory, std::string &reason);
+    // Guest cell holding a constant's raw value (a CGFloat, or a CGRect/CGSize/CGAffineTransform).
+    GuestAddress valueCell(GuestAddressSpace &memory, const std::string &symbol,
+                           const std::vector<std::uint8_t> &bytes, std::string &reason);
 
     objc::ShimAdapter *strings_ = nullptr;
     GuestAddress nextCallout_ = 0xf0050000;
@@ -77,6 +84,7 @@ class ShimAdapter {
     std::map<const GuestAddressSpace *, GuestAddress> errnoCells_;
     std::map<const GuestAddressSpace *, GuestAddress> dataPages_;
     std::map<const GuestAddressSpace *, std::map<std::string, GuestAddress>> constantStrings_;
+    std::map<const GuestAddressSpace *, std::map<std::string, GuestAddress>> valueCells_;
     std::map<GuestAddress, std::map<std::uint32_t, std::uint32_t>> sourceIntState_;
     std::map<GuestAddress, std::map<std::uint32_t, std::uint32_t>> sourceFloatBits_;
     std::map<GuestAddress, std::vector<std::uint32_t>> sourceQueues_;

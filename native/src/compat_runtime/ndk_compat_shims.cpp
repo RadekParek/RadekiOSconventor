@@ -4,7 +4,9 @@
 #include "compat_runtime/ndk_import_catalog.hpp"
 #include "compat_runtime/virtual_file_system.hpp"
 
+#include <sstream>
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -25,6 +27,9 @@
 
 namespace radek::compat_runtime::ndk {
 namespace {
+
+// Darwin pthread_mutexattr type for recursive mutexes (PTHREAD_MUTEX_RECURSIVE).
+constexpr std::uint32_t kDarwinRecursiveMutexType = 2;
 
 constexpr GuestAddress kCalloutEnd = 0xf0100000U;
 constexpr std::size_t kMaximumStringBytes = 1U * 1024U * 1024U;
@@ -429,6 +434,252 @@ void ShimAdapter::registerGenericCandidate(ShimRegistry &registry, const char *s
                      });
 }
 
+namespace {
+std::atomic<std::uint64_t> gBusyMutexAttempts{0};
+std::atomic<std::uint32_t> gLastBusyMutex{0};
+} // namespace
+
+std::uint64_t liveBusyMutexAttempts() {
+    return gBusyMutexAttempts.load(std::memory_order_relaxed);
+}
+
+std::uint32_t liveLastBusyMutex() { return gLastBusyMutex.load(std::memory_order_relaxed); }
+
+GuestAddress ShimAdapter::currentGuestThreadLocked(GuestAddressSpace &memory) {
+    const auto found = pthreadFrames_.find(&memory);
+    if (found == pthreadFrames_.end() || found->second.empty())
+        return 0;
+    return found->second.back().threadToken;
+}
+
+// Releases every mutex still held by a worker that has finished or been ended.
+// Caller holds mutex_. Without this, a worker that exits while holding a lock
+// would leave the creator spinning on it forever.
+void ShimAdapter::releaseGuestMutexesLocked(GuestAddress owner, GuestAddressSpace &memory) {
+    for (auto it = guestMutexOwners_.begin(); it != guestMutexOwners_.end();) {
+        if (it->second.owner != owner) {
+            ++it;
+            continue;
+        }
+        const std::uint32_t zero = 0;
+        writeValue(memory, it->first, zero);
+        it = guestMutexOwners_.erase(it);
+    }
+}
+
+// Only a mutex initialised from a PTHREAD_MUTEX_RECURSIVE attribute nests for its
+// owner. Any other self-lock is busy, exactly as POSIX trylock reports it.
+// Locks a guest mutex. A blocking lock that is busy inside a worker parks the worker
+// (its registers are kept and it is resumed later), so the worker's work is not
+// lost. A busy trylock returns EBUSY, as POSIX requires.
+bool ShimAdapter::lockGuestMutex(CpuRegisterState &r, GuestAddressSpace &memory, bool blocking,
+                                 GuestAddress &target) {
+    target = 0;
+    std::uint32_t value = 0;
+    if (!r.r[0] || !readValue(memory, r.r[0], value)) {
+        r.r[0] = kErrnoInvalidArgument;
+        return true;
+    }
+    bool park = false;
+    PthreadFrame frame;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto self = currentGuestThreadLocked(memory);
+        auto &entry = guestMutexOwners_[r.r[0]];
+        if (value == 0) {
+            const std::uint32_t one = 1;
+            writeValue(memory, r.r[0], one);
+            entry = GuestMutexOwner{self, 1};
+            workerMutexBusyStreak_ = 0;
+            r.r[0] = 0;
+            return true;
+        }
+        const auto kind = guestMutexRecursive_.find(r.r[0]);
+        const bool recursive = kind != guestMutexRecursive_.end() && kind->second;
+        if (recursive && entry.depth > 0 && entry.owner == self) {
+            ++entry.depth;
+            r.r[0] = 0;
+            return true;
+        }
+        if (blocking && !recursive && entry.depth > 0 && entry.owner == self) {
+            ++entry.phantomLocks;
+            r.r[0] = 0;
+            return true;
+        }
+        const auto found = pthreadFrames_.find(&memory);
+        if (blocking && self != 0 && found != pthreadFrames_.end() && !found->second.empty()) {
+            frame = found->second.back();
+            found->second.pop_back();
+            if (found->second.empty())
+                pthreadFrames_.erase(found);
+            ParkedWorker parked;
+            parked.token = frame.threadToken;
+            parked.threadCell = frame.threadCell;
+            parked.registers = r;
+            parked.blocking = true;
+            parkedWorkers_[&memory].push_back(parked);
+            park = true;
+        }
+    }
+    if (park) {
+        if (endWorkerUnwindChain_)
+            endWorkerUnwindChain_(memory, frame.savedUnwindTop);
+        // Return to the creator's yield point with the creator's registers.
+        r = frame.creatorRegisters;
+        r.r[0] = frame.returnValue;
+        target = frame.callerReturnAddress;
+        return true;
+    }
+    if (!blocking)
+        noteWorkerMutexBusy(r, memory);
+    r.r[0] = kErrnoBusy;
+    return true;
+}
+
+// Resumes one parked worker from a creator yield point and retries its blocking lock.
+// If the lock is still busy the worker parks again, which returns to this yield point.
+bool ShimAdapter::resumeParkedWorker(CpuRegisterState &registers, GuestAddressSpace &memory,
+                                     GuestAddress &target, std::uint32_t returnValue,
+                                     GuestAddress preferredToken) {
+    ParkedWorker parked;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = parkedWorkers_.find(&memory);
+        if (found == parkedWorkers_.end() || found->second.empty())
+            return false;
+        auto choice = found->second.begin();
+        if (preferredToken != 0) {
+            for (auto it = found->second.begin(); it != found->second.end(); ++it) {
+                if (it->token == preferredToken) {
+                    choice = it;
+                    break;
+                }
+            }
+        }
+        parked = *choice;
+        found->second.erase(choice);
+        if (found->second.empty())
+            parkedWorkers_.erase(found);
+    }
+    const GuestAddress savedUnwindTop =
+        beginWorkerUnwindChain_ ? beginWorkerUnwindChain_(memory) : 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pthreadFrames_[&memory].push_back(PthreadFrame{registers.r[14], parked.token,
+                                                       parked.threadCell, savedUnwindTop,
+                                                       registers, returnValue});
+    }
+    CpuRegisterState worker = parked.registers;
+    GuestAddress lockTarget = 0;
+    lockGuestMutex(worker, memory, parked.blocking, lockTarget);
+    if (lockTarget != 0) {
+        // Parked again: lockGuestMutex already returned the worker's frame to the yield.
+        registers = worker;
+        target = lockTarget;
+        return true;
+    }
+    // Lock acquired: continue the worker where it blocked.
+    registers = worker;
+    target = worker.r[14];
+    return true;
+}
+
+void ShimAdapter::unlockGuestMutex(CpuRegisterState &r, GuestAddressSpace &memory) {
+    const auto address = r.r[0];
+    if (!address) {
+        r.r[0] = kErrnoInvalidArgument;
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto self = currentGuestThreadLocked(memory);
+    const auto found = guestMutexOwners_.find(address);
+    if (found != guestMutexOwners_.end() && found->second.owner == self &&
+        found->second.phantomLocks > 0) {
+        --found->second.phantomLocks;
+        r.r[0] = 0;
+        return;
+    }
+    if (found != guestMutexOwners_.end() && found->second.owner == self &&
+        found->second.depth > 1) {
+        --found->second.depth;
+        r.r[0] = 0;
+        return;
+    }
+    if (found != guestMutexOwners_.end())
+        guestMutexOwners_.erase(found);
+    const std::uint32_t zero = 0;
+    r.r[0] = writeValue(memory, address, zero) ? 0U : kErrnoInvalidArgument;
+}
+
+// Starts one deferred worker from a yield point of the creator. The creator's
+// registers are saved in a frame, so the continuation returns to the yield caller
+// with r0 = 0 once the worker has run. `onlyToken` selects a specific worker (join).
+bool ShimAdapter::startPendingPthread(CpuRegisterState &registers, GuestAddressSpace &memory,
+                                      GuestAddress &target, GuestAddress onlyToken,
+                                      std::uint32_t returnValue) {
+    PendingPthread pending;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = pendingPthreads_.find(&memory);
+        if (found == pendingPthreads_.end() || found->second.empty())
+            return false;
+        auto &queue = found->second;
+        auto it = queue.begin();
+        if (onlyToken != 0) {
+            it = std::find_if(queue.begin(), queue.end(),
+                              [onlyToken](const PendingPthread &entry) {
+                                  return entry.token == onlyToken;
+                              });
+            if (it == queue.end())
+                return false;
+        }
+        pending = *it;
+        queue.erase(it);
+        if (queue.empty())
+            pendingPthreads_.erase(found);
+    }
+    // Outside mutex_: the unwind hook is supplied by the loader and must not nest locks.
+    const GuestAddress savedUnwindTop =
+        beginWorkerUnwindChain_ ? beginWorkerUnwindChain_(memory) : 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pthreadFrames_[&memory].push_back(PthreadFrame{registers.r[14], pending.token,
+                                                       pending.threadCell, savedUnwindTop,
+                                                       registers, returnValue});
+    }
+    registers.r[0] = pending.argument;
+    registers.r[1] = 0;
+    registers.r[2] = 0;
+    registers.r[3] = 0;
+    registers.r[14] = pthreadContinuationAddress_;
+    target = pending.start;
+    return true;
+}
+
+bool ShimAdapter::noteWorkerMutexBusy(CpuRegisterState &registers, GuestAddressSpace &memory) {
+    gBusyMutexAttempts.fetch_add(1, std::memory_order_relaxed);
+    gLastBusyMutex.store(static_cast<std::uint32_t>(registers.r[0]), std::memory_order_relaxed);
+    // Long enough that a worker which is only briefly contended keeps running;
+    // short enough that a worker stuck on its creator's mutex is ended in
+    // milliseconds rather than stalling the whole boot.
+    constexpr std::uint32_t kWorkerMutexBusyLimit = 4096;
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = pthreadFrames_.find(&memory);
+    if (found == pthreadFrames_.end() || found->second.empty()) {
+        workerMutexBusyStreak_ = 0;
+        return false;
+    }
+    if (++workerMutexBusyStreak_ < kWorkerMutexBusyLimit)
+        return false;
+    workerMutexBusyStreak_ = 0;
+    ++guestThreadBusyCancellations_;
+    // Same exit path as pthread_exit: the ordinary return jumps to the
+    // continuation, which records the worker as finished and restores the
+    // creator's saved LR, so pthread_create returns to the creator.
+    registers.r[14] = pthreadContinuationAddress_;
+    return true;
+}
+
 void ShimAdapter::registerBindings(ShimRegistry &registry) {
     // ---- process/control boundaries ---------------------------------------
     registerExceptionBoundary(registry, "_abort", "ndk-abort-boundary",
@@ -814,10 +1065,25 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
                      [](CpuRegisterState &r, GuestAddressSpace &, std::string &) { r.r[0] = 0; return true; });
     registerFunction(registry, "_select", "ndk-posix-select",
                      [](CpuRegisterState &r, GuestAddressSpace &, std::string &) { r.r[0] = 0; return true; });
-    registerFunction(registry, "_sched_yield", "ndk-posix-sched-yield",
-                     [](CpuRegisterState &r, GuestAddressSpace &, std::string &) { std::this_thread::yield(); r.r[0] = 0; return true; });
-    registerFunction(registry, "_usleep", "ndk-posix-usleep",
-                     [](CpuRegisterState &r, GuestAddressSpace &, std::string &) { r.r[0] = 0; return true; });
+    registerTransferFunction(
+        registry, "_sched_yield", "ndk-posix-sched-yield",
+        [this](CpuRegisterState &r, GuestAddressSpace &memory, GuestAddress &target, std::string &) {
+            std::this_thread::yield();
+            target = 0;
+            if (resumeParkedWorker(r, memory, target) || startPendingPthread(r, memory, target, 0))
+                return true;
+            r.r[0] = 0;
+            return true;
+        });
+    registerTransferFunction(
+        registry, "_usleep", "ndk-posix-usleep",
+        [this](CpuRegisterState &r, GuestAddressSpace &memory, GuestAddress &target, std::string &) {
+            target = 0;
+            if (resumeParkedWorker(r, memory, target) || startPendingPthread(r, memory, target, 0))
+                return true;
+            r.r[0] = 0;
+            return true;
+        });
     registerFunction(registry, "_getenv", "ndk-environment-empty",
                      [](CpuRegisterState &r, GuestAddressSpace &, std::string &) { r.r[0] = 0; return true; });
     registerFunction(registry, "_clock", "ndk-time-clock",
@@ -1188,12 +1454,22 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
                          }
                          const auto frame = found->second.back();
                          found->second.pop_back();
+                         if (endWorkerUnwindChain_)
+                             endWorkerUnwindChain_(memory, frame.savedUnwindTop);
+                         // AAPCS: SP and r4-r11 / d8-d15 belong to the creator.
+                         // A normal return already matches; an ended worker may not.
+                         registers.r[13] = frame.creatorRegisters.r[13];
+                         for (std::size_t index = 4; index <= 11; ++index)
+                             registers.r[index] = frame.creatorRegisters.r[index];
+                         for (std::size_t index = 8; index <= 15; ++index)
+                             registers.d[index] = frame.creatorRegisters.d[index];
                          completedPthreads_[&memory].push_back(frame.threadToken);
+                         releaseGuestMutexesLocked(frame.threadToken, memory);
                          ++guestThreadCompletions_;
                          if (found->second.empty())
                              pthreadFrames_.erase(found);
                          registers.r[14] = frame.callerReturnAddress;
-                         registers.r[0] = 0;
+                         registers.r[0] = frame.returnValue;
                          return true;
                      });
     const auto pthreadContinuation = registry.resolve("_radek_pthread_continuation");
@@ -1216,10 +1492,9 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
                          registers.r[14] = pthreadContinuationAddress_;
                          return true;
                      });
-    registerTransferFunction(
-        registry, "_pthread_create", "ndk-pthread-create-guest-transfer",
-        [this](CpuRegisterState &registers, GuestAddressSpace &memory,
-               GuestAddress &target, std::string &reason) {
+    registerFunction(
+        registry, "_pthread_create", "ndk-pthread-create-deferred",
+        [this](CpuRegisterState &registers, GuestAddressSpace &memory, std::string &reason) {
             const auto threadCell = registers.r[0];
             const auto start = registers.r[2];
             const auto argument = registers.r[3];
@@ -1247,36 +1522,106 @@ void ShimAdapter::registerBindings(ShimRegistry &registry) {
             }
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                pthreadFrames_[&memory].push_back(
-                    PthreadFrame{registers.r[14], token, threadCell});
+                pendingPthreads_[&memory].push_back(
+                    PendingPthread{token, threadCell, start, argument});
                 ++guestThreadTransfers_;
             }
-            registers.r[0] = argument;
-            registers.r[1] = 0;
-            registers.r[2] = 0;
-            registers.r[3] = 0;
-            registers.r[14] = pthreadContinuationAddress_;
-            target = start;
+            // The creator continues at once; the worker runs at its next yield point.
+            registers.r[0] = 0;
             return true;
         });
     registerFunction(registry, "_pthread_mutex_init", "ndk-pthread-mutex-init",
-                     [](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { const std::uint32_t zero = 0; r.r[0] = r.r[0] && writeValue(memory, r.r[0], zero) ? 0U : kErrnoInvalidArgument; return true; });
+                     [this](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { std::lock_guard<std::mutex> lock(mutex_); const auto attr = r.r[1]; const auto attrType = guestMutexAttrTypes_.find(attr); guestMutexRecursive_[r.r[0]] = attr != 0 && attrType != guestMutexAttrTypes_.end() && attrType->second == kDarwinRecursiveMutexType; guestMutexOwners_.erase(r.r[0]); const std::uint32_t zero = 0; r.r[0] = r.r[0] && writeValue(memory, r.r[0], zero) ? 0U : kErrnoInvalidArgument; return true; });
     registerFunction(registry, "_pthread_mutex_destroy", "ndk-pthread-mutex-destroy",
-                     [](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { const std::uint32_t zero = 0; r.r[0] = r.r[0] && writeValue(memory, r.r[0], zero) ? 0U : kErrnoInvalidArgument; return true; });
-    registerFunction(registry, "_pthread_mutex_lock", "ndk-pthread-mutex-lock",
-                     [](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { std::uint32_t value = 0; if (!r.r[0] || !readValue(memory, r.r[0], value)) { r.r[0] = kErrnoInvalidArgument; return true; } if (value != 0) { r.r[0] = kErrnoBusy; return true; } value = 1; writeValue(memory, r.r[0], value); r.r[0] = 0; return true; });
-    registerFunction(registry, "_pthread_mutex_trylock", "ndk-pthread-mutex-trylock",
-                     [](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { std::uint32_t value = 0; if (!r.r[0] || !readValue(memory, r.r[0], value)) { r.r[0] = kErrnoInvalidArgument; return true; } if (value != 0) { r.r[0] = kErrnoBusy; return true; } value = 1; writeValue(memory, r.r[0], value); r.r[0] = 0; return true; });
+                     [this](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { std::lock_guard<std::mutex> lock(mutex_); guestMutexRecursive_.erase(r.r[0]); guestMutexOwners_.erase(r.r[0]); const std::uint32_t zero = 0; r.r[0] = r.r[0] && writeValue(memory, r.r[0], zero) ? 0U : kErrnoInvalidArgument; return true; });
+    registerTransferFunction(registry, "_pthread_mutex_lock", "ndk-pthread-mutex-lock",
+                             [this](CpuRegisterState &r, GuestAddressSpace &memory, GuestAddress &target, std::string &) { return lockGuestMutex(r, memory, true, target); });
+    registerTransferFunction(
+        registry, "_pthread_mutex_trylock", "ndk-pthread-mutex-trylock",
+        [this](CpuRegisterState &r, GuestAddressSpace &memory, GuestAddress &target, std::string &reason) {
+            const GuestAddress mutexAddress = r.r[0];
+            lockGuestMutex(r, memory, false, target);
+            if (r.r[0] != static_cast<std::uint32_t>(kErrnoBusy)) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (mainBusyMutex_ == mutexAddress) {
+                    mainBusyMutex_ = 0;
+                    mainBusyStreak_ = 0;
+                }
+                return true;
+            }
+            // A busy trylock on the main thread is a scheduling point: a real thread
+            // would keep running while the owner releases the lock. Run one parked or
+            // pending worker now. The creator still receives EBUSY when it returns.
+            bool onMainThread = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                onMainThread = currentGuestThreadLocked(memory) == 0;
+            }
+            if (!onMainThread)
+                return true;
+            target = 0;
+            // Count every busy attempt before scheduling. A worker that resumes and
+            // parks again on the same mutex is not progress, so it must still count
+            // toward the bound below.
+            // Bounded: a main thread that keeps losing the same mutex stops the run
+            // with the owner's state, instead of spinning with no frames.
+            constexpr std::uint32_t kMainThreadBusySpinLimit = 50000;
+            GuestAddress ownerToken = 0;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                const auto owner = guestMutexOwners_.find(mutexAddress);
+                if (owner != guestMutexOwners_.end())
+                    ownerToken = owner->second.owner;
+                if (mainBusyMutex_ == mutexAddress) {
+                    ++mainBusyStreak_;
+                } else {
+                    mainBusyMutex_ = mutexAddress;
+                    mainBusyStreak_ = 1;
+                }
+                if (mainBusyStreak_ >= kMainThreadBusySpinLimit) {
+                    std::ostringstream detail;
+                    detail << "main thread busy-spun " << mainBusyStreak_
+                           << " trylocks on mutex 0x" << std::hex << mutexAddress << std::dec;
+                    const auto owner = guestMutexOwners_.find(mutexAddress);
+                    if (owner != guestMutexOwners_.end())
+                        detail << " owned by guest thread token 0x" << std::hex << owner->second.owner
+                               << std::dec << " (depth " << owner->second.depth << ")";
+                    else
+                        detail << " with no recorded owner";
+                    const auto parked = parkedWorkers_.find(&memory);
+                    detail << "; parked workers " << (parked == parkedWorkers_.end() ? 0U : static_cast<unsigned>(parked->second.size()));
+                    const auto pending = pendingPthreads_.find(&memory);
+                    detail << ", pending workers " << (pending == pendingPthreads_.end() ? 0U : static_cast<unsigned>(pending->second.size()));
+                    reason = detail.str();
+                    mainBusyMutex_ = 0;
+                    mainBusyStreak_ = 0;
+                    return false;
+                }
+            }
+            // Give the owner the CPU first: it is the thread that can release the lock.
+            if (resumeParkedWorker(r, memory, target, static_cast<std::uint32_t>(kErrnoBusy),
+                                   ownerToken) ||
+                startPendingPthread(r, memory, target, 0, static_cast<std::uint32_t>(kErrnoBusy)))
+                return true;
+            r.r[0] = static_cast<std::uint32_t>(kErrnoBusy);
+            return true;
+        });
     registerFunction(registry, "_pthread_mutex_unlock", "ndk-pthread-mutex-unlock",
-                     [](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { const std::uint32_t zero = 0; r.r[0] = r.r[0] && writeValue(memory, r.r[0], zero) ? 0U : kErrnoInvalidArgument; return true; });
+                     [this](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { unlockGuestMutex(r, memory); return true; });
     registerFunction(registry, "_pthread_mutexattr_init", "ndk-pthread-mutexattr-init",
-                     [](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { const std::uint32_t zero = 0; r.r[0] = r.r[0] && writeValue(memory, r.r[0], zero) ? 0U : kErrnoInvalidArgument; return true; });
+                     [this](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { std::lock_guard<std::mutex> lock(mutex_); guestMutexAttrTypes_.erase(r.r[0]); const std::uint32_t zero = 0; r.r[0] = r.r[0] && writeValue(memory, r.r[0], zero) ? 0U : kErrnoInvalidArgument; return true; });
     registerFunction(registry, "_pthread_mutexattr_destroy", "ndk-pthread-mutexattr-destroy",
                      [](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) { const std::uint32_t zero = 0; r.r[0] = r.r[0] && writeValue(memory, r.r[0], zero) ? 0U : kErrnoInvalidArgument; return true; });
     registerFunction(registry, "_pthread_mutexattr_settype", "ndk-pthread-mutexattr-settype",
-                     [](CpuRegisterState &r, GuestAddressSpace &, std::string &) { r.r[0] = 0; return true; });
-    registerFunction(registry, "_pthread_join", "ndk-pthread-join-guest-worker",
-                     [this](CpuRegisterState &r, GuestAddressSpace &memory, std::string &) {
+                     [this](CpuRegisterState &r, GuestAddressSpace &, std::string &) { std::lock_guard<std::mutex> lock(mutex_); guestMutexAttrTypes_[r.r[0]] = r.r[1]; r.r[0] = 0; return true; });
+    registerTransferFunction(
+        registry, "_pthread_join", "ndk-pthread-join-guest-worker",
+        [this](CpuRegisterState &r, GuestAddressSpace &memory, GuestAddress &target, std::string &) {
+                         target = 0;
+                         // A worker that has not started yet is run now, and join returns
+                         // to the caller once it has finished.
+                         if (resumeParkedWorker(r, memory, target) || startPendingPthread(r, memory, target, r.r[0]))
+                             return true;
                          std::lock_guard<std::mutex> lock(mutex_);
                          auto found = completedPthreads_.find(&memory);
                          if (found == completedPthreads_.end()) {
@@ -1388,6 +1733,19 @@ std::uint64_t ShimAdapter::guestThreadTransferCount() const noexcept {
 std::uint64_t ShimAdapter::guestThreadCompletionCount() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return guestThreadCompletions_;
+}
+
+void ShimAdapter::attachWorkerUnwindChain(
+    std::function<GuestAddress(GuestAddressSpace &)> begin,
+    std::function<void(GuestAddressSpace &, GuestAddress)> end) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    beginWorkerUnwindChain_ = std::move(begin);
+    endWorkerUnwindChain_ = std::move(end);
+}
+
+std::uint64_t ShimAdapter::guestThreadBusyCancellationCount() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return guestThreadBusyCancellations_;
 }
 
 std::uint64_t ShimAdapter::genericCallCount() const noexcept {

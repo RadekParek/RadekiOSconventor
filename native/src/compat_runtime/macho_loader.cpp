@@ -1724,6 +1724,22 @@ MachOLoadReport loadImpl(const std::vector<std::uint8_t> &mainBinary,
         report.initialRegisters = image.registers;
         report.initialRegisters.r[15] = image.entryPoint;
 
+        for (const auto &segment : image.segments) {
+            if (!segment.mapped)
+                continue;
+            for (const auto &section : segment.sections) {
+                if (section.name != "__mod_init_func")
+                    continue;
+                const auto base = addGuestAddress(section.address, slide, "static initializer section");
+                for (std::uint32_t offset = 0; offset + sizeof(std::uint32_t) <= section.size;
+                     offset += sizeof(std::uint32_t)) {
+                    std::uint32_t value = 0;
+                    if (addressSpace.read(base + offset, &value, sizeof(value)) && value != 0)
+                        report.initializers.push_back(static_cast<GuestAddress>(value));
+                }
+            }
+        }
+
         std::vector<GuestImageSection> guestSections;
         for (const auto &segment : image.segments) {
             if (!segment.mapped)

@@ -1198,6 +1198,8 @@ radek_Boolean radek_compat_CGRectIntersectsRect(radek_CGRect left, radek_CGRect 
 radek_Boolean radek_compat_CGRectIsEmpty(radek_CGRect rect);
 radek_Boolean radek_compat_CGRectIsNull(radek_CGRect rect);
 radek_CGRect radek_compat_CGRectOffset(radek_CGRect rect, float dx, float dy);
+radek_CGRect radek_compat_CGRectInset(radek_CGRect rect, float dx, float dy);
+radek_Boolean radek_compat_CGRectEqualToRect(radek_CGRect left, radek_CGRect right);
 void radek_compat_CCHmac(radek_CCHmacAlgorithm algorithm, const void *key, uintptr_t keyLength, const void *data, uintptr_t dataLength, void *macOut);
 void radek_compat_CCHmacInit(radek_CCHmacContext *context, radek_CCHmacAlgorithm algorithm, const void *key, uintptr_t keyLength);
 void radek_compat_CCHmacUpdate(radek_CCHmacContext *context, const void *data, uintptr_t dataLength);
@@ -2212,6 +2214,8 @@ radek_NSUncaughtExceptionHandler radek_compat_NSGetUncaughtExceptionHandler(
     X("_CGRectIsEmpty", radek_compat_CGRectIsEmpty) \
     X("_CGRectIsNull", radek_compat_CGRectIsNull) \
     X("_CGRectOffset", radek_compat_CGRectOffset) \
+    X("_CGRectInset", radek_compat_CGRectInset) \
+    X("_CGRectEqualToRect", radek_compat_CGRectEqualToRect) \
     X("_CCHmac", radek_compat_CCHmac) \
     X("_CCHmacInit", radek_compat_CCHmacInit) \
     X("_CCHmacUpdate", radek_compat_CCHmacUpdate) \

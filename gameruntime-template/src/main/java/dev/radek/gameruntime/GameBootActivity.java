@@ -1,6 +1,12 @@
 package dev.radek.gameruntime;
 
 import android.app.Activity;
+import android.content.ContentResolver;
+import android.content.ContentValues;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.content.pm.ActivityInfo;
 import android.content.res.AssetManager;
 import android.graphics.Bitmap;
@@ -170,13 +176,20 @@ public final class GameBootActivity extends Activity {
     /** Queues a host touch for the guest run loop; returns false when idle. */
     private static native boolean postTouchEvent(int action, float x, float y);
 
+    /** Set when the renderer progress poll starts; used to time the first presented frame. */
+    private long rendererPollStartMillis = 0L;
+    /** Milliseconds from guest start to the first presented frame, or -1 until one is presented. */
+    private long firstFrameAfterMillis = -1L;
+
     private final Runnable rendererProgressPoll = new Runnable() {
         @Override
         public void run() {
             if (destroyed || bootFinished || rendererStatusView == null) return;
             String message;
+            String progressText = null;
             try {
-                JSONObject progress = new JSONObject(getRendererProgress());
+                progressText = getRendererProgress();
+                JSONObject progress = new JSONObject(progressText);
                 boolean glesLoaded = progress.optBoolean("driverGlesLoaded", false);
                 boolean eglLoaded = progress.optBoolean("driverEglLoaded", false);
                 boolean drawableReady = progress.optBoolean("drawableReady", false);
@@ -185,17 +198,30 @@ public final class GameBootActivity extends Activity {
                 long forwardedCalls = progress.optLong("forwardedCalls", 0);
                 long refusedCalls = progress.optLong("refusedCalls", 0);
                 long frames = progress.optLong("framesPresented", 0);
+                long now = System.currentTimeMillis();
+                if (firstFrameAfterMillis < 0 && frames > 0 && rendererPollStartMillis > 0)
+                    firstFrameAfterMillis = now - rendererPollStartMillis;
                 String counters = "GL calls " + guestCalls + " · driver calls " + forwardedCalls
                         + " · refused " + refusedCalls;
+                long imports = progress.optLong("guestImportCalls", 0);
+                String lastImport = progress.optString("lastGuestImport", "none");
+                long busyMutex = progress.optLong("busyMutexAttempts", 0);
+                String importSuffix = " · guest imports " + imports + " · last import "
+                        + (lastImport.isEmpty() ? "none" : lastImport)
+                        + " · busy mutex waits " + busyMutex + " at "
+                        + progress.optString("lastBusyMutex", "none");
+                String lastNote = progress.optString("lastNote", "none");
+                String noteSuffix = lastNote.equals("none") || lastNote.isEmpty()
+                        ? "" : " · last note: " + lastNote;
                 if (!glesLoaded || !eglLoaded) {
                     message = "Renderer not ready · GLES " + (glesLoaded ? "loaded" : "missing")
                             + " · EGL " + (eglLoaded ? "loaded" : "missing")
                             + " · no frame verified · " + counters;
                 } else if (!drawableReady) {
                     message = "Renderer waiting · EGL/GLES loaded, drawable not ready"
-                            + " · no frame verified · " + counters;
+                            + " · no frame verified · " + counters + importSuffix + noteSuffix;
                 } else if (frames == 0) {
-                    message = "Renderer waiting · no successful EGL swap yet · " + counters;
+                    message = "Renderer waiting · no successful EGL swap yet · " + counters + importSuffix + noteSuffix;
                 } else if (!windowSurface) {
                     message = "Renderer is offscreen · " + frames
                             + " EGL swap(s) to a pbuffer, not this screen · image/gameplay unverified";
@@ -203,9 +229,12 @@ public final class GameBootActivity extends Activity {
                     message = "Renderer · " + frames
                             + " EGL frame(s) submitted to the Android surface · image/gameplay unverified";
                 }
+                if (firstFrameAfterMillis >= 0)
+                    message += " · first frame after " + (firstFrameAfterMillis / 1000.0) + " s";
             } catch (Throwable error) {
                 message = "Live EGL/GLES status unavailable · " + error.getClass().getSimpleName();
             }
+            if (progressText != null) persistRuntimeProgress(progressText);
             rendererStatusView.setText(message);
             mainHandler.postDelayed(this, 1000L);
         }
@@ -229,6 +258,7 @@ public final class GameBootActivity extends Activity {
             public void run() {
                 if (destroyed || bootFinished || rendererStatusView == null) return;
                 rendererStatusView.setVisibility(View.VISIBLE);
+                if (rendererPollStartMillis == 0L) rendererPollStartMillis = System.currentTimeMillis();
                 mainHandler.removeCallbacks(rendererProgressPoll);
                 mainHandler.post(rendererProgressPoll);
             }
@@ -430,6 +460,136 @@ public final class GameBootActivity extends Activity {
         }
     }
 
+    private void copyDiagnosticsToClipboard() {
+        StringBuilder text = new StringBuilder();
+        if (rendererStatusView != null) text.append(rendererStatusView.getText()).append('\n');
+        try {
+            text.append(getRendererProgress()).append('\n');
+        } catch (Throwable error) {
+            text.append("renderer progress unavailable: ").append(error).append('\n');
+        }
+        if (appDataRoot != null) {
+            File report = new File(new File(appDataRoot, "diagnostics"), "runtime-report.json");
+            if (report.isFile()) {
+                try (FileInputStream input = new FileInputStream(report)) {
+                    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+                    byte[] buffer = new byte[8192];
+                    int read;
+                    while ((read = input.read(buffer)) != -1) bytes.write(buffer, 0, read);
+                    text.append(bytes.toString("UTF-8"));
+                } catch (IOException error) {
+                    text.append("runtime-report.json unreadable: ").append(error);
+                }
+            } else {
+                text.append("runtime-report.json is written only when the run ends\n");
+                File progress = new File(new File(appDataRoot, "diagnostics"), "runtime-progress.json");
+                if (progress.isFile()) {
+                    try (FileInputStream input = new FileInputStream(progress)) {
+                        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+                        byte[] buffer = new byte[8192];
+                        int read;
+                        while ((read = input.read(buffer)) != -1) bytes.write(buffer, 0, read);
+                        text.append("live runtime-progress.json:\n").append(bytes.toString("UTF-8"));
+                    } catch (IOException error) {
+                        text.append("runtime-progress.json unreadable: ").append(error);
+                    }
+                }
+            }
+        }
+        android.content.ClipboardManager clipboard =
+                (android.content.ClipboardManager) getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+        if (clipboard != null) {
+            clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Angry Birds runtime diagnostics", text.toString()));
+            android.widget.Toast.makeText(this, "Diagnostics copied to clipboard", android.widget.Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /**
+     * Writes the latest live renderer/runtime snapshot to diagnostics/runtime-progress.json.
+     * runtime-report.json is only written when the whole run ends, so this file is what shows
+     * progress while a run is still in flight. Failures are logged, never thrown.
+     */
+    private void persistRuntimeProgress(String progressText) {
+        if (appDataRoot == null) return;
+        try {
+            JSONObject snapshot = new JSONObject(progressText);
+            snapshot.put("androidElapsedMillis", System.currentTimeMillis() - rendererPollStartMillis);
+            snapshot.put("firstFrameAfterMillis", firstFrameAfterMillis);
+            snapshot.put("updatedAtMillis", System.currentTimeMillis());
+            File directory = new File(appDataRoot, "diagnostics");
+            if (!directory.isDirectory() && !directory.mkdirs()) return;
+            File target = new File(directory, "runtime-progress.json");
+            File temporary = new File(directory, "runtime-progress.json.tmp");
+            try (FileOutputStream output = new FileOutputStream(temporary, false)) {
+                output.write(snapshot.toString(2).getBytes(StandardCharsets.UTF_8));
+            }
+            if (!temporary.renameTo(target)) {
+                // renameTo can fail when the target exists on some filesystems; retry once.
+                if (target.exists() && !target.delete()) return;
+                temporary.renameTo(target);
+            }
+            long now = System.currentTimeMillis();
+            if (now - lastProgressMirrorMillis >= 2000) {
+                lastProgressMirrorMillis = now;
+                mirrorToDownloads("runtime-progress.json", snapshot.toString(2));
+            }
+        } catch (Throwable error) {
+            Log.w(LOG_TAG, "Could not persist the live runtime progress", error);
+        }
+    }
+
+    /** Folder inside Downloads where the diagnostics copies are kept. */
+    private static final String DOWNLOADS_SUBFOLDER = "RadekiDiagnostics";
+    private long lastProgressMirrorMillis = 0;
+
+    /**
+     * Copies a diagnostics file to Downloads/RadekiDiagnostics so it can be opened
+     * from the Files app without adb. Android 10+ uses MediaStore (no permission);
+     * Android 8-9 use the app's external Downloads folder. Replaces any earlier copy
+     * with the same name. Failures are logged, never thrown.
+     */
+    private void mirrorToDownloads(String name, String text) {
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                ContentResolver resolver = getContentResolver();
+                String relative = Environment.DIRECTORY_DOWNLOADS + "/" + DOWNLOADS_SUBFOLDER;
+                String selection = MediaStore.MediaColumns.DISPLAY_NAME + "=? AND "
+                        + MediaStore.MediaColumns.RELATIVE_PATH + "=?";
+                String[] args = {name, relative + "/"};
+                try (Cursor cursor = resolver.query(MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                        new String[] {MediaStore.MediaColumns._ID}, selection, args, null)) {
+                    while (cursor != null && cursor.moveToNext()) {
+                        Uri old = Uri.withAppendedPath(MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                                String.valueOf(cursor.getLong(0)));
+                        resolver.delete(old, null, null);
+                    }
+                }
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                values.put(MediaStore.MediaColumns.MIME_TYPE, "application/json");
+                values.put(MediaStore.MediaColumns.RELATIVE_PATH, relative + "/");
+                values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+                Uri uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                if (uri == null) return;
+                try (OutputStream output = resolver.openOutputStream(uri, "wt")) {
+                    if (output != null) output.write(bytes);
+                }
+                values.clear();
+                values.put(MediaStore.MediaColumns.IS_PENDING, 0);
+                resolver.update(uri, values, null, null);
+            } else {
+                File dir = new File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), DOWNLOADS_SUBFOLDER);
+                if (!dir.isDirectory() && !dir.mkdirs()) return;
+                try (FileOutputStream output = new FileOutputStream(new File(dir, name), false)) {
+                    output.write(bytes);
+                }
+            }
+        } catch (Throwable error) {
+            Log.w(LOG_TAG, "Could not copy " + name + " to Downloads", error);
+        }
+    }
+
     private void persistRuntimeReport(String reportText) {
         if (reportText == null || reportText.length() > MAX_RUNTIME_REPORT_BYTES) {
             appendLine("Runtime report was not saved because it exceeded the report-size limit.");
@@ -440,6 +600,7 @@ public final class GameBootActivity extends Activity {
         try (FileOutputStream output = new FileOutputStream(target, false)) {
             output.write(reportText.getBytes(StandardCharsets.UTF_8));
             appendLine("Detailed runtime report saved: " + target.getAbsolutePath());
+            mirrorToDownloads("runtime-report.json", reportText);
         } catch (IOException error) {
             appendLine("Runtime report could not be saved: " + error);
         }
@@ -1025,6 +1186,15 @@ public final class GameBootActivity extends Activity {
         rendererStatusView.setPadding(dp(10), dp(7), dp(10), dp(7));
         rendererStatusView.setText("Renderer status pending · gameplay not verified");
         rendererStatusView.setVisibility(View.GONE);
+        // Long-press copies the live renderer state and any saved runtime report,
+        // so the diagnostics can be pasted out of the app without a computer.
+        rendererStatusView.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View view) {
+                copyDiagnosticsToClipboard();
+                return true;
+            }
+        });
         FrameLayout.LayoutParams rendererStatusParams = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
         rendererStatusParams.setMargins(dp(8), 0, dp(8), dp(8));

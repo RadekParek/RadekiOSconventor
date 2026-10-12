@@ -17,6 +17,7 @@
 #include "compat_runtime/cpu.hpp"
 #include "compat_runtime/darwin_compat_shims.hpp"
 #include "compat_runtime/gles_shims.hpp"
+#include "compat_runtime/cxx_string_shims.hpp"
 #include "compat_runtime/libsystem_shims.hpp"
 #include "compat_runtime/objc_shims.hpp"
 #include "compat_runtime/runner.hpp"
@@ -110,8 +111,18 @@ int main(int argc, char **argv) {
         radek::compat_runtime::darwin_compat::ShimAdapter darwinShims(&objcShims);
         objcShims.registerBindings(shims);
         libsystemShims.registerBindings(shims);
+        radek::compat_runtime::cxx_string::ShimAdapter cxxStringShims(&libsystemShims);
+        cxxStringShims.registerBindings(shims);
         audioShims.registerBindings(shims);
         sjljUnwind.registerBindings(shims);
+        ndkShims.attachWorkerUnwindChain(
+            [&sjljUnwind](radek::compat_runtime::GuestAddressSpace &memory) {
+                return sjljUnwind.beginThreadChain(memory);
+            },
+            [&sjljUnwind](radek::compat_runtime::GuestAddressSpace &memory,
+                               radek::compat_runtime::GuestAddress savedTop) {
+                sjljUnwind.endThreadChain(memory, savedTop);
+            });
         compilerRuntime.registerBindings(shims);
         cxxAbi.registerBindings(shims);
         glesForwarder.registerBindings(shims);
@@ -199,6 +210,7 @@ int main(int argc, char **argv) {
             providers["ndkFallbackCallsObserved"] = ndkShims.callCount();
             providers["guestPthreadTransfersObserved"] = ndkShims.guestThreadTransferCount();
             providers["guestPthreadCompletionsObserved"] = ndkShims.guestThreadCompletionCount();
+            providers["guestPthreadBusyCancellations"] = ndkShims.guestThreadBusyCancellationCount();
             providers["genericNdkCallsObserved"] = ndkShims.genericCallCount();
             providers["genericNdkProviderCount"] = static_cast<std::uint64_t>(
                 ndkShims.genericProviderCount());

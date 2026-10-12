@@ -312,6 +312,28 @@ void testCxxOperatorAllocators() {
     CHECK(harness.call("__ZdlPv", 0) == 0);
 }
 
+void testOSAtomicAnd32OrigBarrier() {
+    Harness harness;
+    const GuestAddress word = kDataBase + 0x40;
+    const std::uint32_t initial = 0xF0F0F0F0u;
+    CHECK(harness.memory.write(word, &initial, sizeof(initial)));
+    // Returns the value before the operation and stores (old & mask).
+    CHECK(harness.call("_OSAtomicAnd32OrigBarrier", 0x0FF00FF0u, word) == 0xF0F0F0F0u);
+    std::uint32_t stored = 0;
+    CHECK(harness.memory.read(word, &stored, sizeof(stored)));
+    CHECK(stored == (0xF0F0F0F0u & 0x0FF00FF0u));
+    // A second call sees the stored value as the old value.
+    CHECK(harness.call("_OSAtomicAnd32OrigBarrier", 0xFFFFFFFFu, word) == stored);
+    // An unmapped address fails closed instead of reporting a fake result.
+    bool threw = false;
+    try {
+        harness.call("_OSAtomicAnd32OrigBarrier", 0xFFu, 0x90000u);
+    } catch (const std::runtime_error &) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
 void testUnregisteredSymbolsStillFailClosed() {
     Harness harness;
     CHECK(!harness.registry.resolve("_printf").has_value());
@@ -328,7 +350,7 @@ void testUnregisteredSymbolsStillFailClosed() {
         if (binding.library == "libSystem.B.dylib")
             ++registered;
     }
-    CHECK(registered == 44);
+    CHECK(registered == 45);
 }
 
 } // namespace
@@ -341,6 +363,7 @@ int main() {
         testSyntheticBundleFiles();
         testGuestHeapAllocator();
         testCxxOperatorAllocators();
+        testOSAtomicAnd32OrigBarrier();
         testUnregisteredSymbolsStillFailClosed();
     } catch (const std::exception &error) {
         std::fprintf(stderr, "compat-runtime libsystem test failed: %s\n", error.what());
