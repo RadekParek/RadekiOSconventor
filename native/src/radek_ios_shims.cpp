@@ -4586,143 +4586,148 @@ extern "C" uintptr_t radek_compat_AudioServicesDisposeSystemSoundID(uintptr_t a0
 }
 #endif
 
+// Legacy AudioFile / ExtAudioFile / AudioQueue entry points have no real
+// implementation. They report failure (-1) instead of pretending success, so
+// guest code cannot silently run without audio.
+static constexpr uintptr_t kRadekAudioUnimplementedStatus = static_cast<uintptr_t>(-1);
+
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_AudioFileOpenURL)
 extern "C" uintptr_t radek_compat_AudioFileOpenURL(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0u;
+    return kRadekAudioUnimplementedStatus;
 }
 #endif
 
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_AudioFileClose)
 extern "C" uintptr_t radek_compat_AudioFileClose(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0u;
+    return kRadekAudioUnimplementedStatus;
 }
 #endif
 
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_AudioFileGetProperty)
 extern "C" uintptr_t radek_compat_AudioFileGetProperty(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0u;
+    return kRadekAudioUnimplementedStatus;
 }
 #endif
 
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_AudioFileReadBytes)
 extern "C" uintptr_t radek_compat_AudioFileReadBytes(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0u;
+    return kRadekAudioUnimplementedStatus;
 }
 #endif
 
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_AudioFileReadPackets)
 extern "C" uintptr_t radek_compat_AudioFileReadPackets(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0u;
+    return kRadekAudioUnimplementedStatus;
 }
 #endif
 
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_ExtAudioFileOpenURL)
 extern "C" uintptr_t radek_compat_ExtAudioFileOpenURL(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0u;
+    return kRadekAudioUnimplementedStatus;
 }
 #endif
 
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_ExtAudioFileDispose)
 extern "C" uintptr_t radek_compat_ExtAudioFileDispose(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0u;
+    return kRadekAudioUnimplementedStatus;
 }
 #endif
 
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_ExtAudioFileGetProperty)
 extern "C" uintptr_t radek_compat_ExtAudioFileGetProperty(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0u;
+    return kRadekAudioUnimplementedStatus;
 }
 #endif
 
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_ExtAudioFileSetProperty)
 extern "C" uintptr_t radek_compat_ExtAudioFileSetProperty(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0u;
+    return kRadekAudioUnimplementedStatus;
 }
 #endif
 
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_ExtAudioFileRead)
 extern "C" uintptr_t radek_compat_ExtAudioFileRead(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0u;
+    return kRadekAudioUnimplementedStatus;
 }
 #endif
 
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_ExtAudioFileSeek)
 extern "C" uintptr_t radek_compat_ExtAudioFileSeek(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0u;
+    return kRadekAudioUnimplementedStatus;
 }
 #endif
 
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_AudioQueueNewOutput)
 extern "C" uintptr_t radek_compat_AudioQueueNewOutput(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0u;
+    return kRadekAudioUnimplementedStatus;
 }
 #endif
 
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_AudioQueueAllocateBuffer)
 extern "C" uintptr_t radek_compat_AudioQueueAllocateBuffer(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0u;
+    return kRadekAudioUnimplementedStatus;
 }
 #endif
 
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_AudioQueueFreeBuffer)
 extern "C" uintptr_t radek_compat_AudioQueueFreeBuffer(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0u;
+    return kRadekAudioUnimplementedStatus;
 }
 #endif
 
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_AudioQueueEnqueueBuffer)
 extern "C" uintptr_t radek_compat_AudioQueueEnqueueBuffer(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0u;
+    return kRadekAudioUnimplementedStatus;
 }
 #endif
 
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_AudioQueueStart)
 extern "C" uintptr_t radek_compat_AudioQueueStart(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0u;
+    return kRadekAudioUnimplementedStatus;
 }
 #endif
 
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_AudioQueuePause)
 extern "C" uintptr_t radek_compat_AudioQueuePause(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0u;
+    return kRadekAudioUnimplementedStatus;
 }
 #endif
 
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_AudioQueueStop)
 extern "C" uintptr_t radek_compat_AudioQueueStop(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0u;
+    return kRadekAudioUnimplementedStatus;
 }
 #endif
 
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_AudioQueueDispose)
 extern "C" uintptr_t radek_compat_AudioQueueDispose(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0u;
+    return kRadekAudioUnimplementedStatus;
 }
 #endif
 
 #if !defined(RADEK_API_REPLACEMENTS_ONLY) || defined(RADEK_API_radek_compat_AudioQueueSetParameter)
 extern "C" uintptr_t radek_compat_AudioQueueSetParameter(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0u;
+    return kRadekAudioUnimplementedStatus;
 }
 #endif
 
