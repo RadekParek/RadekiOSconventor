@@ -155,7 +155,7 @@ jobs:
               ("guest instructions executed", probe["instructions"] > 0),
               # The Darwin-only imports are served by the translation layer,
               # never by invented Android exports.
-              ("Darwin-only translation layer registered", probe["darwinCompatBoundSymbols"] == 53),
+              ("Darwin-only translation layer registered", probe["darwinCompatBoundSymbols"] == 102),
               # The boot must stop at a *documented* boundary: either the first
               # unimplemented import it touches (trap) or one of its bounded
               # execution limits when the guest stays inside its own code. The
